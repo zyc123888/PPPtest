@@ -1,6 +1,7 @@
 .DS_Store
 .idea/
 .venv/
+backend/venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -13,4 +14,4 @@ node_modules/
 playwright-report/
 test-results/
 .env
-
+*.zip
