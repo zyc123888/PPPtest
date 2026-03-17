@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="test-plan-9" tests="2" failures="1" errors="0" skipped="0" time="1.011"><testcase classname="API" name="示例健康检查接口" time="0.508"></testcase><testcase classname="UI" name="示例前端首页巡检" time="0.503"><failure message="执行异常: BrowserType.launch: Executable doesn't exist at /Users/zhangyongcheng/Library/Caches/ms-playwright/chromium_headless_shell-1181/chrome-mac/headless_shell
+╔════════════════════════════════════════════════════════════╗
+║ Looks like Playwright was just installed or updated.       ║
+║ Please run the following command to download new browsers: ║
+║                                                            ║
+║     playwright install                                     ║
+║                                                            ║
+║ &lt;3 Playwright Team                                         ║
+╚════════════════════════════════════════════════════════════╝">执行异常: BrowserType.launch: Executable doesn't exist at /Users/zhangyongcheng/Library/Caches/ms-playwright/chromium_headless_shell-1181/chrome-mac/headless_shell
+╔════════════════════════════════════════════════════════════╗
+║ Looks like Playwright was just installed or updated.       ║
+║ Please run the following command to download new browsers: ║
+║                                                            ║
+║     playwright install                                     ║
+║                                                            ║
+║ &lt;3 Playwright Team                                         ║
+╚════════════════════════════════════════════════════════════╝</failure></testcase></testsuite>

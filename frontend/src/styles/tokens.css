@@ -1,0 +1,41 @@
+:root {
+  --space-8: 8px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+
+  --radius-6: 6px;
+  --radius-12: 12px;
+
+  --font-14: 14px;
+  --font-12: 12px;
+  --font-18: 18px;
+  --font-22: 22px;
+
+  --color-primary: #0f766e;
+  --color-success: #16a34a;
+  --color-warning: #f59e0b;
+  --color-danger: #dc2626;
+  --color-bg: #f2f4f7;
+  --color-text: #0f172a;
+  --color-text-secondary: #64748b;
+  --color-border: #e2e8f0;
+  --color-surface: #ffffff;
+
+  --shadow-soft: 0 24px 60px rgba(15, 23, 42, 0.12);
+
+  --app-header-height: 56px;
+  --app-sidebar-width: 220px;
+  --app-sidebar-width-collapsed: 64px;
+
+  --el-color-primary: var(--color-primary);
+  --el-color-success: var(--color-success);
+  --el-color-warning: var(--color-warning);
+  --el-color-danger: var(--color-danger);
+  --el-border-radius-base: var(--radius-6);
+  --el-border-radius-small: var(--radius-6);
+  --el-font-size-base: var(--font-14);
+  --el-bg-color: #ffffff;
+  --el-fill-color-blank: #ffffff;
+  --el-border-color: var(--color-border);
+}

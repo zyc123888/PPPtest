@@ -1,0 +1,36 @@
+{
+  "envId": "default",
+  "region": "ap-shanghai",
+  "functionRoot": "./backend",
+  "functions": [
+    {
+      "name": "test-platform-api",
+      "timeout": 20,
+      "envVariables": {
+        "DATABASE_URL": "mysql+pymysql://username:password@host:3306/test_platform",
+        "REDIS_URL": "redis://host:6379/0",
+        "CELERY_BROKER_URL": "redis://host:6379/0",
+        "CELERY_RESULT_BACKEND": "redis://host:6379/0"
+      },
+      "runtime": "Python3.8",
+      "handler": "scf_handler.handler",
+      "memorySize": 512,
+      "installDependency": true,
+      "ignore": ["node_modules", ".git"]
+    }
+  ],
+  "hosting": {
+    "public": "./frontend/dist",
+    "ignore": ["node_modules", ".git"],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      },
+      {
+        "source": "/api/**",
+        "function": "test-platform-api"
+      }
+    ]
+  }
+}

@@ -1,0 +1,251 @@
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ORMBaseModel(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectCreate(BaseModel):
+    workspace_id: int | None = None
+    name: str = Field(..., min_length=2, max_length=100)
+    description: str | None = None
+    base_url: str = Field(..., min_length=5, max_length=255)
+
+
+class ProjectRead(ORMBaseModel):
+    id: int
+    workspace_id: int
+    name: str
+    description: str | None = None
+    base_url: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class APICaseCreate(BaseModel):
+    project_id: int
+    name: str = Field(..., min_length=2, max_length=120)
+    method: str = Field(default="GET", min_length=3, max_length=10)
+    path: str = Field(..., min_length=1, max_length=255)
+    headers_json: dict | None = None
+    body_json: dict | None = None
+    expected_status: int = 200
+
+
+class APICaseRead(ORMBaseModel):
+    id: int
+    project_id: int
+    name: str
+    method: str
+    path: str
+    headers_json: dict | None = None
+    body_json: dict | None = None
+    expected_status: int
+    created_at: datetime | None = None
+
+
+class UICaseCreate(BaseModel):
+    project_id: int
+    name: str = Field(..., min_length=2, max_length=120)
+    target_url: str = Field(..., min_length=5, max_length=255)
+    steps_json: list[dict]
+    expect_text: str = Field(..., min_length=1, max_length=255)
+
+
+class UICaseRead(ORMBaseModel):
+    id: int
+    project_id: int
+    name: str
+    target_url: str
+    steps_json: list[dict]
+    expect_text: str
+    created_at: datetime | None = None
+
+
+class TestRunRead(ORMBaseModel):
+    id: int
+    project_id: int
+    environment_id: int | None = None
+    plan_run_id: int | None = None
+    case_type: str
+    case_id: int
+    case_name: str
+    status: str
+    task_id: str | None = None
+    summary: str | None = None
+    duration_ms: int | None = None
+    request_payload: dict | None = None
+    response_payload: dict | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class DashboardSummary(BaseModel):
+    workspace_count: int
+    project_count: int
+    api_case_count: int
+    ui_case_count: int
+    environment_count: int
+    plan_count: int
+    run_count: int
+    plan_run_count: int
+    recent_runs: list[TestRunRead]
+
+
+class WorkspaceCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100)
+    description: str | None = None
+
+
+class WorkspaceRead(ORMBaseModel):
+    id: int
+    name: str
+    description: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class EnvironmentCreate(BaseModel):
+    project_id: int
+    name: str = Field(..., min_length=2, max_length=120)
+    base_url: str = Field(..., min_length=5, max_length=255)
+    headers_json: dict | None = None
+    variables_json: dict | None = None
+
+
+class EnvironmentRead(ORMBaseModel):
+    id: int
+    project_id: int
+    name: str
+    base_url: str
+    headers_json: dict | None = None
+    variables_json: dict | None = None
+    created_at: datetime | None = None
+
+
+class TestPlanCreate(BaseModel):
+    project_id: int
+    name: str = Field(..., min_length=2, max_length=120)
+    description: str | None = None
+
+
+class TestPlanRead(ORMBaseModel):
+    id: int
+    project_id: int
+    name: str
+    description: str | None = None
+    status: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class TestPlanCaseCreate(BaseModel):
+    case_type: str = Field(..., pattern="^(API|UI)$")
+    case_id: int
+    order_index: int = 1
+
+
+class TestPlanCaseRead(ORMBaseModel):
+    id: int
+    plan_id: int
+    case_type: str
+    case_id: int
+    case_name: str
+    order_index: int
+    created_at: datetime | None = None
+
+
+class TestPlanRunCreate(BaseModel):
+    environment_id: int | None = None
+
+
+class TestPlanRunRead(ORMBaseModel):
+    id: int
+    plan_id: int
+    project_id: int
+    environment_id: int | None = None
+    status: str
+    summary: str | None = None
+    total_count: int
+    pass_count: int
+    fail_count: int
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_ms: int | None = None
+    report_json_path: str | None = None
+    report_junit_path: str | None = None
+    report_generated_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class TestPlanRunView(TestPlanRunRead):
+    plan_name: str
+    project_name: str
+    environment_name: str | None = None
+
+
+class ReportDetail(BaseModel):
+    plan_run: TestPlanRunRead
+    test_runs: list[TestRunRead]
+
+
+class UserCreate(BaseModel):
+    username: str = Field(..., min_length=2, max_length=80)
+    password: str | None = Field(default=None, min_length=6, max_length=64)
+    display_name: str | None = None
+    role: str = Field(default="tester", min_length=2, max_length=50)
+
+
+class UserRead(ORMBaseModel):
+    id: int
+    username: str
+    display_name: str | None = None
+    role: str
+    status: str
+    created_at: datetime | None = None
+    last_login_at: datetime | None = None
+
+
+class UserUpdate(BaseModel):
+    display_name: str | None = None
+    role: str | None = Field(default=None, min_length=2, max_length=50)
+    status: str | None = Field(default=None, min_length=2, max_length=20)
+    password: str | None = Field(default=None, min_length=6, max_length=64)
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(..., min_length=2, max_length=80)
+    password: str = Field(..., min_length=6, max_length=64)
+
+
+class AuthLoginResponse(ORMBaseModel):
+    token: str
+    user: UserRead
+
+
+class SystemHealth(BaseModel):
+    app_status: str
+    database: str
+    redis: str
+    checked_at: datetime
+
+
+class TextPayload(BaseModel):
+    payload: str
+
+
+class TimestampPayload(BaseModel):
+    payload: str
+
+
+class ToolResult(BaseModel):
+    result: str
+
+
+class ExecutionTrigger(BaseModel):
+    environment_id: int | None = None

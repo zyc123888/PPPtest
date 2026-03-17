@@ -1,0 +1,40 @@
+{
+  "plan_run": {
+    "id": 1,
+    "plan_id": 3,
+    "project_id": 1,
+    "environment_id": null,
+    "status": "FAILED",
+    "summary": "总计 1，成功 0，失败 1",
+    "total_count": 1,
+    "pass_count": 0,
+    "fail_count": 1,
+    "duration_ms": 1856,
+    "started_at": "2026-03-12T04:18:20.911124",
+    "finished_at": "2026-03-12T04:18:22.754947+00:00",
+    "created_at": "2026-03-12T04:18:01",
+    "updated_at": "2026-03-12T04:18:20"
+  },
+  "test_runs": [
+    {
+      "id": 1,
+      "case_type": "API",
+      "case_id": 5,
+      "case_name": "ProdApiCase_1773289074890",
+      "status": "FAILED",
+      "summary": "pytest 执行失败",
+      "duration_ms": 1829,
+      "started_at": "2026-03-12T04:18:20.922408",
+      "finished_at": "2026-03-12T04:18:22.750529",
+      "request_payload": {
+        "method": "GET",
+        "url": "http://backend:8000/api/v1/system/health",
+        "headers": {
+          "accept": "application/json"
+        },
+        "body": null
+      },
+      "response_payload": {}
+    }
+  ]
+}

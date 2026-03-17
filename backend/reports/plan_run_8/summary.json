@@ -1,0 +1,56 @@
+{
+  "plan_run": {
+    "id": 8,
+    "plan_id": 1,
+    "project_id": 1,
+    "environment_id": null,
+    "status": "FAILED",
+    "summary": "总计 2，成功 1，失败 1",
+    "total_count": 2,
+    "pass_count": 1,
+    "fail_count": 1,
+    "duration_ms": 996,
+    "started_at": "2026-03-12T04:32:32.122442",
+    "finished_at": "2026-03-12T04:32:33.096243+00:00",
+    "created_at": "2026-03-12T04:32:12",
+    "updated_at": "2026-03-12T04:32:32"
+  },
+  "test_runs": [
+    {
+      "id": 16,
+      "case_type": "API",
+      "case_id": 1,
+      "case_name": "示例健康检查接口",
+      "status": "SUCCESS",
+      "summary": "pytest 执行成功",
+      "duration_ms": 467,
+      "started_at": "2026-03-12T04:32:32.133153",
+      "finished_at": "2026-03-12T04:32:32.598349",
+      "request_payload": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8000/api/v1/system/health",
+        "headers": {
+          "accept": "application/json"
+        },
+        "body": null
+      },
+      "response_payload": {
+        "status_code": 200,
+        "body_text": "{\"app_status\":\"degraded\",\"database\":\"healthy\",\"redis\":\"unhealthy\",\"checked_at\":\"2026-03-12T04:32:32.540570Z\"}"
+      }
+    },
+    {
+      "id": 17,
+      "case_type": "UI",
+      "case_id": 1,
+      "case_name": "示例前端首页巡检",
+      "status": "FAILED",
+      "summary": "执行异常: BrowserType.launch: Executable doesn't exist at /Users/zhangyongcheng/Library/Caches/ms-playwright/chromium_headless_shell-1181/chrome-mac/headless_shell\n╔════════════════════════════════════════════════════════════╗\n║ Looks like Playwright was just installed or updated.       ║\n║ Please run the following command to download new browsers: ║\n║                                                            ║\n║     playwright install                                     ║\n║                                                            ║\n║ <3 Playwright Team                                         ║\n╚════════════════════════════════════════════════════════════╝",
+      "duration_ms": 493,
+      "started_at": "2026-03-12T04:32:32.600799",
+      "finished_at": "2026-03-12T04:32:33.094415",
+      "request_payload": null,
+      "response_payload": null
+    }
+  ]
+}

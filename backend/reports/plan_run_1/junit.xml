@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="test-plan-1" tests="1" failures="1" errors="0" skipped="0" time="1.829"><testcase classname="API" name="ProdApiCase_1773289074890" time="1.829"><failure message="pytest 执行失败">pytest 执行失败</failure></testcase></testsuite>
