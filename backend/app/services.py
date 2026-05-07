@@ -1,4 +1,6 @@
 import base64
+import binascii
+import hmac
 import hashlib
 import json
 import secrets
@@ -27,9 +29,9 @@ from app.models import (
 )
 from app.timeutil import utc_now_naive, to_utc_naive
 
-DEFAULT_ADMIN_PASSWORD = "admin123"
 DEFAULT_USER_PASSWORD = "tester123"
 TOKEN_TTL_HOURS = 12
+PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
 
 
 def _is_host_reachable(url: str) -> bool:
@@ -56,14 +58,14 @@ def ensure_default_admin(db: Session) -> tuple[User, bool]:
             username="admin",
             display_name="管理员",
             role="admin",
-            password_hash=hash_password(DEFAULT_ADMIN_PASSWORD),
+            password_hash=hash_password(settings.initial_admin_password),
         )
         db.add(user)
         db.commit()
         db.refresh(user)
         created_or_updated = True
     elif not user.password_hash:
-        user.password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+        user.password_hash = hash_password(settings.initial_admin_password)
         db.commit()
         created_or_updated = True
     return user, created_or_updated
@@ -331,13 +333,47 @@ def build_dashboard_summary(db: Session) -> dict:
 
 
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    salt = secrets.token_hex(16)
+    iterations = settings.password_hash_iterations
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations)
+    encoded_digest = base64.b64encode(digest).decode("ascii")
+    return f"{PASSWORD_HASH_ALGORITHM}${iterations}${salt}${encoded_digest}"
 
 
 def verify_password(password: str, password_hash: str | None) -> bool:
     if not password_hash:
         return False
-    return hash_password(password) == password_hash
+
+    if password_hash.startswith(f"{PASSWORD_HASH_ALGORITHM}$"):
+        try:
+            algorithm, iterations_raw, salt, encoded_digest = password_hash.split("$", 3)
+            if algorithm != PASSWORD_HASH_ALGORITHM:
+                return False
+            expected = base64.b64decode(encoded_digest.encode("ascii"), validate=True)
+            actual = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                salt.encode("utf-8"),
+                int(iterations_raw),
+            )
+            return hmac.compare_digest(actual, expected)
+        except (ValueError, TypeError, binascii.Error):
+            return False
+
+    legacy_sha256 = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(legacy_sha256, password_hash)
+
+
+def password_hash_needs_upgrade(password_hash: str | None) -> bool:
+    if not password_hash:
+        return True
+    if not password_hash.startswith(f"{PASSWORD_HASH_ALGORITHM}$"):
+        return True
+    try:
+        _, iterations_raw, _, _ = password_hash.split("$", 3)
+        return int(iterations_raw) < settings.password_hash_iterations
+    except (ValueError, TypeError):
+        return True
 
 
 def authenticate_user(db: Session, username: str, password: str) -> User | None:
@@ -346,6 +382,8 @@ def authenticate_user(db: Session, username: str, password: str) -> User | None:
         return None
     if not verify_password(password, user.password_hash):
         return None
+    if password_hash_needs_upgrade(user.password_hash):
+        user.password_hash = hash_password(password)
     user.last_login_at = utc_now_naive()
     db.commit()
     return user

@@ -1,3 +1,4 @@
+import hashlib
 import time
 
 from fastapi.testclient import TestClient
@@ -49,6 +50,11 @@ def test_admin_can_manage_users(client) -> None:
     assert create_response.status_code == 201
     user_id = create_response.json()["id"]
 
+    with TestClient(client.app, base_url="http://testserver/api/v1") as anonymous_client:
+        login_response = anonymous_client.post("/auth/login", json={"username": username, "password": "tester123"})
+        assert login_response.status_code == 200
+        assert login_response.json()["user"]["username"] == username
+
     update_response = client.put(
         f"/users/{user_id}",
         json={"status": "DISABLED", "role": "viewer", "password": "tester456"},
@@ -56,6 +62,47 @@ def test_admin_can_manage_users(client) -> None:
     assert update_response.status_code == 200
     assert update_response.json()["status"] == "DISABLED"
     assert update_response.json()["role"] == "viewer"
+
+    with TestClient(client.app, base_url="http://testserver/api/v1") as anonymous_client:
+        disabled_login = anonymous_client.post("/auth/login", json={"username": username, "password": "tester456"})
+        assert disabled_login.status_code == 401
+
+
+def test_legacy_password_hash_upgrades_on_login(client) -> None:
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.models import User
+    from app.services import hash_password
+
+    legacy_username = f"legacy_{time.time_ns()}"
+    legacy_password = "legacy123"
+    legacy_hash = hash_password("unused")
+    assert legacy_hash.startswith("pbkdf2_sha256$")
+
+    with SessionLocal() as db:
+        user = User(
+            username=legacy_username,
+            display_name="旧哈希用户",
+            role="tester",
+            status="ACTIVE",
+            password_hash=hashlib.sha256(legacy_password.encode("utf-8")).hexdigest(),
+        )
+        db.add(user)
+        db.commit()
+
+    with TestClient(client.app, base_url="http://testserver/api/v1") as anonymous_client:
+        login_response = anonymous_client.post(
+            "/auth/login",
+            json={"username": legacy_username, "password": legacy_password},
+        )
+        assert login_response.status_code == 200
+
+    with SessionLocal() as db:
+        upgraded_user = db.scalar(select(User).where(User.username == legacy_username))
+        assert upgraded_user is not None
+        assert upgraded_user.password_hash is not None
+        assert upgraded_user.password_hash.startswith("pbkdf2_sha256$")
 
 
 def test_tools_endpoints(client) -> None:
