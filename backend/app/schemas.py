@@ -222,6 +222,7 @@ class UserRead(ORMBaseModel):
     display_name: str | None = None
     role: str
     status: str
+    workspaces: list[str] = []
     created_at: datetime | None = None
     last_login_at: datetime | None = None
 

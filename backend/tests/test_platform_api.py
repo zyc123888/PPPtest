@@ -62,6 +62,7 @@ def test_admin_can_manage_users(client) -> None:
     assert update_response.status_code == 200
     assert update_response.json()["status"] == "DISABLED"
     assert update_response.json()["role"] == "viewer"
+    assert "默认空间" in update_response.json()["workspaces"]
 
     with TestClient(client.app, base_url="http://testserver/api/v1") as anonymous_client:
         disabled_login = anonymous_client.post("/auth/login", json={"username": username, "password": "tester456"})
@@ -201,6 +202,12 @@ def test_workspace_membership_isolates_project_data(client) -> None:
         json={"user_id": user_id, "role": "member"},
     )
     assert add_member.status_code == 201
+
+    users = client.get("/users")
+    assert users.status_code == 200
+    isolated_user = next(user for user in users.json() if user["id"] == user_id)
+    assert "默认空间" in isolated_user["workspaces"]
+    assert any(name.startswith("隔离空间_") for name in isolated_user["workspaces"])
 
     projects_after = member_client.get("/projects")
     assert projects_after.status_code == 200

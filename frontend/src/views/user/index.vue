@@ -13,6 +13,11 @@
         <el-table-column label="显示名" prop="display_name" min-width="160" />
         <el-table-column label="角色" prop="role" width="120" align="center" />
         <el-table-column label="状态" prop="status" width="120" align="center" />
+        <el-table-column label="所属工作空间" min-width="240" show-overflow-tooltip>
+          <template #default="scope">
+            {{ formatWorkspaces(scope.row.workspaces) }}
+          </template>
+        </el-table-column>
         <el-table-column label="创建时间" min-width="180" align="center">
           <template #default="scope">
             {{ formatTime(scope.row.created_at) }}
@@ -35,6 +40,7 @@
           <div class="mobile-card-title">{{ item.username }}</div>
           <div class="mobile-card-meta">角色：{{ item.role }} · 状态：{{ item.status }}</div>
           <div class="mobile-card-meta">显示名：{{ item.display_name || '-' }}</div>
+          <div class="mobile-card-meta">空间：{{ formatWorkspaces(item.workspaces) }}</div>
           <div class="mobile-card-desc">最近登录：{{ formatTime(item.last_login_at) }}</div>
           <div class="mobile-card-actions">
             <el-button size="small" @click="handleEdit(item)">编辑</el-button>
@@ -63,6 +69,9 @@
             <el-option label="启用" value="ACTIVE" />
             <el-option label="停用" value="DISABLED" />
           </el-select>
+        </el-form-item>
+        <el-form-item v-if="isEdit" label="所属工作空间">
+          <el-input :model-value="formatWorkspaces(temp.workspaces)" disabled />
         </el-form-item>
         <el-form-item :label="passwordLabel" prop="password">
           <el-input v-model="temp.password" type="password" show-password placeholder="至少6位" />
@@ -94,6 +103,7 @@ const temp = reactive({
   display_name: '',
   role: 'tester',
   status: 'ACTIVE',
+  workspaces: [],
   password: ''
 })
 
@@ -121,6 +131,11 @@ const formatTime = (val) => {
   return new Date(val).toLocaleString()
 }
 
+const formatWorkspaces = (workspaces) => {
+  if (!Array.isArray(workspaces) || workspaces.length === 0) return '-'
+  return workspaces.join(' / ')
+}
+
 const getList = async () => {
   listLoading.value = true
   try {
@@ -139,6 +154,7 @@ const handleCreate = () => {
   temp.display_name = ''
   temp.role = 'tester'
   temp.status = 'ACTIVE'
+  temp.workspaces = []
   temp.password = ''
   dialogVisible.value = true
   nextTick(() => {
@@ -153,6 +169,7 @@ const handleEdit = (row) => {
   temp.display_name = row.display_name || ''
   temp.role = row.role
   temp.status = row.status
+  temp.workspaces = Array.isArray(row.workspaces) ? [...row.workspaces] : []
   temp.password = ''
   dialogVisible.value = true
   nextTick(() => {

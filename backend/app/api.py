@@ -97,6 +97,23 @@ def _accessible_project_ids(db: Session, user: User) -> list[int]:
     return list(db.scalars(select(Project.id).where(Project.workspace_id.in_(workspace_ids))).all())
 
 
+def _workspace_names_for_user(db: Session, user_id: int) -> list[str]:
+    return list(
+        db.scalars(
+            select(Workspace.name)
+            .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
+            .where(WorkspaceMember.user_id == user_id)
+            .order_by(Workspace.name.asc())
+        ).all()
+    )
+
+
+def _serialize_user(db: Session, user: User) -> schemas.UserRead:
+    payload = schemas.UserRead.model_validate(user).model_dump()
+    payload["workspaces"] = _workspace_names_for_user(db, user.id)
+    return schemas.UserRead(**payload)
+
+
 public_router = APIRouter()
 protected_router = APIRouter(dependencies=[Depends(get_current_user)])
 
@@ -138,7 +155,7 @@ def login(payload: schemas.AuthLoginRequest, db: Session = Depends(get_db)) -> s
     if user is None:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = services.issue_user_token(db, user)
-    return schemas.AuthLoginResponse(token=token, user=user)
+    return schemas.AuthLoginResponse(token=token, user=_serialize_user(db, user))
 
 
 @protected_router.post("/auth/logout", status_code=204)
@@ -151,8 +168,8 @@ def logout(
 
 
 @protected_router.get("/auth/me", response_model=schemas.UserRead)
-def get_profile(current_user: User = Depends(get_current_user)) -> User:
-    return current_user
+def get_profile(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> schemas.UserRead:
+    return _serialize_user(db, current_user)
 
 
 @protected_router.get("/dashboard/summary", response_model=schemas.DashboardSummary)
@@ -963,7 +980,8 @@ def download_report_file(
 
 @protected_router.get("/users", response_model=list[schemas.UserRead], dependencies=[Depends(require_admin)])
 def list_users(db: Session = Depends(get_db)) -> list[User]:
-    return list(db.scalars(select(User).order_by(User.id.asc())).all())
+    users = list(db.scalars(select(User).order_by(User.id.asc())).all())
+    return [_serialize_user(db, user) for user in users]
 
 
 @protected_router.post("/users", response_model=schemas.UserRead, status_code=201, dependencies=[Depends(require_admin)])
@@ -976,7 +994,7 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db)) -> U
     db.refresh(user)
     workspace = services.ensure_default_workspace(db)
     services.ensure_workspace_member(db, workspace.id, user.id, "member")
-    return user
+    return _serialize_user(db, user)
 
 
 @protected_router.put("/users/{user_id}", response_model=schemas.UserRead, dependencies=[Depends(require_admin)])
@@ -996,4 +1014,4 @@ def update_user(user_id: int, payload: schemas.UserUpdate, db: Session = Depends
         user.status = data["status"]
     db.commit()
     db.refresh(user)
-    return user
+    return _serialize_user(db, user)
