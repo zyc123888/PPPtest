@@ -203,6 +203,13 @@ def test_workspace_membership_isolates_project_data(client) -> None:
     )
     assert add_member.status_code == 201
 
+    update_member = client.put(
+        f"/workspaces/{workspace_id}/members/{add_member.json()['id']}",
+        json={"role": "owner"},
+    )
+    assert update_member.status_code == 200
+    assert update_member.json()["role"] == "owner"
+
     users = client.get("/users")
     assert users.status_code == 200
     isolated_user = next(user for user in users.json() if user["id"] == user_id)

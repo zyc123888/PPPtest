@@ -284,6 +284,35 @@ def delete_workspace_member(workspace_id: int, member_id: int, db: Session = Dep
     db.commit()
 
 
+@protected_router.put(
+    "/workspaces/{workspace_id}/members/{member_id}",
+    response_model=schemas.WorkspaceMemberRead,
+    dependencies=[Depends(require_admin)],
+)
+def update_workspace_member(
+    workspace_id: int,
+    member_id: int,
+    payload: schemas.WorkspaceMemberUpdate,
+    db: Session = Depends(get_db),
+) -> schemas.WorkspaceMemberRead:
+    member = db.get(WorkspaceMember, member_id)
+    if member is None or member.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="成员不存在")
+    member.role = payload.role
+    db.commit()
+    db.refresh(member)
+    user = db.get(User, member.user_id)
+    return schemas.WorkspaceMemberRead(
+        id=member.id,
+        workspace_id=member.workspace_id,
+        user_id=member.user_id,
+        username=user.username if user else None,
+        display_name=user.display_name if user else None,
+        role=member.role,
+        created_at=member.created_at,
+    )
+
+
 @protected_router.get("/projects", response_model=list[schemas.ProjectRead])
 def list_projects(
     workspace_id: int | None = None,

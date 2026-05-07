@@ -103,7 +103,13 @@
           </el-form-item>
         </el-form>
 
-        <el-table v-loading="memberLoading" :data="memberList" border>
+        <el-form :inline="true" label-position="top" class="query-form member-search">
+          <el-form-item label="成员搜索">
+            <el-input v-model="memberFilters.keyword" clearable placeholder="用户名/显示名/角色" style="width: 260px" />
+          </el-form-item>
+        </el-form>
+
+        <el-table v-loading="memberLoading" :data="filteredMemberList" border>
           <el-table-column label="用户名" min-width="180" show-overflow-tooltip>
             <template #default="scope">
               {{ scope.row.username || '-' }}
@@ -114,7 +120,18 @@
               {{ scope.row.display_name || '-' }}
             </template>
           </el-table-column>
-          <el-table-column label="空间角色" prop="role" width="120" align="center" />
+          <el-table-column label="空间角色" width="180" align="center">
+            <template #default="scope">
+              <el-select
+                :model-value="scope.row.role"
+                style="width: 120px"
+                @change="(value) => handleUpdateMemberRole(scope.row, value)"
+              >
+                <el-option label="Owner" value="owner" />
+                <el-option label="Member" value="member" />
+              </el-select>
+            </template>
+          </el-table-column>
           <el-table-column label="加入时间" min-width="180" align="center">
             <template #default="scope">
               {{ formatTime(scope.row.created_at) }}
@@ -142,12 +159,13 @@
 </template>
 
 <script setup>
-import { computed, onMounted, nextTick, reactive, ref } from 'vue'
+import { computed, onMounted, nextTick, reactive, ref, watch } from 'vue'
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
 import { useAuthStore } from '@/stores/auth'
+import { useRoute } from 'vue-router'
 
 const list = ref([])
 const users = ref([])
@@ -161,6 +179,7 @@ const memberList = ref([])
 const currentWorkspace = ref(null)
 const { canAdmin } = usePermissions()
 const authStore = useAuthStore()
+const route = useRoute()
 
 const filters = reactive({
   keyword: ''
@@ -178,6 +197,9 @@ const memberForm = reactive({
   user_id: undefined,
   role: 'member'
 })
+const memberFilters = reactive({
+  keyword: ''
+})
 
 const rules = {
   name: [{ required: true, message: '空间名称必填', trigger: 'blur' }, { min: 2, message: '至少2个字符', trigger: 'blur' }]
@@ -190,6 +212,17 @@ const memberDialogTitle = computed(() => {
 const availableUsers = computed(() => {
   const memberIds = new Set(memberList.value.map((item) => item.user_id))
   return users.value.filter((user) => !memberIds.has(user.id))
+})
+const filteredMemberList = computed(() => {
+  const keyword = memberFilters.keyword.trim().toLowerCase()
+  if (!keyword) return memberList.value
+  return memberList.value.filter((item) => {
+    return (
+      String(item.username || '').toLowerCase().includes(keyword) ||
+      String(item.display_name || '').toLowerCase().includes(keyword) ||
+      String(item.role || '').toLowerCase().includes(keyword)
+    )
+  })
 })
 
 const formatTime = (val) => {
@@ -277,6 +310,7 @@ const openMemberDialog = async (row) => {
   currentWorkspace.value = row
   memberForm.user_id = undefined
   memberForm.role = 'member'
+  memberFilters.keyword = ''
   memberDialogVisible.value = true
   await loadMembers(row.id)
 }
@@ -320,6 +354,27 @@ const handleRemoveMember = async (row) => {
     ElMessage.error(error.message)
   }
 }
+
+const handleUpdateMemberRole = async (row, role) => {
+  if (!currentWorkspace.value) return
+  try {
+    await api.put(`/workspaces/${currentWorkspace.value.id}/members/${row.id}`, { role })
+    ElMessage.success('成员角色已更新')
+    await loadMembers(currentWorkspace.value.id)
+  } catch (error) {
+    ElMessage.error(error.message)
+    await loadMembers(currentWorkspace.value.id)
+  }
+}
+
+watch(
+  () => route.query.keyword,
+  (keyword) => {
+    filters.keyword = typeof keyword === 'string' ? keyword : ''
+    page.value = 1
+  },
+  { immediate: true }
+)
 
 onMounted(() => {
   getList()

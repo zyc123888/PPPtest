@@ -13,9 +13,20 @@
         <el-table-column label="显示名" prop="display_name" min-width="160" />
         <el-table-column label="角色" prop="role" width="120" align="center" />
         <el-table-column label="状态" prop="status" width="120" align="center" />
-        <el-table-column label="所属工作空间" min-width="240" show-overflow-tooltip>
+        <el-table-column label="所属工作空间" min-width="260">
           <template #default="scope">
-            {{ formatWorkspaces(scope.row.workspaces) }}
+            <div class="workspace-tags">
+              <el-tag
+                v-for="workspace in scope.row.workspaces"
+                :key="workspace"
+                class="workspace-tag"
+                effect="plain"
+                @click="handleWorkspaceJump(workspace)"
+              >
+                {{ workspace }}
+              </el-tag>
+              <span v-if="!scope.row.workspaces?.length">-</span>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="创建时间" min-width="180" align="center">
@@ -40,7 +51,21 @@
           <div class="mobile-card-title">{{ item.username }}</div>
           <div class="mobile-card-meta">角色：{{ item.role }} · 状态：{{ item.status }}</div>
           <div class="mobile-card-meta">显示名：{{ item.display_name || '-' }}</div>
-          <div class="mobile-card-meta">空间：{{ formatWorkspaces(item.workspaces) }}</div>
+          <div class="mobile-card-meta">
+            空间：
+            <template v-if="item.workspaces?.length">
+              <el-tag
+                v-for="workspace in item.workspaces"
+                :key="workspace"
+                class="workspace-tag"
+                effect="plain"
+                @click="handleWorkspaceJump(workspace)"
+              >
+                {{ workspace }}
+              </el-tag>
+            </template>
+            <template v-else>-</template>
+          </div>
           <div class="mobile-card-desc">最近登录：{{ formatTime(item.last_login_at) }}</div>
           <div class="mobile-card-actions">
             <el-button size="small" @click="handleEdit(item)">编辑</el-button>
@@ -71,7 +96,18 @@
           </el-select>
         </el-form-item>
         <el-form-item v-if="isEdit" label="所属工作空间">
-          <el-input :model-value="formatWorkspaces(temp.workspaces)" disabled />
+          <div class="workspace-tags dialog-workspaces">
+            <el-tag
+              v-for="workspace in temp.workspaces"
+              :key="workspace"
+              class="workspace-tag"
+              effect="plain"
+              @click="handleWorkspaceJump(workspace)"
+            >
+              {{ workspace }}
+            </el-tag>
+            <span v-if="!temp.workspaces?.length">-</span>
+          </div>
         </el-form-item>
         <el-form-item :label="passwordLabel" prop="password">
           <el-input v-model="temp.password" type="password" show-password placeholder="至少6位" />
@@ -87,6 +123,7 @@
 
 <script setup>
 import { computed, onMounted, nextTick, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
@@ -96,6 +133,7 @@ const listLoading = ref(false)
 const dialogVisible = ref(false)
 const dataFormRef = ref(null)
 const isEdit = ref(false)
+const router = useRouter()
 
 const temp = reactive({
   id: null,
@@ -134,6 +172,11 @@ const formatTime = (val) => {
 const formatWorkspaces = (workspaces) => {
   if (!Array.isArray(workspaces) || workspaces.length === 0) return '-'
   return workspaces.join(' / ')
+}
+
+const handleWorkspaceJump = (workspace) => {
+  if (!workspace) return
+  router.push({ path: '/workspace/index', query: { keyword: workspace } })
 }
 
 const getList = async () => {
@@ -216,6 +259,21 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.workspace-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.workspace-tag {
+  cursor: pointer;
+}
+
+.dialog-workspaces {
+  min-height: 32px;
+  align-items: center;
+}
+
 .mobile-cards {
   display: none;
 }
