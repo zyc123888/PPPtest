@@ -5,7 +5,7 @@ from xml.etree import ElementTree as ET
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app import schemas, services
@@ -108,10 +108,48 @@ def _workspace_names_for_user(db: Session, user_id: int) -> list[str]:
     )
 
 
+def _workspace_memberships_for_user(db: Session, user_id: int) -> list[schemas.UserWorkspaceMembership]:
+    rows = db.execute(
+        select(WorkspaceMember.workspace_id, Workspace.name, WorkspaceMember.role)
+        .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+        .where(WorkspaceMember.user_id == user_id)
+        .order_by(Workspace.name.asc())
+    ).all()
+    return [
+        schemas.UserWorkspaceMembership(
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            role=role,
+        )
+        for workspace_id, workspace_name, role in rows
+    ]
+
+
 def _serialize_user(db: Session, user: User) -> schemas.UserRead:
     payload = schemas.UserRead.model_validate(user).model_dump()
     payload["workspaces"] = _workspace_names_for_user(db, user.id)
+    payload["workspace_memberships"] = _workspace_memberships_for_user(db, user.id)
     return schemas.UserRead(**payload)
+
+
+def _ensure_workspace_owner_guard(
+    db: Session,
+    member: WorkspaceMember,
+    next_role: str | None = None,
+    deleting: bool = False,
+) -> None:
+    current_is_owner = member.role == "owner"
+    remains_owner = (next_role or member.role) == "owner" and not deleting
+    if not current_is_owner or remains_owner:
+        return
+    owner_count = db.scalar(
+        select(func.count(WorkspaceMember.id)).where(
+            WorkspaceMember.workspace_id == member.workspace_id,
+            WorkspaceMember.role == "owner",
+        )
+    )
+    if owner_count == 1:
+        raise HTTPException(status_code=400, detail="工作空间至少需要保留一个 Owner")
 
 
 public_router = APIRouter()
@@ -280,6 +318,7 @@ def delete_workspace_member(workspace_id: int, member_id: int, db: Session = Dep
     member = db.get(WorkspaceMember, member_id)
     if member is None or member.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="成员不存在")
+    _ensure_workspace_owner_guard(db, member, deleting=True)
     db.delete(member)
     db.commit()
 
@@ -298,6 +337,7 @@ def update_workspace_member(
     member = db.get(WorkspaceMember, member_id)
     if member is None or member.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="成员不存在")
+    _ensure_workspace_owner_guard(db, member, next_role=payload.role)
     member.role = payload.role
     db.commit()
     db.refresh(member)

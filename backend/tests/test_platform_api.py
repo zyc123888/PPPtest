@@ -222,6 +222,38 @@ def test_workspace_membership_isolates_project_data(client) -> None:
     assert member_client.get(f"/projects?workspace_id={workspace_id}").status_code == 200
 
 
+def test_workspace_owner_guard_prevents_removing_last_owner(client) -> None:
+    workspace_response = client.post(
+        "/workspaces",
+        json={"name": f"owner_guard_{time.time_ns()}", "description": "owner guard"},
+    )
+    assert workspace_response.status_code == 201
+    workspace_id = workspace_response.json()["id"]
+
+    owner_members = client.get(f"/workspaces/{workspace_id}/members")
+    assert owner_members.status_code == 200
+    admin_member = next(member for member in owner_members.json() if member["role"] == "owner")
+
+    downgrade_response = client.put(
+        f"/workspaces/{workspace_id}/members/{admin_member['id']}",
+        json={"role": "member"},
+    )
+    assert downgrade_response.status_code == 400
+    assert "Owner" in downgrade_response.json()["detail"]
+
+    delete_response = client.delete(f"/workspaces/{workspace_id}/members/{admin_member['id']}")
+    assert delete_response.status_code == 400
+    assert "Owner" in delete_response.json()["detail"]
+
+
+def test_user_payload_includes_workspace_memberships(client) -> None:
+    me_response = client.get("/auth/me")
+    assert me_response.status_code == 200
+    payload = me_response.json()
+    assert "workspace_memberships" in payload
+    assert any(item["workspace_name"] == "默认空间" for item in payload["workspace_memberships"])
+
+
 def test_tools_endpoints(client) -> None:
     json_response = client.post("/tools/json/format", json={"payload": '{"name":"平台","type":"测试"}'})
     assert json_response.status_code == 200

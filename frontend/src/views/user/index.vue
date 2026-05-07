@@ -17,15 +17,16 @@
           <template #default="scope">
             <div class="workspace-tags">
               <el-tag
-                v-for="workspace in scope.row.workspaces"
-                :key="workspace"
+                v-for="membership in getWorkspaceMemberships(scope.row)"
+                :key="`${membership.workspace_id}-${membership.role}`"
                 class="workspace-tag"
                 effect="plain"
-                @click="handleWorkspaceJump(workspace)"
+                @click="handleWorkspaceJump(membership)"
               >
-                {{ workspace }}
+                {{ membership.workspace_name }}
+                <span class="workspace-role">· {{ membership.role }}</span>
               </el-tag>
-              <span v-if="!scope.row.workspaces?.length">-</span>
+              <span v-if="!getWorkspaceMemberships(scope.row).length">-</span>
             </div>
           </template>
         </el-table-column>
@@ -53,15 +54,16 @@
           <div class="mobile-card-meta">显示名：{{ item.display_name || '-' }}</div>
           <div class="mobile-card-meta">
             空间：
-            <template v-if="item.workspaces?.length">
+            <template v-if="getWorkspaceMemberships(item).length">
               <el-tag
-                v-for="workspace in item.workspaces"
-                :key="workspace"
+                v-for="membership in getWorkspaceMemberships(item)"
+                :key="`${membership.workspace_id}-${membership.role}`"
                 class="workspace-tag"
                 effect="plain"
-                @click="handleWorkspaceJump(workspace)"
+                @click="handleWorkspaceJump(membership)"
               >
-                {{ workspace }}
+                {{ membership.workspace_name }}
+                <span class="workspace-role">· {{ membership.role }}</span>
               </el-tag>
             </template>
             <template v-else>-</template>
@@ -98,15 +100,16 @@
         <el-form-item v-if="isEdit" label="所属工作空间">
           <div class="workspace-tags dialog-workspaces">
             <el-tag
-              v-for="workspace in temp.workspaces"
-              :key="workspace"
+              v-for="membership in temp.workspace_memberships"
+              :key="`${membership.workspace_id}-${membership.role}`"
               class="workspace-tag"
               effect="plain"
-              @click="handleWorkspaceJump(workspace)"
+              @click="handleWorkspaceJump(membership)"
             >
-              {{ workspace }}
+              {{ membership.workspace_name }}
+              <span class="workspace-role">· {{ membership.role }}</span>
             </el-tag>
-            <span v-if="!temp.workspaces?.length">-</span>
+            <span v-if="!temp.workspace_memberships?.length">-</span>
           </div>
         </el-form-item>
         <el-form-item :label="passwordLabel" prop="password">
@@ -142,6 +145,7 @@ const temp = reactive({
   role: 'tester',
   status: 'ACTIVE',
   workspaces: [],
+  workspace_memberships: [],
   password: ''
 })
 
@@ -169,14 +173,26 @@ const formatTime = (val) => {
   return new Date(val).toLocaleString()
 }
 
-const formatWorkspaces = (workspaces) => {
-  if (!Array.isArray(workspaces) || workspaces.length === 0) return '-'
-  return workspaces.join(' / ')
+const getWorkspaceMemberships = (user) => {
+  if (Array.isArray(user?.workspace_memberships) && user.workspace_memberships.length > 0) {
+    return user.workspace_memberships
+  }
+  if (Array.isArray(user?.workspaces)) {
+    return user.workspaces.map((workspaceName) => ({
+      workspace_id: 0,
+      workspace_name: workspaceName,
+      role: 'member'
+    }))
+  }
+  return []
 }
 
-const handleWorkspaceJump = (workspace) => {
-  if (!workspace) return
-  router.push({ path: '/workspace/index', query: { keyword: workspace } })
+const handleWorkspaceJump = (membership) => {
+  if (!membership?.workspace_name) return
+  router.push({
+    path: '/workspace/index',
+    query: membership.workspace_id ? { workspace_id: String(membership.workspace_id) } : { keyword: membership.workspace_name }
+  })
 }
 
 const getList = async () => {
@@ -198,6 +214,7 @@ const handleCreate = () => {
   temp.role = 'tester'
   temp.status = 'ACTIVE'
   temp.workspaces = []
+  temp.workspace_memberships = []
   temp.password = ''
   dialogVisible.value = true
   nextTick(() => {
@@ -213,6 +230,7 @@ const handleEdit = (row) => {
   temp.role = row.role
   temp.status = row.status
   temp.workspaces = Array.isArray(row.workspaces) ? [...row.workspaces] : []
+  temp.workspace_memberships = getWorkspaceMemberships(row).map((item) => ({ ...item }))
   temp.password = ''
   dialogVisible.value = true
   nextTick(() => {
@@ -267,6 +285,11 @@ onMounted(() => {
 
 .workspace-tag {
   cursor: pointer;
+}
+
+.workspace-role {
+  margin-left: 4px;
+  color: var(--color-text-secondary);
 }
 
 .dialog-workspaces {

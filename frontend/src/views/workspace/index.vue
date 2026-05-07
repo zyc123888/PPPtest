@@ -182,7 +182,8 @@ const authStore = useAuthStore()
 const route = useRoute()
 
 const filters = reactive({
-  keyword: ''
+  keyword: '',
+  workspaceId: ''
 })
 
 const page = ref(1)
@@ -248,8 +249,11 @@ const getList = async () => {
 
 const filteredList = computed(() => {
   const keyword = filters.keyword.trim().toLowerCase()
-  if (!keyword) return list.value
   return list.value.filter((item) => {
+    if (filters.workspaceId && String(item.id) !== String(filters.workspaceId)) {
+      return false
+    }
+    if (!keyword) return true
     return (
       String(item.name || '').toLowerCase().includes(keyword) ||
       String(item.description || '').toLowerCase().includes(keyword)
@@ -277,6 +281,7 @@ const handleSearch = () => {
 
 const handleReset = () => {
   filters.keyword = ''
+  filters.workspaceId = ''
   page.value = 1
 }
 
@@ -368,9 +373,10 @@ const handleUpdateMemberRole = async (row, role) => {
 }
 
 watch(
-  () => route.query.keyword,
-  (keyword) => {
+  () => [route.query.keyword, route.query.workspace_id],
+  ([keyword, workspaceId]) => {
     filters.keyword = typeof keyword === 'string' ? keyword : ''
+    filters.workspaceId = typeof workspaceId === 'string' ? workspaceId : ''
     page.value = 1
   },
   { immediate: true }

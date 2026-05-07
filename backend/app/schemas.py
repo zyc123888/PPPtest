@@ -111,11 +111,11 @@ class WorkspaceRead(ORMBaseModel):
 
 class WorkspaceMemberCreate(BaseModel):
     user_id: int
-    role: str = Field(default="member", min_length=2, max_length=30)
+    role: str = Field(default="member", pattern="^(owner|member)$")
 
 
 class WorkspaceMemberUpdate(BaseModel):
-    role: str = Field(..., min_length=2, max_length=30)
+    role: str = Field(..., pattern="^(owner|member)$")
 
 
 class WorkspaceMemberRead(ORMBaseModel):
@@ -126,6 +126,12 @@ class WorkspaceMemberRead(ORMBaseModel):
     display_name: str | None = None
     role: str
     created_at: datetime | None = None
+
+
+class UserWorkspaceMembership(BaseModel):
+    workspace_id: int
+    workspace_name: str
+    role: str
 
 
 class EnvironmentCreate(BaseModel):
@@ -227,6 +233,7 @@ class UserRead(ORMBaseModel):
     role: str
     status: str
     workspaces: list[str] = []
+    workspace_memberships: list[UserWorkspaceMembership] = []
     created_at: datetime | None = None
     last_login_at: datetime | None = None
 
