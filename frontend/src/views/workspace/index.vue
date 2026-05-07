@@ -35,6 +35,11 @@
             {{ formatTime(scope.row.created_at) }}
           </template>
         </el-table-column>
+        <el-table-column v-if="canAdmin" label="操作" width="140" align="center">
+          <template #default="scope">
+            <el-button size="small" @click="openMemberDialog(scope.row)">成员管理</el-button>
+          </template>
+        </el-table-column>
       </el-table>
 
       <div class="mobile-cards">
@@ -42,6 +47,9 @@
           <div class="mobile-card-title">{{ item.name }}</div>
           <div class="mobile-card-meta">创建时间：{{ formatTime(item.created_at) }}</div>
           <div class="mobile-card-desc">{{ item.description || '-' }}</div>
+          <div v-if="canAdmin" class="mobile-card-actions">
+            <el-button size="small" @click="openMemberDialog(item)">成员管理</el-button>
+          </div>
         </div>
       </div>
 
@@ -70,21 +78,89 @@
         <el-button type="primary" @click="createData">确认</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="memberDialogVisible" :title="memberDialogTitle" width="760px">
+      <div class="member-panel">
+        <el-form :inline="true" label-position="top" class="query-form member-form">
+          <el-form-item label="选择用户">
+            <el-select v-model="memberForm.user_id" filterable placeholder="请选择用户" style="width: 260px">
+              <el-option
+                v-for="item in availableUsers"
+                :key="item.id"
+                :label="`${item.username}${item.display_name ? ` (${item.display_name})` : ''}`"
+                :value="item.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="成员角色">
+            <el-select v-model="memberForm.role" style="width: 180px">
+              <el-option label="Owner" value="owner" />
+              <el-option label="Member" value="member" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label=" " class="query-actions">
+            <el-button type="primary" :loading="memberSubmitting" @click="handleAddMember">添加成员</el-button>
+          </el-form-item>
+        </el-form>
+
+        <el-table v-loading="memberLoading" :data="memberList" border>
+          <el-table-column label="用户名" min-width="180" show-overflow-tooltip>
+            <template #default="scope">
+              {{ scope.row.username || '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="显示名" min-width="160" show-overflow-tooltip>
+            <template #default="scope">
+              {{ scope.row.display_name || '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="空间角色" prop="role" width="120" align="center" />
+          <el-table-column label="加入时间" min-width="180" align="center">
+            <template #default="scope">
+              {{ formatTime(scope.row.created_at) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="120" align="center">
+            <template #default="scope">
+              <el-button
+                size="small"
+                type="danger"
+                :disabled="scope.row.user_id === currentUserId"
+                @click="handleRemoveMember(scope.row)"
+              >
+                移除
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="memberDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, nextTick, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
+import { useAuthStore } from '@/stores/auth'
 
 const list = ref([])
+const users = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
+const memberDialogVisible = ref(false)
 const dataFormRef = ref(null)
+const memberLoading = ref(false)
+const memberSubmitting = ref(false)
+const memberList = ref([])
+const currentWorkspace = ref(null)
 const { canAdmin } = usePermissions()
+const authStore = useAuthStore()
 
 const filters = reactive({
   keyword: ''
@@ -98,9 +174,23 @@ const temp = reactive({
   description: ''
 })
 
+const memberForm = reactive({
+  user_id: undefined,
+  role: 'member'
+})
+
 const rules = {
   name: [{ required: true, message: '空间名称必填', trigger: 'blur' }, { min: 2, message: '至少2个字符', trigger: 'blur' }]
 }
+
+const currentUserId = computed(() => authStore.user?.id || null)
+const memberDialogTitle = computed(() => {
+  return currentWorkspace.value ? `成员管理 · ${currentWorkspace.value.name}` : '成员管理'
+})
+const availableUsers = computed(() => {
+  const memberIds = new Set(memberList.value.map((item) => item.user_id))
+  return users.value.filter((user) => !memberIds.has(user.id))
+})
 
 const formatTime = (val) => {
   if (!val) return '-'
@@ -110,8 +200,12 @@ const formatTime = (val) => {
 const getList = async () => {
   listLoading.value = true
   try {
-    const data = await api.get('/workspaces')
-    list.value = data
+    const [workspaceData, userData] = await Promise.all([
+      api.get('/workspaces'),
+      canAdmin.value ? api.get('/users') : Promise.resolve([])
+    ])
+    list.value = workspaceData
+    users.value = userData
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
@@ -168,6 +262,65 @@ const createData = () => {
   })
 }
 
+const loadMembers = async (workspaceId) => {
+  memberLoading.value = true
+  try {
+    memberList.value = await api.get(`/workspaces/${workspaceId}/members`)
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    memberLoading.value = false
+  }
+}
+
+const openMemberDialog = async (row) => {
+  currentWorkspace.value = row
+  memberForm.user_id = undefined
+  memberForm.role = 'member'
+  memberDialogVisible.value = true
+  await loadMembers(row.id)
+}
+
+const handleAddMember = async () => {
+  if (!currentWorkspace.value) return
+  if (!memberForm.user_id) {
+    ElMessage.warning('请选择用户')
+    return
+  }
+  memberSubmitting.value = true
+  try {
+    await api.post(`/workspaces/${currentWorkspace.value.id}/members`, {
+      user_id: memberForm.user_id,
+      role: memberForm.role
+    })
+    memberForm.user_id = undefined
+    memberForm.role = 'member'
+    ElMessage.success('成员已添加')
+    await loadMembers(currentWorkspace.value.id)
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    memberSubmitting.value = false
+  }
+}
+
+const handleRemoveMember = async (row) => {
+  if (!currentWorkspace.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确认将用户「${row.username || row.user_id}」移出工作空间「${currentWorkspace.value.name}」？`,
+      '移除成员',
+      { type: 'warning', confirmButtonText: '移除', cancelButtonText: '取消' }
+    )
+    await api.delete(`/workspaces/${currentWorkspace.value.id}/members/${row.id}`)
+    ElMessage.success('成员已移除')
+    await loadMembers(currentWorkspace.value.id)
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.message)
+  }
+}
+
 onMounted(() => {
   getList()
 })
@@ -211,5 +364,14 @@ onMounted(() => {
     font-size: 13px;
     color: var(--color-text);
   }
+
+  .mobile-card-actions {
+    margin-top: 10px;
+  }
+}
+
+.member-panel {
+  display: grid;
+  gap: var(--space-16);
 }
 </style>

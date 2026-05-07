@@ -181,11 +181,16 @@ def list_workspaces(
     status_code=201,
     dependencies=[Depends(require_admin)],
 )
-def create_workspace(payload: schemas.WorkspaceCreate, db: Session = Depends(get_db)) -> Workspace:
+def create_workspace(
+    payload: schemas.WorkspaceCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Workspace:
     workspace = Workspace(**payload.model_dump())
     db.add(workspace)
     db.commit()
     db.refresh(workspace)
+    services.ensure_workspace_member(db, workspace.id, current_user.id, "owner")
     return workspace
 
 
