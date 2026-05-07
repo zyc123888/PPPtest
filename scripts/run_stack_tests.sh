@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+cleanup() {
+  compose_cmd down -v >/dev/null 2>&1 || true
+}
+
 compose_cmd() {
   if docker compose version >/dev/null 2>&1; then
     docker compose "$@"
@@ -14,6 +18,13 @@ compose_cmd() {
     return 1
   fi
 }
+
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker daemon 未启动，无法执行整栈验证" >&2
+  exit 1
+fi
+
+trap cleanup EXIT
 
 compose_cmd up --build -d
 
