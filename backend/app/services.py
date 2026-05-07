@@ -26,6 +26,7 @@ from app.models import (
     User,
     UserToken,
     Workspace,
+    WorkspaceMember,
 )
 from app.timeutil import utc_now_naive, to_utc_naive
 
@@ -71,16 +72,44 @@ def ensure_default_admin(db: Session) -> tuple[User, bool]:
     return user, created_or_updated
 
 
+def ensure_workspace_member(db: Session, workspace_id: int, user_id: int, role: str = "member") -> WorkspaceMember:
+    member = db.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == user_id,
+        )
+    )
+    if member is None:
+        member = WorkspaceMember(workspace_id=workspace_id, user_id=user_id, role=role)
+        db.add(member)
+        db.commit()
+        db.refresh(member)
+    elif member.role != role:
+        member.role = role
+        db.commit()
+        db.refresh(member)
+    return member
+
+
 def ensure_core_runtime_data(db: Session) -> list[str]:
     seeded_resources: list[str] = []
     existing_workspace = db.scalar(select(Workspace).order_by(Workspace.id.asc()))
-    ensure_default_workspace(db)
+    workspace = ensure_default_workspace(db)
     if existing_workspace is None:
         seeded_resources.append("workspace:默认空间")
 
-    _, admin_changed = ensure_default_admin(db)
+    admin_user, admin_changed = ensure_default_admin(db)
     if admin_changed:
         seeded_resources.append("user:admin")
+    existing_admin_member = db.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace.id,
+            WorkspaceMember.user_id == admin_user.id,
+        )
+    )
+    ensure_workspace_member(db, workspace.id, admin_user.id, "owner")
+    if existing_admin_member is None:
+        seeded_resources.append("workspace_member:默认空间/admin")
 
     return seeded_resources
 
@@ -308,16 +337,51 @@ def collect_system_info() -> dict:
     }
 
 
-def build_dashboard_summary(db: Session) -> dict:
-    workspace_count = db.scalar(select(func.count(Workspace.id))) or 0
-    project_count = db.scalar(select(func.count(Project.id))) or 0
-    api_case_count = db.scalar(select(func.count(APICase.id))) or 0
-    ui_case_count = db.scalar(select(func.count(UICase.id))) or 0
-    environment_count = db.scalar(select(func.count(Environment.id))) or 0
-    plan_count = db.scalar(select(func.count(TestPlan.id))) or 0
-    run_count = db.scalar(select(func.count(TestRun.id))) or 0
-    plan_run_count = db.scalar(select(func.count(TestPlanRun.id))) or 0
-    recent_runs = list(db.scalars(select(TestRun).order_by(TestRun.id.desc()).limit(8)).all())
+def build_dashboard_summary(db: Session, project_ids: list[int] | None = None) -> dict:
+    if project_ids is not None:
+        if not project_ids:
+            return {
+                "workspace_count": 0,
+                "project_count": 0,
+                "api_case_count": 0,
+                "ui_case_count": 0,
+                "environment_count": 0,
+                "plan_count": 0,
+                "run_count": 0,
+                "plan_run_count": 0,
+                "recent_runs": [],
+            }
+        workspace_count = (
+            db.scalar(select(func.count(func.distinct(Project.workspace_id))).where(Project.id.in_(project_ids)))
+            or 0
+        )
+        project_filter = Project.id.in_(project_ids)
+        case_project_filter = APICase.project_id.in_(project_ids)
+        ui_case_project_filter = UICase.project_id.in_(project_ids)
+        env_project_filter = Environment.project_id.in_(project_ids)
+        plan_project_filter = TestPlan.project_id.in_(project_ids)
+        run_project_filter = TestRun.project_id.in_(project_ids)
+        plan_run_project_filter = TestPlanRun.project_id.in_(project_ids)
+    else:
+        workspace_count = db.scalar(select(func.count(Workspace.id))) or 0
+        project_filter = True
+        case_project_filter = True
+        ui_case_project_filter = True
+        env_project_filter = True
+        plan_project_filter = True
+        run_project_filter = True
+        plan_run_project_filter = True
+
+    project_count = db.scalar(select(func.count(Project.id)).where(project_filter)) or 0
+    api_case_count = db.scalar(select(func.count(APICase.id)).where(case_project_filter)) or 0
+    ui_case_count = db.scalar(select(func.count(UICase.id)).where(ui_case_project_filter)) or 0
+    environment_count = db.scalar(select(func.count(Environment.id)).where(env_project_filter)) or 0
+    plan_count = db.scalar(select(func.count(TestPlan.id)).where(plan_project_filter)) or 0
+    run_count = db.scalar(select(func.count(TestRun.id)).where(run_project_filter)) or 0
+    plan_run_count = db.scalar(select(func.count(TestPlanRun.id)).where(plan_run_project_filter)) or 0
+    recent_runs = list(
+        db.scalars(select(TestRun).where(run_project_filter).order_by(TestRun.id.desc()).limit(8)).all()
+    )
 
     return {
         "workspace_count": workspace_count,

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -18,6 +18,21 @@ class Workspace(Base):
     )
 
     projects = relationship("Project", back_populates="workspace", cascade="all, delete-orphan")
+    members = relationship("WorkspaceMember", back_populates="workspace", cascade="all, delete-orphan")
+
+
+class WorkspaceMember(Base):
+    __tablename__ = "workspace_members"
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_workspace_member_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(30), nullable=False, default="member")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+
+    workspace = relationship("Workspace", back_populates="members")
+    user = relationship("User", back_populates="workspace_members")
 
 
 class Project(Base):
@@ -195,6 +210,7 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
 
     tokens = relationship("UserToken", back_populates="user", cascade="all, delete-orphan")
+    workspace_members = relationship("WorkspaceMember", back_populates="user", cascade="all, delete-orphan")
 
 
 class UserToken(Base):

@@ -109,6 +109,21 @@ class WorkspaceRead(ORMBaseModel):
     updated_at: datetime | None = None
 
 
+class WorkspaceMemberCreate(BaseModel):
+    user_id: int
+    role: str = Field(default="member", min_length=2, max_length=30)
+
+
+class WorkspaceMemberRead(ORMBaseModel):
+    id: int
+    workspace_id: int
+    user_id: int
+    username: str | None = None
+    display_name: str | None = None
+    role: str
+    created_at: datetime | None = None
+
+
 class EnvironmentCreate(BaseModel):
     project_id: int
     name: str = Field(..., min_length=2, max_length=120)

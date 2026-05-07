@@ -22,6 +22,7 @@ from app.models import (
     UICase,
     User,
     Workspace,
+    WorkspaceMember,
 )
 from app.tasks.executions import run_api_case, run_test_plan, run_ui_case
 from app.timeutil import utc_now_naive
@@ -52,6 +53,48 @@ def require_tester(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role not in {"admin", "tester"}:
         raise HTTPException(status_code=403, detail="需要测试执行权限")
     return current_user
+
+
+def _workspace_ids_for_user(db: Session, user: User) -> list[int]:
+    if user.role == "admin":
+        return list(db.scalars(select(Workspace.id)).all())
+    return list(
+        db.scalars(
+            select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == user.id)
+        ).all()
+    )
+
+
+def _can_access_workspace(db: Session, user: User, workspace_id: int) -> bool:
+    if user.role == "admin":
+        return True
+    return db.scalar(
+        select(WorkspaceMember.id).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == user.id,
+        )
+    ) is not None
+
+
+def _require_workspace_access(db: Session, user: User, workspace_id: int) -> None:
+    if not _can_access_workspace(db, user, workspace_id):
+        raise HTTPException(status_code=403, detail="无权访问该工作空间")
+
+
+def _require_project_access(db: Session, user: User, project: Project | None) -> Project:
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    _require_workspace_access(db, user, project.workspace_id)
+    return project
+
+
+def _accessible_project_ids(db: Session, user: User) -> list[int]:
+    if user.role == "admin":
+        return list(db.scalars(select(Project.id)).all())
+    workspace_ids = _workspace_ids_for_user(db, user)
+    if not workspace_ids:
+        return []
+    return list(db.scalars(select(Project.id).where(Project.workspace_id.in_(workspace_ids))).all())
 
 
 public_router = APIRouter()
@@ -113,13 +156,23 @@ def get_profile(current_user: User = Depends(get_current_user)) -> User:
 
 
 @protected_router.get("/dashboard/summary", response_model=schemas.DashboardSummary)
-def dashboard_summary(db: Session = Depends(get_db)) -> schemas.DashboardSummary:
-    return schemas.DashboardSummary(**services.build_dashboard_summary(db))
+def dashboard_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.DashboardSummary:
+    project_ids = None if current_user.role == "admin" else _accessible_project_ids(db, current_user)
+    return schemas.DashboardSummary(**services.build_dashboard_summary(db, project_ids=project_ids))
 
 
 @protected_router.get("/workspaces", response_model=list[schemas.WorkspaceRead])
-def list_workspaces(db: Session = Depends(get_db)) -> list[Workspace]:
-    return list(db.scalars(select(Workspace).order_by(Workspace.id.asc())).all())
+def list_workspaces(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[Workspace]:
+    stmt = select(Workspace).order_by(Workspace.id.asc())
+    if current_user.role != "admin":
+        stmt = stmt.join(WorkspaceMember).where(WorkspaceMember.user_id == current_user.id)
+    return list(db.scalars(stmt).all())
 
 
 @protected_router.post(
@@ -136,11 +189,94 @@ def create_workspace(payload: schemas.WorkspaceCreate, db: Session = Depends(get
     return workspace
 
 
+@protected_router.get(
+    "/workspaces/{workspace_id}/members",
+    response_model=list[schemas.WorkspaceMemberRead],
+    dependencies=[Depends(require_admin)],
+)
+def list_workspace_members(workspace_id: int, db: Session = Depends(get_db)) -> list[schemas.WorkspaceMemberRead]:
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="工作空间不存在")
+    members = list(
+        db.scalars(
+            select(WorkspaceMember).where(WorkspaceMember.workspace_id == workspace_id).order_by(WorkspaceMember.id.asc())
+        ).all()
+    )
+    result = []
+    for member in members:
+        user = db.get(User, member.user_id)
+        result.append(
+            schemas.WorkspaceMemberRead(
+                id=member.id,
+                workspace_id=member.workspace_id,
+                user_id=member.user_id,
+                username=user.username if user else None,
+                display_name=user.display_name if user else None,
+                role=member.role,
+                created_at=member.created_at,
+            )
+        )
+    return result
+
+
+@protected_router.post(
+    "/workspaces/{workspace_id}/members",
+    response_model=schemas.WorkspaceMemberRead,
+    status_code=201,
+    dependencies=[Depends(require_admin)],
+)
+def add_workspace_member(
+    workspace_id: int,
+    payload: schemas.WorkspaceMemberCreate,
+    db: Session = Depends(get_db),
+) -> schemas.WorkspaceMemberRead:
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="工作空间不存在")
+    user = db.get(User, payload.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    member = services.ensure_workspace_member(db, workspace_id, payload.user_id, payload.role)
+    return schemas.WorkspaceMemberRead(
+        id=member.id,
+        workspace_id=member.workspace_id,
+        user_id=member.user_id,
+        username=user.username,
+        display_name=user.display_name,
+        role=member.role,
+        created_at=member.created_at,
+    )
+
+
+@protected_router.delete(
+    "/workspaces/{workspace_id}/members/{member_id}",
+    status_code=204,
+    dependencies=[Depends(require_admin)],
+)
+def delete_workspace_member(workspace_id: int, member_id: int, db: Session = Depends(get_db)) -> None:
+    member = db.get(WorkspaceMember, member_id)
+    if member is None or member.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="成员不存在")
+    db.delete(member)
+    db.commit()
+
+
 @protected_router.get("/projects", response_model=list[schemas.ProjectRead])
-def list_projects(workspace_id: int | None = None, db: Session = Depends(get_db)) -> list[Project]:
+def list_projects(
+    workspace_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[Project]:
     stmt = select(Project).order_by(Project.id.asc())
     if workspace_id:
+        _require_workspace_access(db, current_user, workspace_id)
         stmt = stmt.where(Project.workspace_id == workspace_id)
+    elif current_user.role != "admin":
+        workspace_ids = _workspace_ids_for_user(db, current_user)
+        if not workspace_ids:
+            return []
+        stmt = stmt.where(Project.workspace_id.in_(workspace_ids))
     return list(db.scalars(stmt).all())
 
 
@@ -150,15 +286,26 @@ def list_projects(workspace_id: int | None = None, db: Session = Depends(get_db)
     status_code=201,
     dependencies=[Depends(require_tester)],
 )
-def create_project(payload: schemas.ProjectCreate, db: Session = Depends(get_db)) -> Project:
+def create_project(
+    payload: schemas.ProjectCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Project:
     data = payload.model_dump()
     if data.get("workspace_id") is None:
-        workspace = services.ensure_default_workspace(db)
+        if current_user.role == "admin":
+            workspace = services.ensure_default_workspace(db)
+        else:
+            workspace_ids = _workspace_ids_for_user(db, current_user)
+            if not workspace_ids:
+                raise HTTPException(status_code=403, detail="未加入任何工作空间")
+            workspace = db.get(Workspace, workspace_ids[0])
         data["workspace_id"] = workspace.id
     else:
         workspace = db.get(Workspace, data["workspace_id"])
         if workspace is None:
             raise HTTPException(status_code=404, detail="工作空间不存在")
+        _require_workspace_access(db, current_user, workspace.id)
     project = Project(**data)
     db.add(project)
     db.commit()
@@ -187,10 +334,20 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> None:
 
 
 @protected_router.get("/api-cases", response_model=list[schemas.APICaseRead])
-def list_api_cases(project_id: int | None = None, db: Session = Depends(get_db)) -> list[APICase]:
+def list_api_cases(
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[APICase]:
     stmt = select(APICase).order_by(APICase.id.asc())
     if project_id:
+        _require_project_access(db, current_user, db.get(Project, project_id))
         stmt = stmt.where(APICase.project_id == project_id)
+    elif current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return []
+        stmt = stmt.where(APICase.project_id.in_(project_ids))
     return list(db.scalars(stmt).all())
 
 
@@ -200,10 +357,12 @@ def list_api_cases(project_id: int | None = None, db: Session = Depends(get_db))
     status_code=201,
     dependencies=[Depends(require_tester)],
 )
-def create_api_case(payload: schemas.APICaseCreate, db: Session = Depends(get_db)) -> APICase:
-    project = db.get(Project, payload.project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="项目不存在")
+def create_api_case(
+    payload: schemas.APICaseCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> APICase:
+    _require_project_access(db, current_user, db.get(Project, payload.project_id))
 
     data = payload.model_dump()
     data["method"] = data["method"].upper()
@@ -229,10 +388,20 @@ def delete_api_case(case_id: int, db: Session = Depends(get_db)) -> None:
 
 
 @protected_router.get("/ui-cases", response_model=list[schemas.UICaseRead])
-def list_ui_cases(project_id: int | None = None, db: Session = Depends(get_db)) -> list[UICase]:
+def list_ui_cases(
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[UICase]:
     stmt = select(UICase).order_by(UICase.id.asc())
     if project_id:
+        _require_project_access(db, current_user, db.get(Project, project_id))
         stmt = stmt.where(UICase.project_id == project_id)
+    elif current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return []
+        stmt = stmt.where(UICase.project_id.in_(project_ids))
     return list(db.scalars(stmt).all())
 
 
@@ -250,10 +419,20 @@ def delete_ui_case(case_id: int, db: Session = Depends(get_db)) -> None:
 
 
 @protected_router.get("/environments", response_model=list[schemas.EnvironmentRead])
-def list_environments(project_id: int | None = None, db: Session = Depends(get_db)) -> list[Environment]:
+def list_environments(
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[Environment]:
     stmt = select(Environment).order_by(Environment.id.asc())
     if project_id:
+        _require_project_access(db, current_user, db.get(Project, project_id))
         stmt = stmt.where(Environment.project_id == project_id)
+    elif current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return []
+        stmt = stmt.where(Environment.project_id.in_(project_ids))
     return list(db.scalars(stmt).all())
 
 
@@ -263,10 +442,12 @@ def list_environments(project_id: int | None = None, db: Session = Depends(get_d
     status_code=201,
     dependencies=[Depends(require_tester)],
 )
-def create_environment(payload: schemas.EnvironmentCreate, db: Session = Depends(get_db)) -> Environment:
-    project = db.get(Project, payload.project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="项目不存在")
+def create_environment(
+    payload: schemas.EnvironmentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Environment:
+    _require_project_access(db, current_user, db.get(Project, payload.project_id))
 
     env = Environment(**payload.model_dump())
     db.add(env)
@@ -290,10 +471,20 @@ def delete_environment(environment_id: int, db: Session = Depends(get_db)) -> No
 
 
 @protected_router.get("/test-plans", response_model=list[schemas.TestPlanRead])
-def list_test_plans(project_id: int | None = None, db: Session = Depends(get_db)) -> list[TestPlan]:
+def list_test_plans(
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[TestPlan]:
     stmt = select(TestPlan).order_by(TestPlan.id.asc())
     if project_id:
+        _require_project_access(db, current_user, db.get(Project, project_id))
         stmt = stmt.where(TestPlan.project_id == project_id)
+    elif current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return []
+        stmt = stmt.where(TestPlan.project_id.in_(project_ids))
     return list(db.scalars(stmt).all())
 
 
@@ -303,10 +494,12 @@ def list_test_plans(project_id: int | None = None, db: Session = Depends(get_db)
     status_code=201,
     dependencies=[Depends(require_tester)],
 )
-def create_test_plan(payload: schemas.TestPlanCreate, db: Session = Depends(get_db)) -> TestPlan:
-    project = db.get(Project, payload.project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="项目不存在")
+def create_test_plan(
+    payload: schemas.TestPlanCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TestPlan:
+    _require_project_access(db, current_user, db.get(Project, payload.project_id))
 
     plan = TestPlan(**payload.model_dump())
     db.add(plan)
@@ -332,18 +525,28 @@ def delete_test_plan(plan_id: int, db: Session = Depends(get_db)) -> None:
 
 
 @protected_router.get("/test-plans/{plan_id}", response_model=schemas.TestPlanRead)
-def get_test_plan(plan_id: int, db: Session = Depends(get_db)) -> TestPlan:
+def get_test_plan(
+    plan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TestPlan:
     plan = db.get(TestPlan, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="测试计划不存在")
+    _require_project_access(db, current_user, db.get(Project, plan.project_id))
     return plan
 
 
 @protected_router.get("/test-plans/{plan_id}/cases", response_model=list[schemas.TestPlanCaseRead])
-def list_test_plan_cases(plan_id: int, db: Session = Depends(get_db)) -> list[TestPlanCase]:
+def list_test_plan_cases(
+    plan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[TestPlanCase]:
     plan = db.get(TestPlan, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="测试计划不存在")
+    _require_project_access(db, current_user, db.get(Project, plan.project_id))
     return list(
         db.scalars(
             select(TestPlanCase).where(TestPlanCase.plan_id == plan_id).order_by(TestPlanCase.order_index.asc())
@@ -358,11 +561,15 @@ def list_test_plan_cases(plan_id: int, db: Session = Depends(get_db)) -> list[Te
     dependencies=[Depends(require_tester)],
 )
 def add_test_plan_case(
-    plan_id: int, payload: schemas.TestPlanCaseCreate, db: Session = Depends(get_db)
+    plan_id: int,
+    payload: schemas.TestPlanCaseCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> TestPlanCase:
     plan = db.get(TestPlan, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="测试计划不存在")
+    _require_project_access(db, current_user, db.get(Project, plan.project_id))
 
     if payload.case_type == "API":
         case = db.get(APICase, payload.case_id)
@@ -371,6 +578,9 @@ def add_test_plan_case(
 
     if case is None:
         raise HTTPException(status_code=404, detail="用例不存在")
+    if case.project_id != plan.project_id:
+        raise HTTPException(status_code=400, detail="用例不属于该测试计划项目")
+    _require_project_access(db, current_user, db.get(Project, case.project_id))
 
     plan_case = TestPlanCase(
         plan_id=plan.id,
@@ -407,10 +617,12 @@ def trigger_test_plan(
     plan_id: int,
     payload: schemas.TestPlanRunCreate | None = Body(None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> TestPlanRun:
     plan = db.get(TestPlan, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="测试计划不存在")
+    _require_project_access(db, current_user, db.get(Project, plan.project_id))
 
     cases = list(
         db.scalars(
@@ -467,10 +679,12 @@ def trigger_test_plan(
     status_code=201,
     dependencies=[Depends(require_tester)],
 )
-def create_ui_case(payload: schemas.UICaseCreate, db: Session = Depends(get_db)) -> UICase:
-    project = db.get(Project, payload.project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="项目不存在")
+def create_ui_case(
+    payload: schemas.UICaseCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> UICase:
+    _require_project_access(db, current_user, db.get(Project, payload.project_id))
 
     ui_case = UICase(**payload.model_dump())
     db.add(ui_case)
@@ -480,15 +694,29 @@ def create_ui_case(payload: schemas.UICaseCreate, db: Session = Depends(get_db))
 
 
 @protected_router.get("/executions/runs", response_model=list[schemas.TestRunRead])
-def list_runs(db: Session = Depends(get_db)) -> list[TestRun]:
-    return list(db.scalars(select(TestRun).order_by(TestRun.id.desc()).limit(30)).all())
+def list_runs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[TestRun]:
+    stmt = select(TestRun).order_by(TestRun.id.desc()).limit(30)
+    if current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return []
+        stmt = stmt.where(TestRun.project_id.in_(project_ids))
+    return list(db.scalars(stmt).all())
 
 
 @protected_router.get("/executions/runs/{run_id}", response_model=schemas.TestRunRead)
-def get_run(run_id: int, db: Session = Depends(get_db)) -> TestRun:
+def get_run(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TestRun:
     run = db.get(TestRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="执行记录不存在")
+    _require_project_access(db, current_user, db.get(Project, run.project_id))
     return run
 
 
@@ -501,10 +729,12 @@ def trigger_api_case(
     case_id: int,
     payload: schemas.ExecutionTrigger | None = Body(None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> TestRun:
     api_case = db.get(APICase, case_id)
     if api_case is None:
         raise HTTPException(status_code=404, detail="接口用例不存在")
+    _require_project_access(db, current_user, db.get(Project, api_case.project_id))
 
     environment_id = payload.environment_id if payload else None
     if environment_id is not None:
@@ -539,10 +769,12 @@ def trigger_ui_case(
     case_id: int,
     payload: schemas.ExecutionTrigger | None = Body(None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> TestRun:
     ui_case = db.get(UICase, case_id)
     if ui_case is None:
         raise HTTPException(status_code=404, detail="UI 用例不存在")
+    _require_project_access(db, current_user, db.get(Project, ui_case.project_id))
 
     environment_id = payload.environment_id if payload else None
     if environment_id is not None:
@@ -589,8 +821,17 @@ def timestamp_convert(payload: schemas.TimestampPayload) -> schemas.ToolResult:
 
 
 @protected_router.get("/reports", response_model=list[schemas.TestPlanRunView])
-def list_reports(db: Session = Depends(get_db)) -> list[schemas.TestPlanRunView]:
-    runs = list(db.scalars(select(TestPlanRun).order_by(TestPlanRun.id.desc()).limit(50)).all())
+def list_reports(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[schemas.TestPlanRunView]:
+    stmt = select(TestPlanRun).order_by(TestPlanRun.id.desc()).limit(50)
+    if current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return []
+        stmt = stmt.where(TestPlanRun.project_id.in_(project_ids))
+    runs = list(db.scalars(stmt).all())
     result = []
     for run in runs:
         plan = db.get(TestPlan, run.plan_id)
@@ -609,10 +850,15 @@ def list_reports(db: Session = Depends(get_db)) -> list[schemas.TestPlanRunView]
 
 
 @protected_router.get("/reports/{plan_run_id}", response_model=schemas.ReportDetail)
-def get_report(plan_run_id: int, db: Session = Depends(get_db)) -> schemas.ReportDetail:
+def get_report(
+    plan_run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ReportDetail:
     plan_run = db.get(TestPlanRun, plan_run_id)
     if plan_run is None:
         raise HTTPException(status_code=404, detail="报告不存在")
+    _require_project_access(db, current_user, db.get(Project, plan_run.project_id))
 
     test_runs = list(
         db.scalars(select(TestRun).where(TestRun.plan_run_id == plan_run_id).order_by(TestRun.id.asc())).all()
@@ -625,10 +871,12 @@ def download_report_file(
     plan_run_id: int,
     format: str = Query(default="json", pattern="^(json|junit)$"),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     plan_run = db.get(TestPlanRun, plan_run_id)
     if plan_run is None:
         raise HTTPException(status_code=404, detail="报告不存在")
+    _require_project_access(db, current_user, db.get(Project, plan_run.project_id))
     file_path = plan_run.report_json_path if format == "json" else plan_run.report_junit_path
 
     if not file_path or not os.path.exists(file_path):
@@ -721,6 +969,8 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db)) -> U
     db.add(user)
     db.commit()
     db.refresh(user)
+    workspace = services.ensure_default_workspace(db)
+    services.ensure_workspace_member(db, workspace.id, user.id, "member")
     return user
 
 

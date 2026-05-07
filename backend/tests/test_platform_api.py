@@ -151,6 +151,63 @@ def test_role_based_access_boundaries(client) -> None:
         assert tester_client.delete(f"/projects/{created_project_id}").status_code == 403
 
 
+def test_workspace_membership_isolates_project_data(client) -> None:
+    isolated_workspace = client.post(
+        "/workspaces",
+        json={"name": f"隔离空间_{time.time_ns()}", "description": "membership isolation"},
+    )
+    assert isolated_workspace.status_code == 201
+    workspace_id = isolated_workspace.json()["id"]
+
+    isolated_project = client.post(
+        "/projects",
+        json={
+            "workspace_id": workspace_id,
+            "name": f"隔离项目_{time.time_ns()}",
+            "base_url": "http://example.com",
+        },
+    )
+    assert isolated_project.status_code == 201
+    isolated_project_id = isolated_project.json()["id"]
+
+    username = f"isolated_{time.time_ns()}"
+    user_response = client.post(
+        "/users",
+        json={"username": username, "password": "role123", "display_name": username, "role": "tester"},
+    )
+    assert user_response.status_code == 201
+    user_id = user_response.json()["id"]
+
+    member_client = TestClient(client.app, base_url="http://testserver/api/v1")
+    login_response = member_client.post("/auth/login", json={"username": username, "password": "role123"})
+    assert login_response.status_code == 200
+    member_client.headers.update({"Authorization": f"Bearer {login_response.json()['token']}"})
+
+    projects_before = member_client.get("/projects")
+    assert projects_before.status_code == 200
+    assert all(project["id"] != isolated_project_id for project in projects_before.json())
+    assert member_client.get(f"/projects?workspace_id={workspace_id}").status_code == 403
+    assert member_client.post(
+        "/projects",
+        json={
+            "workspace_id": workspace_id,
+            "name": f"越权项目_{time.time_ns()}",
+            "base_url": "http://example.com",
+        },
+    ).status_code == 403
+
+    add_member = client.post(
+        f"/workspaces/{workspace_id}/members",
+        json={"user_id": user_id, "role": "member"},
+    )
+    assert add_member.status_code == 201
+
+    projects_after = member_client.get("/projects")
+    assert projects_after.status_code == 200
+    assert any(project["id"] == isolated_project_id for project in projects_after.json())
+    assert member_client.get(f"/projects?workspace_id={workspace_id}").status_code == 200
+
+
 def test_tools_endpoints(client) -> None:
     json_response = client.post("/tools/json/format", json={"payload": '{"name":"平台","type":"测试"}'})
     assert json_response.status_code == 200
