@@ -51,6 +51,13 @@ def ensure_schema(db_engine) -> list[str]:
             connection.execute(text(ddl))
             schema_changes.append(f"{table_name}.{column_name}")
 
+    def create_index_if_missing(connection, index_name: str, ddl: str) -> None:
+        try:
+            connection.execute(text(ddl))
+            schema_changes.append(f"index:{index_name}")
+        except Exception:
+            return
+
     def widen_mysql_varchar_if_needed(
         connection,
         table_name: str,
@@ -150,6 +157,60 @@ def ensure_schema(db_engine) -> list[str]:
             "users",
             "last_login_at",
             "ALTER TABLE users ADD COLUMN last_login_at DATETIME NULL",
+        )
+        extra_columns = [
+            ("projects", "created_by", "ALTER TABLE projects ADD COLUMN created_by INTEGER NULL"),
+            ("projects", "updated_by", "ALTER TABLE projects ADD COLUMN updated_by INTEGER NULL"),
+            ("api_cases", "priority", "ALTER TABLE api_cases ADD COLUMN priority VARCHAR(20) NULL"),
+            ("api_cases", "status", "ALTER TABLE api_cases ADD COLUMN status VARCHAR(20) NULL"),
+            ("api_cases", "tags_json", "ALTER TABLE api_cases ADD COLUMN tags_json JSON NULL"),
+            ("api_cases", "assertions_json", "ALTER TABLE api_cases ADD COLUMN assertions_json JSON NULL"),
+            ("api_cases", "created_by", "ALTER TABLE api_cases ADD COLUMN created_by INTEGER NULL"),
+            ("api_cases", "updated_by", "ALTER TABLE api_cases ADD COLUMN updated_by INTEGER NULL"),
+            ("api_cases", "updated_at", "ALTER TABLE api_cases ADD COLUMN updated_at DATETIME NULL"),
+            ("ui_cases", "priority", "ALTER TABLE ui_cases ADD COLUMN priority VARCHAR(20) NULL"),
+            ("ui_cases", "status", "ALTER TABLE ui_cases ADD COLUMN status VARCHAR(20) NULL"),
+            ("ui_cases", "tags_json", "ALTER TABLE ui_cases ADD COLUMN tags_json JSON NULL"),
+            ("ui_cases", "assertions_json", "ALTER TABLE ui_cases ADD COLUMN assertions_json JSON NULL"),
+            ("ui_cases", "created_by", "ALTER TABLE ui_cases ADD COLUMN created_by INTEGER NULL"),
+            ("ui_cases", "updated_by", "ALTER TABLE ui_cases ADD COLUMN updated_by INTEGER NULL"),
+            ("ui_cases", "updated_at", "ALTER TABLE ui_cases ADD COLUMN updated_at DATETIME NULL"),
+            ("environments", "auth_config_json", "ALTER TABLE environments ADD COLUMN auth_config_json JSON NULL"),
+            ("environments", "created_by", "ALTER TABLE environments ADD COLUMN created_by INTEGER NULL"),
+            ("environments", "updated_by", "ALTER TABLE environments ADD COLUMN updated_by INTEGER NULL"),
+            ("environments", "updated_at", "ALTER TABLE environments ADD COLUMN updated_at DATETIME NULL"),
+            ("test_plans", "created_by", "ALTER TABLE test_plans ADD COLUMN created_by INTEGER NULL"),
+            ("test_plans", "updated_by", "ALTER TABLE test_plans ADD COLUMN updated_by INTEGER NULL"),
+            ("test_plan_cases", "case_snapshot_json", "ALTER TABLE test_plan_cases ADD COLUMN case_snapshot_json JSON NULL"),
+            ("test_plan_runs", "error_type", "ALTER TABLE test_plan_runs ADD COLUMN error_type VARCHAR(30) NULL"),
+            ("test_plan_runs", "retry_count", "ALTER TABLE test_plan_runs ADD COLUMN retry_count INTEGER NULL"),
+            ("test_runs", "error_type", "ALTER TABLE test_runs ADD COLUMN error_type VARCHAR(30) NULL"),
+            ("test_runs", "exit_code", "ALTER TABLE test_runs ADD COLUMN exit_code INTEGER NULL"),
+            ("test_runs", "timeout_seconds", "ALTER TABLE test_runs ADD COLUMN timeout_seconds INTEGER NULL"),
+            ("test_runs", "retry_count", "ALTER TABLE test_runs ADD COLUMN retry_count INTEGER NULL"),
+            ("test_runs", "max_retries", "ALTER TABLE test_runs ADD COLUMN max_retries INTEGER NULL"),
+            ("test_runs", "stdout_text", "ALTER TABLE test_runs ADD COLUMN stdout_text TEXT NULL"),
+            ("test_runs", "stderr_text", "ALTER TABLE test_runs ADD COLUMN stderr_text TEXT NULL"),
+            ("test_runs", "artifacts_json", "ALTER TABLE test_runs ADD COLUMN artifacts_json JSON NULL"),
+            ("test_runs", "step_results_json", "ALTER TABLE test_runs ADD COLUMN step_results_json JSON NULL"),
+        ]
+        for table_name, column_name, ddl in extra_columns:
+            add_column_if_missing(connection, table_name, column_name, ddl)
+
+        create_index_if_missing(
+            connection,
+            "idx_test_runs_project_status",
+            "CREATE INDEX IF NOT EXISTS idx_test_runs_project_status ON test_runs(project_id, status)",
+        )
+        create_index_if_missing(
+            connection,
+            "idx_test_runs_plan_run_id",
+            "CREATE INDEX IF NOT EXISTS idx_test_runs_plan_run_id ON test_runs(plan_run_id)",
+        )
+        create_index_if_missing(
+            connection,
+            "idx_test_plan_runs_project_status",
+            "CREATE INDEX IF NOT EXISTS idx_test_plan_runs_project_status ON test_plan_runs(project_id, status)",
         )
 
     return schema_changes

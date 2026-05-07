@@ -94,6 +94,9 @@
         <el-form-item label="变量 JSON" prop="variables_text">
           <el-input v-model="temp.variables_text" type="textarea" :rows="4" placeholder='{"frontend_url": "http://frontend:3000"}' />
         </el-form-item>
+        <el-form-item label="认证配置 JSON" prop="auth_config_text">
+          <el-input v-model="temp.auth_config_text" type="textarea" :rows="4" placeholder='{"header_name": "Authorization", "token_prefix": "Bearer", "token": "{{token}}"}' />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -148,6 +151,16 @@ const rules = {
     }, trigger: 'blur'
   }],
   variables_text: [{
+    validator: (rule, value, callback) => {
+      try {
+        if (value) JSON.parse(value)
+        callback()
+      } catch (e) {
+        callback(new Error('JSON 格式错误'))
+      }
+    }, trigger: 'blur'
+  }],
+  auth_config_text: [{
     validator: (rule, value, callback) => {
       try {
         if (value) JSON.parse(value)
@@ -236,7 +249,8 @@ const createData = () => {
           name: temp.name,
           base_url: temp.base_url,
           headers_json: temp.headers_text ? JSON.parse(temp.headers_text) : null,
-          variables_json: temp.variables_text ? JSON.parse(temp.variables_text) : null
+          variables_json: temp.variables_text ? JSON.parse(temp.variables_text) : null,
+          auth_config_json: temp.auth_config_text ? JSON.parse(temp.auth_config_text) : null
         })
         dialogVisible.value = false
         ElMessage.success('创建成功')

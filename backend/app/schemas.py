@@ -20,6 +20,8 @@ class ProjectRead(ORMBaseModel):
     name: str
     description: str | None = None
     base_url: str
+    created_by: int | None = None
+    updated_by: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -29,6 +31,10 @@ class APICaseCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=120)
     method: str = Field(default="GET", min_length=3, max_length=10)
     path: str = Field(..., min_length=1, max_length=255)
+    priority: str = Field(default="P2", min_length=2, max_length=20)
+    status: str = Field(default="ACTIVE", min_length=2, max_length=20)
+    tags_json: list[str] | None = None
+    assertions_json: list[dict] | None = None
     headers_json: dict | None = None
     body_json: dict | None = None
     expected_status: int = 200
@@ -40,16 +46,27 @@ class APICaseRead(ORMBaseModel):
     name: str
     method: str
     path: str
+    priority: str
+    status: str
+    tags_json: list[str] | None = None
+    assertions_json: list[dict] | None = None
     headers_json: dict | None = None
     body_json: dict | None = None
     expected_status: int
+    created_by: int | None = None
+    updated_by: int | None = None
     created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class UICaseCreate(BaseModel):
     project_id: int
     name: str = Field(..., min_length=2, max_length=120)
     target_url: str = Field(..., min_length=5, max_length=255)
+    priority: str = Field(default="P2", min_length=2, max_length=20)
+    status: str = Field(default="ACTIVE", min_length=2, max_length=20)
+    tags_json: list[str] | None = None
+    assertions_json: list[dict] | None = None
     steps_json: list[dict]
     expect_text: str = Field(..., min_length=1, max_length=255)
 
@@ -59,9 +76,16 @@ class UICaseRead(ORMBaseModel):
     project_id: int
     name: str
     target_url: str
+    priority: str
+    status: str
+    tags_json: list[str] | None = None
+    assertions_json: list[dict] | None = None
     steps_json: list[dict]
     expect_text: str
+    created_by: int | None = None
+    updated_by: int | None = None
     created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class TestRunRead(ORMBaseModel):
@@ -75,7 +99,16 @@ class TestRunRead(ORMBaseModel):
     status: str
     task_id: str | None = None
     summary: str | None = None
+    error_type: str | None = None
     duration_ms: int | None = None
+    exit_code: int | None = None
+    timeout_seconds: int | None = None
+    retry_count: int = 0
+    max_retries: int = 0
+    stdout_text: str | None = None
+    stderr_text: str | None = None
+    artifacts_json: list | None = None
+    step_results_json: list | None = None
     request_payload: dict | None = None
     response_payload: dict | None = None
     started_at: datetime | None = None
@@ -140,6 +173,7 @@ class EnvironmentCreate(BaseModel):
     base_url: str = Field(..., min_length=5, max_length=255)
     headers_json: dict | None = None
     variables_json: dict | None = None
+    auth_config_json: dict | None = None
 
 
 class EnvironmentRead(ORMBaseModel):
@@ -149,7 +183,17 @@ class EnvironmentRead(ORMBaseModel):
     base_url: str
     headers_json: dict | None = None
     variables_json: dict | None = None
+    auth_config_json: dict | None = None
+    created_by: int | None = None
+    updated_by: int | None = None
     created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class EnvironmentVariablesUpdate(BaseModel):
+    variables_json: dict | None = None
+    headers_json: dict | None = None
+    auth_config_json: dict | None = None
 
 
 class TestPlanCreate(BaseModel):
@@ -164,6 +208,8 @@ class TestPlanRead(ORMBaseModel):
     name: str
     description: str | None = None
     status: str
+    created_by: int | None = None
+    updated_by: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -180,6 +226,7 @@ class TestPlanCaseRead(ORMBaseModel):
     case_type: str
     case_id: int
     case_name: str
+    case_snapshot_json: dict | None = None
     order_index: int
     created_at: datetime | None = None
 
@@ -195,6 +242,8 @@ class TestPlanRunRead(ORMBaseModel):
     environment_id: int | None = None
     status: str
     summary: str | None = None
+    error_type: str | None = None
+    retry_count: int = 0
     total_count: int
     pass_count: int
     fail_count: int
@@ -217,6 +266,22 @@ class TestPlanRunView(TestPlanRunRead):
 class ReportDetail(BaseModel):
     plan_run: TestPlanRunRead
     test_runs: list[TestRunRead]
+
+
+class ExecutionLogRead(BaseModel):
+    run_id: int
+    status: str
+    stdout_text: str | None = None
+    stderr_text: str | None = None
+    exit_code: int | None = None
+    error_type: str | None = None
+    timeout_seconds: int | None = None
+    step_results_json: list | None = None
+
+
+class ExecutionArtifactsRead(BaseModel):
+    run_id: int
+    artifacts: list[dict] = []
 
 
 class UserCreate(BaseModel):
@@ -307,3 +372,4 @@ class ToolResult(BaseModel):
 
 class ExecutionTrigger(BaseModel):
     environment_id: int | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=600)

@@ -65,6 +65,8 @@
           </template>
         </el-table-column>
         <el-table-column label="路径" prop="path" min-width="220" show-overflow-tooltip />
+        <el-table-column label="优先级" prop="priority" width="100" align="center" />
+        <el-table-column label="状态" prop="status" width="100" align="center" />
         <el-table-column label="预期状态码" prop="expected_status" width="120" align="center" />
         <el-table-column label="操作" align="center" width="220">
           <template #default="scope">
@@ -135,6 +137,25 @@
             </el-form-item>
           </el-col>
         </el-row>
+        <el-row>
+          <el-col :span="12">
+            <el-form-item label="优先级" prop="priority">
+              <el-select v-model="temp.priority" style="width: 100%">
+                <el-option label="P0" value="P0" />
+                <el-option label="P1" value="P1" />
+                <el-option label="P2" value="P2" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="状态" prop="status">
+              <el-select v-model="temp.status" style="width: 100%">
+                <el-option label="ACTIVE" value="ACTIVE" />
+                <el-option label="DISABLED" value="DISABLED" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
         <el-form-item label="请求路径" prop="path">
           <el-input v-model="temp.path" placeholder="/api/v1/..." />
         </el-form-item>
@@ -194,6 +215,8 @@ const temp = reactive({
   path: '',
   headers_text: '{\n  "accept": "application/json"\n}',
   body_text: '',
+  priority: 'P2',
+  status: 'ACTIVE',
   expected_status: 200
 })
 
@@ -282,6 +305,8 @@ const handleCreate = () => {
   temp.path = ''
   temp.headers_text = '{\n  "accept": "application/json"\n}'
   temp.body_text = ''
+  temp.priority = 'P2'
+  temp.status = 'ACTIVE'
   temp.expected_status = 200
   dialogVisible.value = true
   nextTick(() => {
@@ -311,6 +336,8 @@ const createData = () => {
           path: temp.path,
           headers_json: temp.headers_text ? JSON.parse(temp.headers_text) : null,
           body_json: temp.body_text ? JSON.parse(temp.body_text) : null,
+          priority: temp.priority,
+          status: temp.status,
           expected_status: temp.expected_status
         })
         dialogVisible.value = false

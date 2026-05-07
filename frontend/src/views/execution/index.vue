@@ -1,6 +1,6 @@
 <template>
   <div class="app-page">
-    <PageHeader title="执行中心" subtitle="查看执行记录、状态与请求/响应快照">
+    <PageHeader title="执行中心" subtitle="查看执行记录、状态、日志与执行产物">
       <template #actions>
         <el-button :loading="listLoading" @click="getList">刷新</el-button>
       </template>
@@ -15,11 +15,13 @@
           </el-select>
         </el-form-item>
         <el-form-item label="状态">
-          <el-select v-model="filters.status" clearable placeholder="全部" style="width: 160px">
+          <el-select v-model="filters.status" clearable placeholder="全部" style="width: 180px">
             <el-option label="排队中" value="PENDING" />
             <el-option label="执行中" value="RUNNING" />
             <el-option label="成功" value="SUCCESS" />
             <el-option label="失败" value="FAILED" />
+            <el-option label="异常" value="ERROR" />
+            <el-option label="超时" value="TIMEOUT" />
           </el-select>
         </el-form-item>
         <el-form-item label="关键字">
@@ -36,13 +38,14 @@
       <el-table v-loading="listLoading" :data="pagedList" border>
         <el-table-column label="ID" prop="id" align="center" width="80" />
         <el-table-column label="类型" prop="case_type" width="90" align="center" />
-        <el-table-column label="用例名称" prop="case_name" min-width="200" show-overflow-tooltip />
+        <el-table-column label="用例名称" prop="case_name" min-width="180" show-overflow-tooltip />
         <el-table-column label="状态" prop="status" width="110" align="center">
           <template #default="scope">
             <el-tag size="small" :type="statusType(scope.row.status)">{{ statusText(scope.row.status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="摘要" prop="summary" min-width="240" show-overflow-tooltip />
+        <el-table-column label="错误类型" prop="error_type" width="120" align="center" />
+        <el-table-column label="摘要" prop="summary" min-width="220" show-overflow-tooltip />
         <el-table-column label="耗时" width="110" align="center">
           <template #default="scope">
             {{ scope.row.duration_ms ? scope.row.duration_ms + 'ms' : '-' }}
@@ -53,9 +56,12 @@
             {{ formatTime(scope.row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" align="center" width="110">
+        <el-table-column label="操作" align="center" width="260">
           <template #default="scope">
             <el-button size="small" @click="handleDetail(scope.row)">详情</el-button>
+            <el-button size="small" @click="openLogs(scope.row)">日志</el-button>
+            <el-button size="small" @click="openArtifacts(scope.row)">产物</el-button>
+            <el-button v-if="canTest" size="small" type="primary" @click="handleRerun(scope.row)">重跑</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -64,10 +70,13 @@
         <div v-for="item in pagedList" :key="item.id" class="mobile-card">
           <div class="mobile-card-title">{{ item.case_name }}</div>
           <div class="mobile-card-meta">类型：{{ item.case_type }} · 状态：{{ statusText(item.status) }}</div>
-          <div class="mobile-card-meta">耗时：{{ item.duration_ms ? item.duration_ms + 'ms' : '-' }}</div>
+          <div class="mobile-card-meta">错误：{{ item.error_type || '-' }} · 耗时：{{ item.duration_ms ? item.duration_ms + 'ms' : '-' }}</div>
           <div class="mobile-card-desc">{{ item.summary || '-' }}</div>
           <div class="mobile-card-actions">
             <el-button size="small" @click="handleDetail(item)">详情</el-button>
+            <el-button size="small" @click="openLogs(item)">日志</el-button>
+            <el-button size="small" @click="openArtifacts(item)">产物</el-button>
+            <el-button v-if="canTest" size="small" type="primary" @click="handleRerun(item)">重跑</el-button>
           </div>
         </div>
       </div>
@@ -83,15 +92,53 @@
       </div>
     </el-card>
 
-    <el-dialog v-model="dialogVisible" title="执行详情" width="860px">
+    <el-dialog v-model="dialogVisible" title="执行详情" width="960px">
+      <el-descriptions :column="3" border class="section-gap">
+        <el-descriptions-item label="状态">{{ statusText(currentRun.status) }}</el-descriptions-item>
+        <el-descriptions-item label="错误类型">{{ currentRun.error_type || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="退出码">{{ currentRun.exit_code ?? '-' }}</el-descriptions-item>
+        <el-descriptions-item label="耗时">{{ currentRun.duration_ms ? currentRun.duration_ms + 'ms' : '-' }}</el-descriptions-item>
+        <el-descriptions-item label="超时阈值">{{ currentRun.timeout_seconds ? currentRun.timeout_seconds + 's' : '-' }}</el-descriptions-item>
+        <el-descriptions-item label="重跑次数">{{ currentRun.retry_count || 0 }}</el-descriptions-item>
+      </el-descriptions>
       <el-tabs>
         <el-tab-pane label="请求" name="req">
-          <el-input :model-value="formatJson(currentRun.request_payload)" type="textarea" :rows="18" readonly />
+          <el-input :model-value="formatJson(currentRun.request_payload)" type="textarea" :rows="14" readonly />
         </el-tab-pane>
         <el-tab-pane label="响应" name="resp">
-          <el-input :model-value="formatJson(currentRun.response_payload)" type="textarea" :rows="18" readonly />
+          <el-input :model-value="formatJson(currentRun.response_payload)" type="textarea" :rows="14" readonly />
+        </el-tab-pane>
+        <el-tab-pane label="步骤" name="steps">
+          <el-input :model-value="formatJson(currentRun.step_results_json)" type="textarea" :rows="14" readonly />
         </el-tab-pane>
       </el-tabs>
+    </el-dialog>
+
+    <el-dialog v-model="logDialogVisible" title="执行日志" width="960px">
+      <el-tabs>
+        <el-tab-pane label="标准输出">
+          <el-input :model-value="logData.stdout_text || ''" type="textarea" :rows="16" readonly />
+        </el-tab-pane>
+        <el-tab-pane label="错误输出">
+          <el-input :model-value="logData.stderr_text || ''" type="textarea" :rows="16" readonly />
+        </el-tab-pane>
+        <el-tab-pane label="步骤结果">
+          <el-input :model-value="formatJson(logData.step_results_json)" type="textarea" :rows="16" readonly />
+        </el-tab-pane>
+      </el-tabs>
+    </el-dialog>
+
+    <el-dialog v-model="artifactDialogVisible" title="执行产物" width="760px">
+      <el-empty v-if="!artifactData.length" description="暂无产物" />
+      <div v-else class="artifact-list">
+        <div v-for="item in artifactData" :key="item.path" class="artifact-item">
+          <div>
+            <div class="artifact-name">{{ item.name }}</div>
+            <div class="artifact-path">{{ item.path }}</div>
+          </div>
+          <el-button size="small" @click="copyArtifactPath(item.path)">复制路径</el-button>
+        </div>
+      </div>
     </el-dialog>
   </div>
 </template>
@@ -101,11 +148,17 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
+import { usePermissions } from '@/lib/permissions'
 
 const list = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
+const logDialogVisible = ref(false)
+const artifactDialogVisible = ref(false)
 const currentRun = ref({})
+const logData = ref({})
+const artifactData = ref([])
+const { canTest } = usePermissions()
 let timer = null
 
 const filters = reactive({
@@ -126,6 +179,9 @@ const statusText = (status) => {
     RUNNING: '执行中',
     SUCCESS: '成功',
     FAILED: '失败',
+    ERROR: '异常',
+    TIMEOUT: '超时',
+    CANCELLED: '取消',
     loading: '加载中'
   }
   return map[status] || status
@@ -134,7 +190,8 @@ const statusText = (status) => {
 const statusType = (status) => {
   if (['healthy', 'SUCCESS'].includes(status)) return 'success'
   if (['RUNNING', 'PENDING', 'degraded', 'loading'].includes(status)) return 'warning'
-  return 'danger'
+  if (status === 'FAILED') return 'danger'
+  return 'info'
 }
 
 const formatTime = (val) => {
@@ -143,11 +200,11 @@ const formatTime = (val) => {
 }
 
 const formatJson = (val) => {
-  if (!val) return '{}'
+  if (!val) return '[]'
   try {
     return JSON.stringify(val, null, 2)
   } catch (e) {
-    return val
+    return String(val)
   }
 }
 
@@ -201,6 +258,44 @@ const handleDetail = async (row) => {
   }
 }
 
+const openLogs = async (row) => {
+  try {
+    logData.value = await api.get(`/executions/runs/${row.id}/logs`)
+    logDialogVisible.value = true
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const openArtifacts = async (row) => {
+  try {
+    const data = await api.get(`/executions/runs/${row.id}/artifacts`)
+    artifactData.value = data.artifacts || []
+    artifactDialogVisible.value = true
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const handleRerun = async (row) => {
+  try {
+    await api.post(`/executions/runs/${row.id}/rerun`, {})
+    ElMessage.success('重跑任务已提交')
+    getList()
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const copyArtifactPath = async (path) => {
+  try {
+    await navigator.clipboard.writeText(path)
+    ElMessage.success('路径已复制')
+  } catch (error) {
+    ElMessage.error('复制失败')
+  }
+}
+
 onMounted(() => {
   getList()
   timer = setInterval(getList, 5000)
@@ -214,6 +309,31 @@ onBeforeUnmount(() => {
 <style scoped>
 .mobile-cards {
   display: none;
+}
+
+.artifact-list {
+  display: grid;
+  gap: var(--space-12);
+}
+
+.artifact-item {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-12);
+  align-items: center;
+  border: 1px solid var(--el-border-color);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.artifact-name {
+  font-weight: 600;
+}
+
+.artifact-path {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  word-break: break-all;
 }
 
 @media (max-width: 960px) {
@@ -253,6 +373,7 @@ onBeforeUnmount(() => {
 
   .mobile-card-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: var(--space-8);
   }
 }

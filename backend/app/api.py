@@ -132,6 +132,27 @@ def _serialize_user(db: Session, user: User) -> schemas.UserRead:
     return schemas.UserRead(**payload)
 
 
+def _serialize_environment_variables(env: Environment) -> schemas.EnvironmentVariablesUpdate:
+    return schemas.EnvironmentVariablesUpdate(
+        variables_json=env.variables_json,
+        headers_json=env.headers_json,
+        auth_config_json=env.auth_config_json,
+    )
+
+
+def _case_snapshot(case) -> dict:
+    payload = {
+        "id": case.id,
+        "name": case.name,
+        "project_id": case.project_id,
+        "type": "API" if isinstance(case, APICase) else "UI",
+    }
+    for field in ("method", "path", "target_url", "expect_text", "priority", "status", "expected_status"):
+        if hasattr(case, field):
+            payload[field] = getattr(case, field)
+    return payload
+
+
 def _ensure_workspace_owner_guard(
     db: Session,
     member: WorkspaceMember,
@@ -397,7 +418,7 @@ def create_project(
         if workspace is None:
             raise HTTPException(status_code=404, detail="工作空间不存在")
         _require_workspace_access(db, current_user, workspace.id)
-    project = Project(**data)
+    project = Project(**data, created_by=current_user.id, updated_by=current_user.id)
     db.add(project)
     db.commit()
     db.refresh(project)
@@ -457,7 +478,7 @@ def create_api_case(
 
     data = payload.model_dump()
     data["method"] = data["method"].upper()
-    api_case = APICase(**data)
+    api_case = APICase(**data, created_by=current_user.id, updated_by=current_user.id)
     db.add(api_case)
     db.commit()
     db.refresh(api_case)
@@ -540,7 +561,7 @@ def create_environment(
 ) -> Environment:
     _require_project_access(db, current_user, db.get(Project, payload.project_id))
 
-    env = Environment(**payload.model_dump())
+    env = Environment(**payload.model_dump(), created_by=current_user.id, updated_by=current_user.id)
     db.add(env)
     db.commit()
     db.refresh(env)
@@ -559,6 +580,43 @@ def delete_environment(environment_id: int, db: Session = Depends(get_db)) -> No
     )
     db.delete(env)
     db.commit()
+
+
+@protected_router.get("/environments/{environment_id}/variables", response_model=schemas.EnvironmentVariablesUpdate)
+def get_environment_variables(
+    environment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.EnvironmentVariablesUpdate:
+    env = db.get(Environment, environment_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="环境不存在")
+    _require_project_access(db, current_user, db.get(Project, env.project_id))
+    return _serialize_environment_variables(env)
+
+
+@protected_router.put(
+    "/environments/{environment_id}/variables",
+    response_model=schemas.EnvironmentVariablesUpdate,
+    dependencies=[Depends(require_tester)],
+)
+def update_environment_variables(
+    environment_id: int,
+    payload: schemas.EnvironmentVariablesUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.EnvironmentVariablesUpdate:
+    env = db.get(Environment, environment_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="环境不存在")
+    _require_project_access(db, current_user, db.get(Project, env.project_id))
+    env.variables_json = payload.variables_json
+    env.headers_json = payload.headers_json
+    env.auth_config_json = payload.auth_config_json
+    env.updated_by = current_user.id
+    db.commit()
+    db.refresh(env)
+    return _serialize_environment_variables(env)
 
 
 @protected_router.get("/test-plans", response_model=list[schemas.TestPlanRead])
@@ -592,7 +650,7 @@ def create_test_plan(
 ) -> TestPlan:
     _require_project_access(db, current_user, db.get(Project, payload.project_id))
 
-    plan = TestPlan(**payload.model_dump())
+    plan = TestPlan(**payload.model_dump(), created_by=current_user.id, updated_by=current_user.id)
     db.add(plan)
     db.commit()
     db.refresh(plan)
@@ -678,6 +736,7 @@ def add_test_plan_case(
         case_type=payload.case_type,
         case_id=payload.case_id,
         case_name=case.name,
+        case_snapshot_json=_case_snapshot(case),
         order_index=payload.order_index,
     )
     db.add(plan_case)
@@ -737,6 +796,7 @@ def trigger_test_plan(
         environment_id=environment_id,
         status="PENDING",
         summary="任务已提交，等待执行",
+        retry_count=0,
         total_count=len(cases),
     )
     db.add(plan_run)
@@ -777,7 +837,7 @@ def create_ui_case(
 ) -> UICase:
     _require_project_access(db, current_user, db.get(Project, payload.project_id))
 
-    ui_case = UICase(**payload.model_dump())
+    ui_case = UICase(**payload.model_dump(), created_by=current_user.id, updated_by=current_user.id)
     db.add(ui_case)
     db.commit()
     db.refresh(ui_case)
@@ -811,6 +871,84 @@ def get_run(
     return run
 
 
+@protected_router.get("/executions/runs/{run_id}/logs", response_model=schemas.ExecutionLogRead)
+def get_run_logs(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ExecutionLogRead:
+    run = db.get(TestRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="执行记录不存在")
+    _require_project_access(db, current_user, db.get(Project, run.project_id))
+    return schemas.ExecutionLogRead(
+        run_id=run.id,
+        status=run.status,
+        stdout_text=run.stdout_text,
+        stderr_text=run.stderr_text,
+        exit_code=run.exit_code,
+        error_type=run.error_type,
+        timeout_seconds=run.timeout_seconds,
+        step_results_json=run.step_results_json,
+    )
+
+
+@protected_router.get("/executions/runs/{run_id}/artifacts", response_model=schemas.ExecutionArtifactsRead)
+def get_run_artifacts(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ExecutionArtifactsRead:
+    run = db.get(TestRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="执行记录不存在")
+    _require_project_access(db, current_user, db.get(Project, run.project_id))
+    return schemas.ExecutionArtifactsRead(run_id=run.id, artifacts=run.artifacts_json or [])
+
+
+@protected_router.post(
+    "/executions/runs/{run_id}/rerun",
+    response_model=schemas.TestRunRead,
+    dependencies=[Depends(require_tester)],
+)
+def rerun_execution(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TestRun:
+    run = db.get(TestRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="执行记录不存在")
+    _require_project_access(db, current_user, db.get(Project, run.project_id))
+
+    rerun = services.create_test_run(
+        db,
+        project_id=run.project_id,
+        environment_id=run.environment_id,
+        plan_run_id=run.plan_run_id,
+        case_type=run.case_type,
+        case_id=run.case_id,
+        case_name=run.case_name,
+    )
+    rerun.retry_count = (run.retry_count or 0) + 1
+    rerun.max_retries = max(run.max_retries or 0, rerun.retry_count)
+    db.commit()
+    db.refresh(rerun)
+
+    if rerun.case_type == "API":
+        task_id, ran_inline = _dispatch_task_or_run_inline(run_api_case, rerun.id)
+    else:
+        task_id, ran_inline = _dispatch_task_or_run_inline(run_ui_case, rerun.id)
+    if ran_inline:
+        db.refresh(rerun)
+    else:
+        rerun.task_id = task_id
+        rerun.summary = f"重跑任务已提交（来源执行 {run.id}）"
+        db.commit()
+        db.refresh(rerun)
+    return rerun
+
+
 @protected_router.post(
     "/executions/api/{case_id}/run",
     response_model=schemas.TestRunRead,
@@ -841,6 +979,9 @@ def trigger_api_case(
         case_id=api_case.id,
         case_name=api_case.name,
     )
+    run.timeout_seconds = payload.timeout_seconds if payload else None
+    db.commit()
+    db.refresh(run)
     task_id, ran_inline = _dispatch_task_or_run_inline(run_api_case, run.id)
     if ran_inline:
         db.refresh(run)
@@ -881,6 +1022,9 @@ def trigger_ui_case(
         case_id=ui_case.id,
         case_name=ui_case.name,
     )
+    run.timeout_seconds = payload.timeout_seconds if payload else None
+    db.commit()
+    db.refresh(run)
     task_id, ran_inline = _dispatch_task_or_run_inline(run_ui_case, run.id)
     if ran_inline:
         db.refresh(run)

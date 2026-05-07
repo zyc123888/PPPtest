@@ -157,11 +157,17 @@ def seed_demo_data(db: Session) -> list[str]:
                 name="示例健康检查接口",
                 method="GET",
                 path="/api/v1/system/health",
+                priority="P1",
+                status="ACTIVE",
                 headers_json={"accept": "application/json"},
                 expected_status=200,
             )
         )
         seeded_resources.append("api_case:示例健康检查接口")
+    else:
+        api_case.priority = api_case.priority or "P1"
+        api_case.status = api_case.status or "ACTIVE"
+        api_case.assertions_json = api_case.assertions_json or [{"type": "status_code", "expected": 200}]
 
     ui_case = db.scalar(select(UICase).where(UICase.name == "示例前端首页巡检"))
     if ui_case is None:
@@ -170,6 +176,8 @@ def seed_demo_data(db: Session) -> list[str]:
                 project_id=project.id,
                 name="示例前端首页巡检",
                 target_url=frontend_url,
+                priority="P1",
+                status="ACTIVE",
                 steps_json=[
                     {"action": "goto", "value": frontend_url},
                     {"action": "goto", "value": f"{frontend_url}/tools/index"},
@@ -180,6 +188,9 @@ def seed_demo_data(db: Session) -> list[str]:
         )
         seeded_resources.append("ui_case:示例前端首页巡检")
     else:
+        ui_case.priority = ui_case.priority or "P1"
+        ui_case.status = ui_case.status or "ACTIVE"
+        ui_case.assertions_json = ui_case.assertions_json or [{"type": "text_present", "expected": "常用工具"}]
         ui_case.target_url = frontend_url
         ui_case.steps_json = [
             {"action": "goto", "value": frontend_url},
@@ -495,6 +506,8 @@ def create_test_run(
         case_name=case_name,
         status="PENDING",
         summary="任务已提交，等待执行",
+        retry_count=0,
+        max_retries=0,
     )
     db.add(run)
     db.commit()
@@ -516,12 +529,26 @@ def finalize_run(
     *,
     status: str,
     summary: str,
+    error_type: str | None = None,
+    exit_code: int | None = None,
+    timeout_seconds: int | None = None,
+    stdout_text: str | None = None,
+    stderr_text: str | None = None,
+    artifacts_json: list | None = None,
+    step_results_json: list | None = None,
     duration_ms: int | None = None,
     request_payload: dict | None = None,
     response_payload: dict | None = None,
 ) -> None:
     run.status = status
     run.summary = summary
+    run.error_type = error_type
+    run.exit_code = exit_code
+    run.timeout_seconds = timeout_seconds
+    run.stdout_text = stdout_text
+    run.stderr_text = stderr_text
+    run.artifacts_json = artifacts_json
+    run.step_results_json = step_results_json
     run.duration_ms = duration_ms
     run.request_payload = request_payload
     run.response_payload = response_payload

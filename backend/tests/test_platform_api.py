@@ -294,6 +294,26 @@ def test_seeded_resources_exist(client) -> None:
     assert any(plan["name"] == "演示回归计划" for plan in plans.json())
 
 
+def test_environment_variables_and_auth_config_api(client) -> None:
+    environments = client.get("/environments").json()
+    environment_id = next(env["id"] for env in environments if env["name"] == "本地环境")
+
+    get_response = client.get(f"/environments/{environment_id}/variables")
+    assert get_response.status_code == 200
+    assert "variables_json" in get_response.json()
+
+    put_response = client.put(
+        f"/environments/{environment_id}/variables",
+        json={
+            "variables_json": {"frontend_url": "http://frontend:3000", "token": "demo-token"},
+            "headers_json": {"accept": "application/json"},
+            "auth_config_json": {"header_name": "Authorization", "token_prefix": "Bearer", "token": "{{token}}"},
+        },
+    )
+    assert put_response.status_code == 200
+    assert put_response.json()["auth_config_json"]["token"] == "{{token}}"
+
+
 def test_api_case_run(client) -> None:
     api_cases = client.get("/api-cases").json()
     case_id = next(case["id"] for case in api_cases if case["name"] == "示例健康检查接口")
@@ -310,6 +330,20 @@ def test_api_case_run(client) -> None:
 
     assert final_payload is not None
     assert final_payload["status"] == "SUCCESS", final_payload
+    assert final_payload["stdout_text"] is not None
+    assert isinstance(final_payload["artifacts_json"], list)
+
+    log_payload = client.get(f"/executions/runs/{run_id}/logs")
+    assert log_payload.status_code == 200
+    assert "stdout_text" in log_payload.json()
+
+    artifacts_payload = client.get(f"/executions/runs/{run_id}/artifacts")
+    assert artifacts_payload.status_code == 200
+    assert len(artifacts_payload.json()["artifacts"]) >= 1
+
+    rerun_response = client.post(f"/executions/runs/{run_id}/rerun")
+    assert rerun_response.status_code == 200
+    assert rerun_response.json()["retry_count"] >= 1
 
 
 def test_ui_case_run(client) -> None:
@@ -322,12 +356,12 @@ def test_ui_case_run(client) -> None:
     final_payload = None
     for _ in range(50):
         final_payload = client.get(f"/executions/runs/{run_id}").json()
-        if final_payload["status"] in {"SUCCESS", "FAILED"}:
+        if final_payload["status"] in {"SUCCESS", "FAILED", "ERROR", "TIMEOUT"}:
             break
         time.sleep(2)
 
     assert final_payload is not None
-    assert final_payload["status"] in {"SUCCESS", "FAILED"}, final_payload
+    assert final_payload["status"] in {"SUCCESS", "FAILED", "ERROR", "TIMEOUT"}, final_payload
     assert final_payload["summary"]
 
 
@@ -341,12 +375,12 @@ def test_plan_run_report(client) -> None:
     report_payload = None
     for _ in range(60):
         report_payload = client.get(f"/reports/{plan_run_id}").json()
-        if report_payload["plan_run"]["status"] in {"SUCCESS", "FAILED"}:
+        if report_payload["plan_run"]["status"] in {"SUCCESS", "FAILED", "ERROR", "TIMEOUT"}:
             break
         time.sleep(2)
 
     assert report_payload is not None
-    assert report_payload["plan_run"]["status"] in {"SUCCESS", "FAILED"}, report_payload
+    assert report_payload["plan_run"]["status"] in {"SUCCESS", "FAILED", "ERROR", "TIMEOUT"}, report_payload
     total = report_payload["plan_run"]["total_count"]
     pass_count = report_payload["plan_run"]["pass_count"]
     fail_count = report_payload["plan_run"]["fail_count"]
