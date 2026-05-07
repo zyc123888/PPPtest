@@ -1,15 +1,36 @@
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import protected_router, public_router
 from app.core.config import settings
-from app.core.database import SessionLocal, init_db
-from app.services import seed_demo_data
+from app.services import bootstrap_runtime
 
 
-app = FastAPI(title=settings.app_name, version="1.0.0")
+def bootstrap_application(app: FastAPI) -> None:
+    if not settings.auto_bootstrap_on_startup:
+        return
+
+    last_error = None
+    for _ in range(settings.bootstrap_max_retries):
+        try:
+            app.state.bootstrap_result = bootstrap_runtime()
+            return
+        except Exception as exc:
+            last_error = exc
+            time.sleep(settings.bootstrap_retry_interval_seconds)
+    raise RuntimeError(f"数据库初始化失败: {last_error}") from last_error
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    bootstrap_application(app)
+    yield
+
+
+app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,21 +42,6 @@ app.add_middleware(
 
 app.include_router(public_router, prefix=settings.api_v1_prefix)
 app.include_router(protected_router, prefix=settings.api_v1_prefix)
-
-
-@app.on_event("startup")
-def bootstrap() -> None:
-    last_error = None
-    for _ in range(30):
-        try:
-            init_db()
-            with SessionLocal() as db:
-                seed_demo_data(db)
-            return
-        except Exception as exc:
-            last_error = exc
-            time.sleep(2)
-    raise RuntimeError(f"数据库初始化失败: {last_error}") from last_error
 
 
 @app.get("/")

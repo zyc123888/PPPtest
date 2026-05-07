@@ -19,16 +19,37 @@ def get_db() -> Generator:
         db.close()
 
 
-def init_db() -> None:
+def init_db() -> dict:
     from app import models  # noqa: F401
 
+    inspector_before = inspect(engine)
+    tables_before = set(inspector_before.get_table_names())
+
     Base.metadata.create_all(bind=engine)
-    ensure_schema(engine)
+
+    inspector_after = inspect(engine)
+    tables_after = set(inspector_after.get_table_names())
+
+    return {
+        "database_backend": engine.url.get_backend_name(),
+        "database_name": engine.url.database,
+        "created_tables": sorted(tables_after - tables_before),
+        "schema_changes": ensure_schema(engine),
+    }
 
 
-def ensure_schema(db_engine) -> None:
+def ensure_schema(db_engine) -> list[str]:
     inspector = inspect(db_engine)
     tables = set(inspector.get_table_names())
+    schema_changes: list[str] = []
+
+    def add_column_if_missing(connection, table_name: str, column_name: str, ddl: str) -> None:
+        if table_name not in tables:
+            return
+        columns = {col["name"] for col in inspector.get_columns(table_name)}
+        if column_name not in columns:
+            connection.execute(text(ddl))
+            schema_changes.append(f"{table_name}.{column_name}")
 
     with db_engine.begin() as connection:
         if db_engine.url.get_backend_name().startswith("mysql"):
@@ -45,34 +66,65 @@ def ensure_schema(db_engine) -> None:
                     )
                 )
 
-        if "projects" in tables:
-            columns = {col["name"] for col in inspector.get_columns("projects")}
-            if "workspace_id" not in columns:
-                connection.execute(text("ALTER TABLE projects ADD COLUMN workspace_id INTEGER NULL"))
+        add_column_if_missing(
+            connection,
+            "projects",
+            "workspace_id",
+            "ALTER TABLE projects ADD COLUMN workspace_id INTEGER NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_runs",
+            "environment_id",
+            "ALTER TABLE test_runs ADD COLUMN environment_id INTEGER NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_runs",
+            "plan_run_id",
+            "ALTER TABLE test_runs ADD COLUMN plan_run_id INTEGER NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_runs",
+            "started_at",
+            "ALTER TABLE test_runs ADD COLUMN started_at DATETIME NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_runs",
+            "finished_at",
+            "ALTER TABLE test_runs ADD COLUMN finished_at DATETIME NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plan_runs",
+            "report_json_path",
+            "ALTER TABLE test_plan_runs ADD COLUMN report_json_path VARCHAR(512) NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plan_runs",
+            "report_junit_path",
+            "ALTER TABLE test_plan_runs ADD COLUMN report_junit_path VARCHAR(512) NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plan_runs",
+            "report_generated_at",
+            "ALTER TABLE test_plan_runs ADD COLUMN report_generated_at DATETIME NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "users",
+            "password_hash",
+            "ALTER TABLE users ADD COLUMN password_hash VARCHAR(128) NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "users",
+            "last_login_at",
+            "ALTER TABLE users ADD COLUMN last_login_at DATETIME NULL",
+        )
 
-        if "test_runs" in tables:
-            columns = {col["name"] for col in inspector.get_columns("test_runs")}
-            if "environment_id" not in columns:
-                connection.execute(text("ALTER TABLE test_runs ADD COLUMN environment_id INTEGER NULL"))
-            if "plan_run_id" not in columns:
-                connection.execute(text("ALTER TABLE test_runs ADD COLUMN plan_run_id INTEGER NULL"))
-            if "started_at" not in columns:
-                connection.execute(text("ALTER TABLE test_runs ADD COLUMN started_at DATETIME NULL"))
-            if "finished_at" not in columns:
-                connection.execute(text("ALTER TABLE test_runs ADD COLUMN finished_at DATETIME NULL"))
-
-        if "test_plan_runs" in tables:
-            columns = {col["name"] for col in inspector.get_columns("test_plan_runs")}
-            if "report_json_path" not in columns:
-                connection.execute(text("ALTER TABLE test_plan_runs ADD COLUMN report_json_path VARCHAR(512) NULL"))
-            if "report_junit_path" not in columns:
-                connection.execute(text("ALTER TABLE test_plan_runs ADD COLUMN report_junit_path VARCHAR(512) NULL"))
-            if "report_generated_at" not in columns:
-                connection.execute(text("ALTER TABLE test_plan_runs ADD COLUMN report_generated_at DATETIME NULL"))
-
-        if "users" in tables:
-            columns = {col["name"] for col in inspector.get_columns("users")}
-            if "password_hash" not in columns:
-                connection.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(128) NULL"))
-            if "last_login_at" not in columns:
-                connection.execute(text("ALTER TABLE users ADD COLUMN last_login_at DATETIME NULL"))
+    return schema_changes

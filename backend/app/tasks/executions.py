@@ -6,11 +6,13 @@ import subprocess
 import tempfile
 import textwrap
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from urllib.parse import urljoin
+from urllib.parse import urlparse
 from xml.sax.saxutils import escape
 
 import httpx
+from fastapi.testclient import TestClient
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 from sqlalchemy.orm import Session
@@ -20,6 +22,7 @@ from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
 from app.models import APICase, Environment, Project, TestPlanRun, TestRun, UICase
 from app.services import finalize_run, mark_run_started
+from app.timeutil import utc_now_naive
 
 
 def _safe_json_or_text(response: httpx.Response) -> dict:
@@ -71,13 +74,25 @@ def _execute_api_case_httpx(db: Session, run: TestRun, case: APICase, project: P
         "body": case.body_json,
     }
 
-    with httpx.Client(timeout=settings.request_timeout_seconds) as client:
-        response = client.request(
-            case.method.upper(),
-            target_url,
-            headers=headers,
-            json=case.body_json,
-        )
+    parsed_url = urlparse(target_url)
+    if parsed_url.hostname == "testserver":
+        from app.main import app
+
+        with TestClient(app, base_url="http://testserver") as client:
+            response = client.request(
+                case.method.upper(),
+                parsed_url.path,
+                headers=headers,
+                json=case.body_json,
+            )
+    else:
+        with httpx.Client(timeout=settings.request_timeout_seconds) as client:
+            response = client.request(
+                case.method.upper(),
+                target_url,
+                headers=headers,
+                json=case.body_json,
+            )
 
     status = "SUCCESS" if response.status_code == case.expected_status else "FAILED"
     summary = f"接口返回 {response.status_code}，预期 {case.expected_status}"
@@ -429,7 +444,7 @@ def run_test_plan(plan_run_id: int) -> dict:
 
         plan_run.status = "RUNNING"
         plan_run.summary = "测试计划执行中"
-        plan_run.started_at = datetime.now(timezone.utc)
+        plan_run.started_at = utc_now_naive()
         db.commit()
         db.refresh(plan_run)
 
@@ -504,12 +519,12 @@ def run_test_plan(plan_run_id: int) -> dict:
         plan_run.total_count = total
         plan_run.pass_count = pass_count
         plan_run.fail_count = fail_count
-        plan_run.finished_at = datetime.now(timezone.utc)
+        plan_run.finished_at = utc_now_naive()
         plan_run.duration_ms = int((time.perf_counter() - started_at) * 1000)
         summary_path, junit_path = _write_plan_report_files(plan_run, runs)
         plan_run.report_json_path = summary_path
         plan_run.report_junit_path = junit_path
-        plan_run.report_generated_at = datetime.now(timezone.utc)
+        plan_run.report_generated_at = utc_now_naive()
         db.commit()
         db.refresh(plan_run)
 
@@ -519,7 +534,7 @@ def run_test_plan(plan_run_id: int) -> dict:
         if plan_run is not None:
             plan_run.status = "FAILED"
             plan_run.summary = f"测试计划执行异常: {exc}"
-            plan_run.finished_at = datetime.now(timezone.utc)
+            plan_run.finished_at = utc_now_naive()
             plan_run.duration_ms = int((time.perf_counter() - started_at) * 1000)
             db.commit()
         return {"status": "FAILED", "summary": str(exc)}

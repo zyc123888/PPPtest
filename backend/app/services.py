@@ -11,7 +11,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import engine
+from app.core.database import SessionLocal, engine, init_db
 from app.models import (
     APICase,
     Environment,
@@ -25,6 +25,7 @@ from app.models import (
     UserToken,
     Workspace,
 )
+from app.timeutil import utc_now_naive, to_utc_naive
 
 DEFAULT_ADMIN_PASSWORD = "admin123"
 DEFAULT_USER_PASSWORD = "tester123"
@@ -47,8 +48,46 @@ def _runtime_url(preferred: str, fallback: str) -> str:
     return preferred if _is_host_reachable(preferred) else fallback
 
 
-def seed_demo_data(db: Session) -> None:
+def ensure_default_admin(db: Session) -> tuple[User, bool]:
+    user = db.scalar(select(User).where(User.username == "admin"))
+    created_or_updated = False
+    if user is None:
+        user = User(
+            username="admin",
+            display_name="管理员",
+            role="admin",
+            password_hash=hash_password(DEFAULT_ADMIN_PASSWORD),
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        created_or_updated = True
+    elif not user.password_hash:
+        user.password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+        db.commit()
+        created_or_updated = True
+    return user, created_or_updated
+
+
+def ensure_core_runtime_data(db: Session) -> list[str]:
+    seeded_resources: list[str] = []
+    existing_workspace = db.scalar(select(Workspace).order_by(Workspace.id.asc()))
+    ensure_default_workspace(db)
+    if existing_workspace is None:
+        seeded_resources.append("workspace:默认空间")
+
+    _, admin_changed = ensure_default_admin(db)
+    if admin_changed:
+        seeded_resources.append("user:admin")
+
+    return seeded_resources
+
+
+def seed_demo_data(db: Session) -> list[str]:
+    seeded_resources: list[str] = []
+    seeded_resources.extend(ensure_core_runtime_data(db))
     workspace = ensure_default_workspace(db)
+
     backend_url = _runtime_url(settings.backend_internal_url, settings.backend_public_url)
     frontend_url = _runtime_url(settings.frontend_internal_url, settings.frontend_public_url)
 
@@ -69,12 +108,15 @@ def seed_demo_data(db: Session) -> None:
         db.add(project)
         db.commit()
         db.refresh(project)
+        seeded_resources.append("project:平台自检项目")
     elif project.workspace_id is None:
         project.workspace_id = workspace.id
         db.commit()
+        seeded_resources.append("project.workspace_id:平台自检项目")
     if project.base_url != backend_url:
         project.base_url = backend_url
         db.commit()
+        seeded_resources.append("project.base_url:平台自检项目")
 
     api_case = db.scalar(select(APICase).where(APICase.name == "示例健康检查接口"))
     if api_case is None:
@@ -88,6 +130,7 @@ def seed_demo_data(db: Session) -> None:
                 expected_status=200,
             )
         )
+        seeded_resources.append("api_case:示例健康检查接口")
 
     ui_case = db.scalar(select(UICase).where(UICase.name == "示例前端首页巡检"))
     if ui_case is None:
@@ -104,6 +147,7 @@ def seed_demo_data(db: Session) -> None:
                 expect_text="常用工具",
             )
         )
+        seeded_resources.append("ui_case:示例前端首页巡检")
     else:
         ui_case.target_url = frontend_url
         ui_case.steps_json = [
@@ -125,6 +169,7 @@ def seed_demo_data(db: Session) -> None:
                 variables_json={"frontend_url": frontend_url},
             )
         )
+        seeded_resources.append("environment:本地环境")
     else:
         env.base_url = backend_url
         env.variables_json = {"frontend_url": frontend_url}
@@ -140,6 +185,7 @@ def seed_demo_data(db: Session) -> None:
         db.add(plan)
         db.commit()
         db.refresh(plan)
+        seeded_resources.append("plan:演示回归计划")
 
         api_case = db.scalar(select(APICase).where(APICase.name == "示例健康检查接口"))
         ui_case = db.scalar(select(UICase).where(UICase.name == "示例前端首页巡检"))
@@ -153,6 +199,7 @@ def seed_demo_data(db: Session) -> None:
                     order_index=1,
                 )
             )
+            seeded_resources.append("plan_case:演示回归计划/API")
         if ui_case is not None:
             db.add(
                 TestPlanCase(
@@ -163,21 +210,10 @@ def seed_demo_data(db: Session) -> None:
                     order_index=2,
                 )
             )
-
-    user = db.scalar(select(User).where(User.username == "admin"))
-    if user is None:
-        db.add(
-            User(
-                username="admin",
-                display_name="管理员",
-                role="admin",
-                password_hash=hash_password(DEFAULT_ADMIN_PASSWORD),
-            )
-        )
-    elif not user.password_hash:
-        user.password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+            seeded_resources.append("plan_case:演示回归计划/UI")
 
     db.commit()
+    return seeded_resources
 
 
 def ensure_default_workspace(db: Session) -> Workspace:
@@ -191,6 +227,41 @@ def ensure_default_workspace(db: Session) -> Workspace:
         db.commit()
         db.refresh(workspace)
     return workspace
+
+
+def _mask_url_secret(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or parsed.password is None:
+        return url
+
+    hostname = parsed.hostname or ""
+    credentials = f"{parsed.username}:***@" if parsed.username else ""
+    netloc = f"{credentials}{hostname}"
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return parsed._replace(netloc=netloc).geturl()
+
+
+def bootstrap_runtime(seed_demo_data_enabled: bool | None = None) -> dict:
+    db_summary = init_db()
+    should_seed = settings.seed_demo_data_on_bootstrap if seed_demo_data_enabled is None else seed_demo_data_enabled
+
+    with SessionLocal() as db:
+        seeded_resources = ensure_core_runtime_data(db)
+        if should_seed:
+            for resource in seed_demo_data(db):
+                if resource not in seeded_resources:
+                    seeded_resources.append(resource)
+
+    return {
+        "success": True,
+        "database_backend": db_summary["database_backend"],
+        "database_name": db_summary["database_name"],
+        "created_tables": db_summary["created_tables"],
+        "schema_changes": db_summary["schema_changes"],
+        "seeded_resources": seeded_resources,
+        "bootstrapped_at": datetime.now(timezone.utc),
+    }
 
 
 def collect_system_health() -> dict:
@@ -213,6 +284,25 @@ def collect_system_health() -> dict:
         "database": database_status,
         "redis": redis_status,
         "checked_at": datetime.now(timezone.utc),
+    }
+
+
+def collect_system_info() -> dict:
+    return {
+        "app_name": settings.app_name,
+        "app_version": settings.app_version,
+        "app_env": settings.app_env,
+        "api_v1_prefix": settings.api_v1_prefix,
+        "database_backend": settings.database_backend,
+        "database_name": settings.database_name,
+        "database_url": _mask_url_secret(settings.database_url),
+        "redis_url": _mask_url_secret(settings.redis_url),
+        "backend_public_url": settings.backend_public_url,
+        "frontend_public_url": settings.frontend_public_url,
+        "execution_engine": settings.execution_engine,
+        "report_output_dir": settings.report_output_dir,
+        "auto_bootstrap_on_startup": settings.auto_bootstrap_on_startup,
+        "seed_demo_data_on_bootstrap": settings.seed_demo_data_on_bootstrap,
     }
 
 
@@ -256,14 +346,14 @@ def authenticate_user(db: Session, username: str, password: str) -> User | None:
         return None
     if not verify_password(password, user.password_hash):
         return None
-    user.last_login_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    user.last_login_at = utc_now_naive()
     db.commit()
     return user
 
 
 def issue_user_token(db: Session, user: User) -> str:
     token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=TOKEN_TTL_HOURS)
+    expires_at = utc_now_naive() + timedelta(hours=TOKEN_TTL_HOURS)
     db.add(UserToken(user_id=user.id, token=token, expires_at=expires_at))
     db.commit()
     return token
@@ -277,7 +367,7 @@ def revoke_user_token(db: Session, token: str) -> None:
 
 
 def get_user_by_token(db: Session, token: str) -> User | None:
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = utc_now_naive()
     token_record = db.scalar(select(UserToken).where(UserToken.token == token, UserToken.expires_at > now))
     if token_record is None:
         return None
@@ -313,7 +403,7 @@ def create_test_run(
 def mark_run_started(db: Session, run: TestRun) -> None:
     run.status = "RUNNING"
     run.summary = "任务执行中"
-    run.started_at = datetime.now(timezone.utc)
+    run.started_at = utc_now_naive()
     db.commit()
     db.refresh(run)
 
@@ -333,7 +423,7 @@ def finalize_run(
     run.duration_ms = duration_ms
     run.request_payload = request_payload
     run.response_payload = response_payload
-    run.finished_at = datetime.now(timezone.utc)
+    run.finished_at = utc_now_naive()
     db.commit()
     db.refresh(run)
 

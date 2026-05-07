@@ -161,6 +161,8 @@ bash scripts/run_stack_tests.sh
 ## 后端核心接口
 
 - `GET /api/v1/system/health`：系统健康检查
+- `GET /api/v1/system/info`：系统运行信息与配置概览
+- `POST /api/v1/system/bootstrap`：手动初始化数据库与演示数据
 - `GET /api/v1/dashboard/summary`：仪表盘汇总
 - `GET /api/v1/projects`：项目列表
 - `POST /api/v1/projects`：创建项目

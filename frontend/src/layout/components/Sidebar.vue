@@ -39,35 +39,41 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
 import { Platform } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const appStore = useAppStore()
+const authStore = useAuthStore()
 const collapsed = computed(() => !appStore.sidebar.opened)
 const activePath = computed(() => route.path)
 
 const emit = defineEmits(['navigate'])
 
-const menuItems = computed(() => [
-  { path: '/dashboard', title: '工作台', icon: 'Odometer' },
-  { path: '/workspace/index', title: '工作空间', icon: 'OfficeBuilding' },
-  { path: '/project/index', title: '项目管理', icon: 'Folder' },
-  {
-    path: '/case',
-    title: '用例管理',
-    icon: 'List',
-    children: [
-      { path: '/case/api', title: '接口用例', icon: 'Link' },
-      { path: '/case/ui', title: 'UI 用例', icon: 'Monitor' }
-    ]
-  },
-  { path: '/plan/index', title: '测试计划', icon: 'Calendar' },
-  { path: '/environment/index', title: '环境管理', icon: 'Grid' },
-  { path: '/execution/index', title: '执行中心', icon: 'VideoPlay' },
-  { path: '/report/index', title: '报告中心', icon: 'Document' },
-  { path: '/tools/index', title: '常用工具', icon: 'Tools', testId: 'tab-tools' },
-  { path: '/user/index', title: '用户权限', icon: 'UserFilled' }
-])
+const menuItems = computed(() => {
+  const items = [
+    { path: '/dashboard', title: '工作台', icon: 'Odometer' },
+    { path: '/workspace/index', title: '工作空间', icon: 'OfficeBuilding' },
+    { path: '/project/index', title: '项目管理', icon: 'Folder' },
+    {
+      path: '/case',
+      title: '用例管理',
+      icon: 'List',
+      children: [
+        { path: '/case/api', title: '接口用例', icon: 'Link' },
+        { path: '/case/ui', title: 'UI 用例', icon: 'Monitor' }
+      ]
+    },
+    { path: '/plan/index', title: '测试计划', icon: 'Calendar' },
+    { path: '/environment/index', title: '环境管理', icon: 'Grid' },
+    { path: '/execution/index', title: '执行中心', icon: 'VideoPlay' },
+    { path: '/report/index', title: '报告中心', icon: 'Document' },
+    { path: '/tools/index', title: '常用工具', icon: 'Tools', testId: 'tab-tools' },
+    { path: '/user/index', title: '用户权限', icon: 'UserFilled', roles: ['admin'] }
+  ]
+
+  return items.filter((item) => !item.roles || item.roles.includes(authStore.user?.role))
+})
 
 const handleSelect = () => {
   emit('navigate')

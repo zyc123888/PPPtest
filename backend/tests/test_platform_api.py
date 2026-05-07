@@ -1,5 +1,7 @@
 import time
 
+from fastapi.testclient import TestClient
+
 
 def test_system_health(client) -> None:
     response = client.get("/system/health")
@@ -8,6 +10,52 @@ def test_system_health(client) -> None:
     assert payload["app_status"] in {"healthy", "degraded"}
     assert payload["database"] == "healthy"
     assert payload["redis"] in {"healthy", "unhealthy"}
+
+
+def test_system_info_and_bootstrap(client) -> None:
+    info_response = client.get("/system/info")
+    assert info_response.status_code == 200
+    info_payload = info_response.json()
+    assert info_payload["app_name"] == "自动化测试平台"
+    assert info_payload["database_backend"] in {"sqlite", "mysql+pymysql", "mysql"}
+    assert info_payload["backend_public_url"].startswith("http")
+
+    bootstrap_response = client.post("/system/bootstrap", json={"seed_demo_data": True})
+    assert bootstrap_response.status_code == 200
+    bootstrap_payload = bootstrap_response.json()
+    assert bootstrap_payload["success"] is True
+    assert isinstance(bootstrap_payload["created_tables"], list)
+    assert isinstance(bootstrap_payload["schema_changes"], list)
+    assert isinstance(bootstrap_payload["seeded_resources"], list)
+
+
+def test_protected_system_endpoints_require_login(client) -> None:
+    with TestClient(client.app, base_url="http://testserver/api/v1") as anonymous_client:
+        assert anonymous_client.get("/system/info").status_code == 401
+        assert anonymous_client.post("/system/bootstrap", json={"seed_demo_data": False}).status_code == 401
+
+
+def test_admin_can_manage_users(client) -> None:
+    username = f"tester_{time.time_ns()}"
+    create_response = client.post(
+        "/users",
+        json={
+            "username": username,
+            "password": "tester123",
+            "display_name": "测试用户",
+            "role": "tester",
+        },
+    )
+    assert create_response.status_code == 201
+    user_id = create_response.json()["id"]
+
+    update_response = client.put(
+        f"/users/{user_id}",
+        json={"status": "DISABLED", "role": "viewer", "password": "tester456"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["status"] == "DISABLED"
+    assert update_response.json()["role"] == "viewer"
 
 
 def test_tools_endpoints(client) -> None:

@@ -144,7 +144,7 @@ export const constantRoutes = [
         path: 'index',
         component: User,
         name: 'User',
-        meta: { title: '用户权限', icon: 'UserFilled' }
+        meta: { title: '用户权限', icon: 'UserFilled', roles: ['admin'] }
       }
     ]
   },
@@ -175,6 +175,10 @@ router.beforeEach(async (to, from, next) => {
       await authStore.logout()
       return next({ path: '/login', query: { redirect: to.fullPath } })
     }
+  }
+  const allowedRoles = to.matched.flatMap((record) => record.meta?.roles || [])
+  if (allowedRoles.length > 0 && !allowedRoles.includes(authStore.user?.role)) {
+    return next('/dashboard')
   }
   return next()
 })

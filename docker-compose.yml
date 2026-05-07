@@ -1,46 +1,58 @@
 services:
   mysql:
-    image: mysql:8.0
-    container_name: test-platform-mysql
+    image: mariadb:11.4
+    container_name: ppptest-mysql
     environment:
-      MYSQL_DATABASE: test_platform
-      MYSQL_USER: tester
-      MYSQL_PASSWORD: tester123
-      MYSQL_ROOT_PASSWORD: root123
-    ports:
-      - "3306:3306"
-    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+      MARIADB_DATABASE: test_platform
+      MARIADB_USER: tester
+      MARIADB_PASSWORD: tester123
+      MARIADB_ROOT_PASSWORD: root123
     volumes:
       - mysql_data:/var/lib/mysql
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -utester -ptester123 --silent"]
       interval: 10s
       timeout: 5s
       retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - ppptest-network
 
   redis:
     image: redis:7-alpine
-    container_name: test-platform-redis
-    ports:
-      - "6379:6379"
+    container_name: ppptest-redis
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    networks:
+      - ppptest-network
 
   backend:
     build:
       context: ./backend
-    container_name: test-platform-backend
+    container_name: ppptest-backend
     environment:
+      APP_ENV: docker
       DATABASE_URL: mysql+pymysql://tester:tester123@mysql:3306/test_platform
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       BACKEND_INTERNAL_URL: http://backend:8000
       FRONTEND_INTERNAL_URL: http://frontend:3000
-      PYTHONPATH: /app
+      BACKEND_PUBLIC_URL: http://127.0.0.1:8000
+      FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
+      CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
     depends_on:
       mysql:
         condition: service_healthy
@@ -48,25 +60,42 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    volumes:
+      - ./backend/reports:/app/reports
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/v1/system/health >/dev/null || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/v1/system/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: '0.8'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - ppptest-network
 
   worker:
     build:
       context: ./backend
-    container_name: test-platform-worker
+    container_name: ppptest-worker
     command: celery -A app.core.celery_app.celery_app worker -l info --pool=solo
     environment:
+      APP_ENV: docker
       DATABASE_URL: mysql+pymysql://tester:tester123@mysql:3306/test_platform
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       BACKEND_INTERNAL_URL: http://backend:8000
       FRONTEND_INTERNAL_URL: http://frontend:3000
-      PYTHONPATH: /app
+      BACKEND_PUBLIC_URL: http://127.0.0.1:8000
+      FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
     depends_on:
       mysql:
         condition: service_healthy
@@ -74,35 +103,67 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
-      frontend:
-        condition: service_started
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - ppptest-network
 
   frontend:
     build:
       context: ./frontend
-    container_name: test-platform-frontend
+    container_name: ppptest-frontend
     depends_on:
       backend:
         condition: service_healthy
     ports:
       - "3000:3000"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "2m"
+        max-file: "2"
+    networks:
+      - ppptest-network
 
   e2e:
     build:
       context: ./e2e
-    container_name: test-platform-e2e
+    container_name: ppptest-e2e
     environment:
       E2E_BASE_URL: http://frontend:3000
+      E2E_ADMIN_USER: admin
+      E2E_ADMIN_PASSWORD: admin123
     depends_on:
       frontend:
         condition: service_healthy
     profiles:
       - test
+    networks:
+      - ppptest-network
 
 volumes:
   mysql_data:
+    driver: local
+
+networks:
+  ppptest-network:
+    driver: bridge

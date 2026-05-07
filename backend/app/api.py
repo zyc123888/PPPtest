@@ -1,7 +1,6 @@
 import json
 import os
-from datetime import datetime, timezone
-from xml.sax.saxutils import escape
+from xml.etree import ElementTree as ET
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -25,6 +24,7 @@ from app.models import (
     Workspace,
 )
 from app.tasks.executions import run_api_case, run_test_plan, run_ui_case
+from app.timeutil import utc_now_naive
 
 
 auth_scheme = HTTPBearer(auto_error=False)
@@ -40,6 +40,12 @@ def get_current_user(
     if user is None:
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
     return user
+
+
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return current_user
 
 
 public_router = APIRouter()
@@ -58,6 +64,19 @@ def _dispatch_task_or_run_inline(task_func, record_id: int) -> tuple[str | None,
 @public_router.get("/system/health", response_model=schemas.SystemHealth)
 def system_health() -> schemas.SystemHealth:
     return schemas.SystemHealth(**services.collect_system_health())
+
+
+@protected_router.get("/system/info", response_model=schemas.SystemInfo)
+def system_info() -> schemas.SystemInfo:
+    return schemas.SystemInfo(**services.collect_system_info())
+
+
+@protected_router.post("/system/bootstrap", response_model=schemas.SystemBootstrapResult)
+def system_bootstrap(
+    payload: schemas.SystemBootstrapRequest | None = Body(None),
+) -> schemas.SystemBootstrapResult:
+    should_seed = payload.seed_demo_data if payload is not None else settings.seed_demo_data_on_bootstrap
+    return schemas.SystemBootstrapResult(**services.bootstrap_runtime(seed_demo_data_enabled=should_seed))
 
 
 @public_router.post("/auth/login", response_model=schemas.AuthLoginResponse)
@@ -577,34 +596,45 @@ def download_report_file(
         for run in runs:
             case_time = float((run.duration_ms or 0) / 1000)
             total_seconds += case_time
-            case_name = escape(run.case_name or f"{run.case_type}-{run.case_id}")
-            class_name = escape(run.case_type or "CASE")
+            testcases.append((run, case_time))
             if run.status != "SUCCESS":
                 failures += 1
-                message = escape(run.summary or "执行失败")
-                testcase = (
-                    f'<testcase classname="{class_name}" name="{case_name}" time="{case_time:.3f}">' 
-                    f'<failure message="{message}">{message}</failure>'
-                    "</testcase>"
-                )
-            else:
-                testcase = f'<testcase classname="{class_name}" name="{case_name}" time="{case_time:.3f}"></testcase>'
-            testcases.append(testcase)
 
         suite_name = f"test-plan-{plan_run.id}"
-        testsuite = (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            f'<testsuite name="{escape(suite_name)}" tests="{len(runs)}" failures="{failures}" '
-            f'errors="0" skipped="0" time="{total_seconds:.3f}">' 
-            + "".join(testcases)
-            + "</testsuite>"
+        root = ET.Element(
+            "testsuite",
+            {
+                "name": suite_name,
+                "tests": str(len(runs)),
+                "failures": str(failures),
+                "errors": "0",
+                "skipped": "0",
+                "time": f"{total_seconds:.3f}",
+            },
         )
-        with open(junit_path, "w", encoding="utf-8") as handle:
-            handle.write(testsuite)
+
+        for run, case_time in testcases:
+            case_name = run.case_name or f"{run.case_type}-{run.case_id}"
+            class_name = run.case_type or "CASE"
+            tc = ET.SubElement(
+                root,
+                "testcase",
+                {
+                    "classname": class_name,
+                    "name": case_name,
+                    "time": f"{case_time:.3f}",
+                },
+            )
+            if run.status != "SUCCESS":
+                message = run.summary or "执行失败"
+                failure = ET.SubElement(tc, "failure", {"message": message})
+                failure.text = message
+
+        ET.ElementTree(root).write(junit_path, encoding="utf-8", xml_declaration=True)
 
         plan_run.report_json_path = summary_path
         plan_run.report_junit_path = junit_path
-        plan_run.report_generated_at = datetime.now(timezone.utc)
+        plan_run.report_generated_at = utc_now_naive()
         db.commit()
         db.refresh(plan_run)
 
@@ -617,12 +647,12 @@ def download_report_file(
     return FileResponse(path=file_path, media_type=media_type, filename=filename)
 
 
-@protected_router.get("/users", response_model=list[schemas.UserRead])
+@protected_router.get("/users", response_model=list[schemas.UserRead], dependencies=[Depends(require_admin)])
 def list_users(db: Session = Depends(get_db)) -> list[User]:
     return list(db.scalars(select(User).order_by(User.id.asc())).all())
 
 
-@protected_router.post("/users", response_model=schemas.UserRead, status_code=201)
+@protected_router.post("/users", response_model=schemas.UserRead, status_code=201, dependencies=[Depends(require_admin)])
 def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db)) -> User:
     data = payload.model_dump()
     password = data.pop("password", None) or services.DEFAULT_USER_PASSWORD
@@ -633,7 +663,7 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db)) -> U
     return user
 
 
-@protected_router.put("/users/{user_id}", response_model=schemas.UserRead)
+@protected_router.put("/users/{user_id}", response_model=schemas.UserRead, dependencies=[Depends(require_admin)])
 def update_user(user_id: int, payload: schemas.UserUpdate, db: Session = Depends(get_db)) -> User:
     user = db.get(User, user_id)
     if user is None:

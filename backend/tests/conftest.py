@@ -8,6 +8,12 @@ from fastapi.testclient import TestClient
 def client() -> TestClient:
     os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
     os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:6379/0")
+    os.environ.setdefault("EXECUTION_ENGINE", "httpx")
+    os.environ.setdefault("BACKEND_INTERNAL_URL", "http://testserver")
+    os.environ.setdefault("BACKEND_PUBLIC_URL", "http://testserver")
+    os.environ.setdefault("FRONTEND_INTERNAL_URL", "http://127.0.0.1:3000")
+    os.environ.setdefault("FRONTEND_PUBLIC_URL", "http://127.0.0.1:3000")
+    os.environ.setdefault("SEED_DEMO_DATA_ON_BOOTSTRAP", "true")
 
     from app.main import app
 

@@ -6,11 +6,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     app_name: str = "自动化测试平台"
+    app_version: str = "1.1.0"
+    app_env: str = "local"
     api_v1_prefix: str = "/api/v1"
-    database_url: str = "mysql+pymysql://tester:tester123@mysql:3306/test_platform"
-    redis_url: str = "redis://redis:6379/0"
-    celery_broker_url: str = "redis://redis:6379/0"
-    celery_result_backend: str = "redis://redis:6379/0"
+
+    database_url: str = "sqlite:///./test.db"
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    celery_broker_url: str = "redis://127.0.0.1:6379/0"
+    celery_result_backend: str = "redis://127.0.0.1:6379/0"
     cors_origins: str = Field(
         default="http://localhost:3000,http://127.0.0.1:3000,http://frontend:3000"
     )
@@ -21,6 +24,10 @@ class Settings(BaseSettings):
     request_timeout_seconds: int = 30
     execution_engine: str = "pytest"
     report_output_dir: str = "reports"
+    auto_bootstrap_on_startup: bool = True
+    seed_demo_data_on_bootstrap: bool = False
+    bootstrap_max_retries: int = 30
+    bootstrap_retry_interval_seconds: int = 2
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -32,6 +39,18 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+
+    @property
+    def database_backend(self) -> str:
+        return self.database_url.split(":", 1)[0]
+
+    @property
+    def database_name(self) -> str | None:
+        if self.database_backend.startswith("sqlite"):
+            return self.database_url.replace("sqlite:///", "", 1) or None
+        if "/" not in self.database_url:
+            return None
+        return self.database_url.rsplit("/", 1)[-1] or None
 
 
 @lru_cache

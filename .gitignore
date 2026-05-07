@@ -2,6 +2,12 @@
 .idea/
 .venv/
 backend/venv/
+backend/reports/
+backend/*.db
+/reports/
+/test.db
+.codebuddy/run/
+*.apk
 __pycache__/
 *.pyc
 *.pyo

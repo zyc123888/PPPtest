@@ -235,6 +235,37 @@ class SystemHealth(BaseModel):
     checked_at: datetime
 
 
+class SystemInfo(BaseModel):
+    app_name: str
+    app_version: str
+    app_env: str
+    api_v1_prefix: str
+    database_backend: str
+    database_name: str | None = None
+    database_url: str
+    redis_url: str
+    backend_public_url: str
+    frontend_public_url: str
+    execution_engine: str
+    report_output_dir: str
+    auto_bootstrap_on_startup: bool
+    seed_demo_data_on_bootstrap: bool
+
+
+class SystemBootstrapRequest(BaseModel):
+    seed_demo_data: bool = True
+
+
+class SystemBootstrapResult(BaseModel):
+    success: bool
+    database_backend: str
+    database_name: str | None = None
+    created_tables: list[str]
+    schema_changes: list[str]
+    seeded_resources: list[str]
+    bootstrapped_at: datetime
+
+
 class TextPayload(BaseModel):
     payload: str
 
