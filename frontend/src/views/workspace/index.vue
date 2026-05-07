@@ -2,7 +2,7 @@
   <div class="app-page">
     <PageHeader title="工作空间" subtitle="管理工作空间、项目归属与资源隔离">
       <template #actions>
-        <el-button type="primary" @click="handleCreate">新增空间</el-button>
+        <el-button v-if="canAdmin" type="primary" @click="handleCreate">新增空间</el-button>
       </template>
     </PageHeader>
 
@@ -78,11 +78,13 @@ import { computed, onMounted, nextTick, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
+import { usePermissions } from '@/lib/permissions'
 
 const list = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
 const dataFormRef = ref(null)
+const { canAdmin } = usePermissions()
 
 const filters = reactive({
   keyword: ''

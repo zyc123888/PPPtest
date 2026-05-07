@@ -105,6 +105,52 @@ def test_legacy_password_hash_upgrades_on_login(client) -> None:
         assert upgraded_user.password_hash.startswith("pbkdf2_sha256$")
 
 
+def test_role_based_access_boundaries(client) -> None:
+    viewer_username = f"viewer_{time.time_ns()}"
+    tester_username = f"tester_role_{time.time_ns()}"
+    for username, role in ((viewer_username, "viewer"), (tester_username, "tester")):
+        response = client.post(
+            "/users",
+            json={
+                "username": username,
+                "password": "role123",
+                "display_name": username,
+                "role": role,
+            },
+        )
+        assert response.status_code == 201
+
+    def login_as(username: str) -> TestClient:
+        role_client = TestClient(client.app, base_url="http://testserver/api/v1")
+        login_response = role_client.post("/auth/login", json={"username": username, "password": "role123"})
+        assert login_response.status_code == 200
+        token = login_response.json()["token"]
+        role_client.headers.update({"Authorization": f"Bearer {token}"})
+        return role_client
+
+    projects = client.get("/projects").json()
+    project_id = next(project["id"] for project in projects if project["name"] == "平台自检项目")
+
+    with login_as(viewer_username) as viewer_client:
+        assert viewer_client.get("/projects").status_code == 200
+        assert viewer_client.post(
+            "/projects",
+            json={"name": f"viewer_project_{time.time_ns()}", "base_url": "http://example.com"},
+        ).status_code == 403
+        assert viewer_client.post("/system/bootstrap", json={"seed_demo_data": False}).status_code == 403
+        assert viewer_client.delete(f"/projects/{project_id}").status_code == 403
+
+    with login_as(tester_username) as tester_client:
+        create_response = tester_client.post(
+            "/projects",
+            json={"name": f"tester_project_{time.time_ns()}", "base_url": "http://example.com"},
+        )
+        assert create_response.status_code == 201
+        created_project_id = create_response.json()["id"]
+        assert tester_client.post("/system/bootstrap", json={"seed_demo_data": False}).status_code == 403
+        assert tester_client.delete(f"/projects/{created_project_id}").status_code == 403
+
+
 def test_tools_endpoints(client) -> None:
     json_response = client.post("/tools/json/format", json={"payload": '{"name":"平台","type":"测试"}'})
     assert json_response.status_code == 200

@@ -48,6 +48,12 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+def require_tester(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role not in {"admin", "tester"}:
+        raise HTTPException(status_code=403, detail="需要测试执行权限")
+    return current_user
+
+
 public_router = APIRouter()
 protected_router = APIRouter(dependencies=[Depends(get_current_user)])
 
@@ -71,7 +77,11 @@ def system_info() -> schemas.SystemInfo:
     return schemas.SystemInfo(**services.collect_system_info())
 
 
-@protected_router.post("/system/bootstrap", response_model=schemas.SystemBootstrapResult)
+@protected_router.post(
+    "/system/bootstrap",
+    response_model=schemas.SystemBootstrapResult,
+    dependencies=[Depends(require_admin)],
+)
 def system_bootstrap(
     payload: schemas.SystemBootstrapRequest | None = Body(None),
 ) -> schemas.SystemBootstrapResult:
@@ -112,7 +122,12 @@ def list_workspaces(db: Session = Depends(get_db)) -> list[Workspace]:
     return list(db.scalars(select(Workspace).order_by(Workspace.id.asc())).all())
 
 
-@protected_router.post("/workspaces", response_model=schemas.WorkspaceRead, status_code=201)
+@protected_router.post(
+    "/workspaces",
+    response_model=schemas.WorkspaceRead,
+    status_code=201,
+    dependencies=[Depends(require_admin)],
+)
 def create_workspace(payload: schemas.WorkspaceCreate, db: Session = Depends(get_db)) -> Workspace:
     workspace = Workspace(**payload.model_dump())
     db.add(workspace)
@@ -129,7 +144,12 @@ def list_projects(workspace_id: int | None = None, db: Session = Depends(get_db)
     return list(db.scalars(stmt).all())
 
 
-@protected_router.post("/projects", response_model=schemas.ProjectRead, status_code=201)
+@protected_router.post(
+    "/projects",
+    response_model=schemas.ProjectRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
 def create_project(payload: schemas.ProjectCreate, db: Session = Depends(get_db)) -> Project:
     data = payload.model_dump()
     if data.get("workspace_id") is None:
@@ -146,7 +166,7 @@ def create_project(payload: schemas.ProjectCreate, db: Session = Depends(get_db)
     return project
 
 
-@protected_router.delete("/projects/{project_id}", status_code=204)
+@protected_router.delete("/projects/{project_id}", status_code=204, dependencies=[Depends(require_admin)])
 def delete_project(project_id: int, db: Session = Depends(get_db)) -> None:
     project = db.get(Project, project_id)
     if project is None:
@@ -174,7 +194,12 @@ def list_api_cases(project_id: int | None = None, db: Session = Depends(get_db))
     return list(db.scalars(stmt).all())
 
 
-@protected_router.post("/api-cases", response_model=schemas.APICaseRead, status_code=201)
+@protected_router.post(
+    "/api-cases",
+    response_model=schemas.APICaseRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
 def create_api_case(payload: schemas.APICaseCreate, db: Session = Depends(get_db)) -> APICase:
     project = db.get(Project, payload.project_id)
     if project is None:
@@ -189,7 +214,7 @@ def create_api_case(payload: schemas.APICaseCreate, db: Session = Depends(get_db
     return api_case
 
 
-@protected_router.delete("/api-cases/{case_id}", status_code=204)
+@protected_router.delete("/api-cases/{case_id}", status_code=204, dependencies=[Depends(require_admin)])
 def delete_api_case(case_id: int, db: Session = Depends(get_db)) -> None:
     api_case = db.get(APICase, case_id)
     if api_case is None:
@@ -211,7 +236,7 @@ def list_ui_cases(project_id: int | None = None, db: Session = Depends(get_db)) 
     return list(db.scalars(stmt).all())
 
 
-@protected_router.delete("/ui-cases/{case_id}", status_code=204)
+@protected_router.delete("/ui-cases/{case_id}", status_code=204, dependencies=[Depends(require_admin)])
 def delete_ui_case(case_id: int, db: Session = Depends(get_db)) -> None:
     ui_case = db.get(UICase, case_id)
     if ui_case is None:
@@ -232,7 +257,12 @@ def list_environments(project_id: int | None = None, db: Session = Depends(get_d
     return list(db.scalars(stmt).all())
 
 
-@protected_router.post("/environments", response_model=schemas.EnvironmentRead, status_code=201)
+@protected_router.post(
+    "/environments",
+    response_model=schemas.EnvironmentRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
 def create_environment(payload: schemas.EnvironmentCreate, db: Session = Depends(get_db)) -> Environment:
     project = db.get(Project, payload.project_id)
     if project is None:
@@ -245,7 +275,7 @@ def create_environment(payload: schemas.EnvironmentCreate, db: Session = Depends
     return env
 
 
-@protected_router.delete("/environments/{environment_id}", status_code=204)
+@protected_router.delete("/environments/{environment_id}", status_code=204, dependencies=[Depends(require_admin)])
 def delete_environment(environment_id: int, db: Session = Depends(get_db)) -> None:
     env = db.get(Environment, environment_id)
     if env is None:
@@ -267,7 +297,12 @@ def list_test_plans(project_id: int | None = None, db: Session = Depends(get_db)
     return list(db.scalars(stmt).all())
 
 
-@protected_router.post("/test-plans", response_model=schemas.TestPlanRead, status_code=201)
+@protected_router.post(
+    "/test-plans",
+    response_model=schemas.TestPlanRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
 def create_test_plan(payload: schemas.TestPlanCreate, db: Session = Depends(get_db)) -> TestPlan:
     project = db.get(Project, payload.project_id)
     if project is None:
@@ -280,7 +315,7 @@ def create_test_plan(payload: schemas.TestPlanCreate, db: Session = Depends(get_
     return plan
 
 
-@protected_router.delete("/test-plans/{plan_id}", status_code=204)
+@protected_router.delete("/test-plans/{plan_id}", status_code=204, dependencies=[Depends(require_admin)])
 def delete_test_plan(plan_id: int, db: Session = Depends(get_db)) -> None:
     plan = db.get(TestPlan, plan_id)
     if plan is None:
@@ -316,7 +351,12 @@ def list_test_plan_cases(plan_id: int, db: Session = Depends(get_db)) -> list[Te
     )
 
 
-@protected_router.post("/test-plans/{plan_id}/cases", response_model=schemas.TestPlanCaseRead, status_code=201)
+@protected_router.post(
+    "/test-plans/{plan_id}/cases",
+    response_model=schemas.TestPlanCaseRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
 def add_test_plan_case(
     plan_id: int, payload: schemas.TestPlanCaseCreate, db: Session = Depends(get_db)
 ) -> TestPlanCase:
@@ -345,7 +385,11 @@ def add_test_plan_case(
     return plan_case
 
 
-@protected_router.delete("/test-plans/{plan_id}/cases/{plan_case_id}", status_code=204)
+@protected_router.delete(
+    "/test-plans/{plan_id}/cases/{plan_case_id}",
+    status_code=204,
+    dependencies=[Depends(require_admin)],
+)
 def delete_test_plan_case(plan_id: int, plan_case_id: int, db: Session = Depends(get_db)) -> None:
     plan_case = db.get(TestPlanCase, plan_case_id)
     if plan_case is None or plan_case.plan_id != plan_id:
@@ -354,7 +398,11 @@ def delete_test_plan_case(plan_id: int, plan_case_id: int, db: Session = Depends
     db.commit()
 
 
-@protected_router.post("/test-plans/{plan_id}/run", response_model=schemas.TestPlanRunRead)
+@protected_router.post(
+    "/test-plans/{plan_id}/run",
+    response_model=schemas.TestPlanRunRead,
+    dependencies=[Depends(require_tester)],
+)
 def trigger_test_plan(
     plan_id: int,
     payload: schemas.TestPlanRunCreate | None = Body(None),
@@ -413,7 +461,12 @@ def trigger_test_plan(
     return plan_run
 
 
-@protected_router.post("/ui-cases", response_model=schemas.UICaseRead, status_code=201)
+@protected_router.post(
+    "/ui-cases",
+    response_model=schemas.UICaseRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
 def create_ui_case(payload: schemas.UICaseCreate, db: Session = Depends(get_db)) -> UICase:
     project = db.get(Project, payload.project_id)
     if project is None:
@@ -439,7 +492,11 @@ def get_run(run_id: int, db: Session = Depends(get_db)) -> TestRun:
     return run
 
 
-@protected_router.post("/executions/api/{case_id}/run", response_model=schemas.TestRunRead)
+@protected_router.post(
+    "/executions/api/{case_id}/run",
+    response_model=schemas.TestRunRead,
+    dependencies=[Depends(require_tester)],
+)
 def trigger_api_case(
     case_id: int,
     payload: schemas.ExecutionTrigger | None = Body(None),
@@ -473,7 +530,11 @@ def trigger_api_case(
     return run
 
 
-@protected_router.post("/executions/ui/{case_id}/run", response_model=schemas.TestRunRead)
+@protected_router.post(
+    "/executions/ui/{case_id}/run",
+    response_model=schemas.TestRunRead,
+    dependencies=[Depends(require_tester)],
+)
 def trigger_ui_case(
     case_id: int,
     payload: schemas.ExecutionTrigger | None = Body(None),

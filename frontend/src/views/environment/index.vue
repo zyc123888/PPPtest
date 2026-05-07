@@ -2,7 +2,7 @@
   <div class="app-page">
     <PageHeader title="环境管理" subtitle="维护项目环境与变量配置">
       <template #actions>
-        <el-button type="primary" @click="handleCreate">新增环境</el-button>
+        <el-button v-if="canTest" type="primary" @click="handleCreate">新增环境</el-button>
       </template>
     </PageHeader>
 
@@ -45,7 +45,7 @@
             {{ formatTime(scope.row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" align="center" width="140">
+        <el-table-column v-if="canAdmin" label="操作" align="center" width="140">
           <template #default="scope">
             <el-button size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
           </template>
@@ -58,7 +58,7 @@
           <div class="mobile-card-meta">项目：{{ projectMap[item.project_id] || item.project_id }}</div>
           <div class="mobile-card-meta">基础地址：{{ item.base_url }}</div>
           <div class="mobile-card-desc">创建时间：{{ formatTime(item.created_at) }}</div>
-          <div class="mobile-card-actions">
+          <div v-if="canAdmin" class="mobile-card-actions">
             <el-button size="small" type="danger" @click="handleDelete(item)">删除</el-button>
           </div>
         </div>
@@ -108,12 +108,14 @@ import { computed, onMounted, nextTick, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
+import { usePermissions } from '@/lib/permissions'
 
 const list = ref([])
 const projects = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
 const dataFormRef = ref(null)
+const { canAdmin, canTest } = usePermissions()
 
 const filters = reactive({
   projectId: undefined,

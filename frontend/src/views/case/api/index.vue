@@ -2,7 +2,7 @@
   <div class="app-page">
     <PageHeader title="接口用例" subtitle="维护 API 用例并投递执行任务">
       <template #actions>
-        <el-button type="primary" @click="handleCreate">新增接口用例</el-button>
+        <el-button v-if="canTest" type="primary" @click="handleCreate">新增接口用例</el-button>
       </template>
     </PageHeader>
 
@@ -68,8 +68,8 @@
         <el-table-column label="预期状态码" prop="expected_status" width="120" align="center" />
         <el-table-column label="操作" align="center" width="220">
           <template #default="scope">
-            <el-button size="small" type="primary" @click="handleRun(scope.row)">立即执行</el-button>
-            <el-button size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
+            <el-button v-if="canTest" size="small" type="primary" @click="handleRun(scope.row)">立即执行</el-button>
+            <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -81,8 +81,8 @@
           <div class="mobile-card-meta">方法：{{ item.method }} · {{ item.expected_status }}</div>
           <div class="mobile-card-desc">{{ item.path }}</div>
           <div class="mobile-card-actions">
-            <el-button size="small" type="primary" @click="handleRun(item)">立即执行</el-button>
-            <el-button size="small" type="danger" @click="handleDelete(item)">删除</el-button>
+            <el-button v-if="canTest" size="small" type="primary" @click="handleRun(item)">立即执行</el-button>
+            <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(item)">删除</el-button>
           </div>
         </div>
       </div>
@@ -169,12 +169,14 @@ import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { usePermissions } from '@/lib/permissions'
 
 const list = ref([])
 const projects = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
 const dataFormRef = ref(null)
+const { canAdmin, canTest } = usePermissions()
 
 const filters = reactive({
   projectId: undefined,

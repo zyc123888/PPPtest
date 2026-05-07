@@ -2,7 +2,7 @@
   <div class="app-page">
     <PageHeader title="测试计划" subtitle="编排回归计划并统一执行">
       <template #actions>
-        <el-button type="primary" @click="handleCreate">新增计划</el-button>
+        <el-button v-if="canTest" type="primary" @click="handleCreate">新增计划</el-button>
       </template>
     </PageHeader>
 
@@ -43,9 +43,9 @@
         <el-table-column label="状态" prop="status" width="120" align="center" />
         <el-table-column label="操作" align="center" width="300">
           <template #default="scope">
-            <el-button size="small" @click="openCaseDialog(scope.row)">用例配置</el-button>
-            <el-button size="small" type="primary" @click="openRunDialog(scope.row)">执行计划</el-button>
-            <el-dropdown @command="(cmd) => handlePlanCommand(cmd, scope.row)">
+            <el-button v-if="canTest" size="small" @click="openCaseDialog(scope.row)">用例配置</el-button>
+            <el-button v-if="canTest" size="small" type="primary" @click="openRunDialog(scope.row)">执行计划</el-button>
+            <el-dropdown v-if="canAdmin" @command="(cmd) => handlePlanCommand(cmd, scope.row)">
               <el-button size="small">
                 更多
                 <el-icon><ArrowDown /></el-icon>
@@ -67,9 +67,9 @@
           <div class="mobile-card-meta">状态：{{ item.status }}</div>
           <div class="mobile-card-desc">{{ item.description || '-' }}</div>
           <div class="mobile-card-actions">
-            <el-button size="small" @click="openCaseDialog(item)">用例配置</el-button>
-            <el-button size="small" type="primary" @click="openRunDialog(item)">执行计划</el-button>
-            <el-button size="small" type="danger" @click="handlePlanCommand('delete', item)">删除</el-button>
+            <el-button v-if="canTest" size="small" @click="openCaseDialog(item)">用例配置</el-button>
+            <el-button v-if="canTest" size="small" type="primary" @click="openRunDialog(item)">执行计划</el-button>
+            <el-button v-if="canAdmin" size="small" type="danger" @click="handlePlanCommand('delete', item)">删除</el-button>
           </div>
         </div>
       </div>
@@ -129,7 +129,7 @@
               <el-input-number v-model="caseForm.order_index" :min="1" />
             </el-form-item>
             <el-form-item label=" " class="query-actions">
-              <el-button type="primary" @click="addPlanCase">加入计划</el-button>
+              <el-button v-if="canTest" type="primary" @click="addPlanCase">加入计划</el-button>
             </el-form-item>
           </el-form>
         </div>
@@ -140,7 +140,7 @@
           <el-table-column label="用例名称" prop="case_name" min-width="220" show-overflow-tooltip />
           <el-table-column label="操作" width="120" align="center">
             <template #default="scope">
-              <el-button size="small" type="danger" @click="removePlanCase(scope.row)">移除</el-button>
+              <el-button v-if="canAdmin" size="small" type="danger" @click="removePlanCase(scope.row)">移除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -169,6 +169,7 @@ import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { usePermissions } from '@/lib/permissions'
 
 const list = ref([])
 const projects = ref([])
@@ -181,6 +182,7 @@ const caseDialogVisible = ref(false)
 const runDialogVisible = ref(false)
 const caseLoading = ref(false)
 const dataFormRef = ref(null)
+const { canAdmin, canTest } = usePermissions()
 
 const currentPlan = ref(null)
 
