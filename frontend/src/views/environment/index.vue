@@ -45,9 +45,10 @@
             {{ formatTime(scope.row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column v-if="canAdmin" label="操作" align="center" width="140">
+        <el-table-column v-if="canTest || canAdmin" label="操作" align="center" width="220">
           <template #default="scope">
-            <el-button size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
+            <el-button v-if="canTest" size="small" @click="handleEdit(scope.row)">编辑</el-button>
+            <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -58,8 +59,9 @@
           <div class="mobile-card-meta">项目：{{ projectMap[item.project_id] || item.project_id }}</div>
           <div class="mobile-card-meta">基础地址：{{ item.base_url }}</div>
           <div class="mobile-card-desc">创建时间：{{ formatTime(item.created_at) }}</div>
-          <div v-if="canAdmin" class="mobile-card-actions">
-            <el-button size="small" type="danger" @click="handleDelete(item)">删除</el-button>
+          <div v-if="canTest || canAdmin" class="mobile-card-actions">
+            <el-button v-if="canTest" size="small" @click="handleEdit(item)">编辑</el-button>
+            <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(item)">删除</el-button>
           </div>
         </div>
       </div>
@@ -75,7 +77,7 @@
       </div>
     </el-card>
 
-    <el-dialog v-model="dialogVisible" title="新增环境" width="640px">
+    <el-dialog v-model="dialogVisible" :title="isEditing ? '编辑环境' : '新增环境'" width="640px">
       <el-form ref="dataFormRef" :model="temp" :rules="rules" label-position="top">
         <el-form-item label="所属项目" prop="project_id">
           <el-select v-model="temp.project_id" placeholder="请选择项目" style="width: 100%">
@@ -100,7 +102,7 @@
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="createData">确认</el-button>
+        <el-button type="primary" @click="submitData">{{ isEditing ? '保存' : '确认' }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -117,6 +119,7 @@ const list = ref([])
 const projects = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
+const isEditing = ref(false)
 const dataFormRef = ref(null)
 const { canAdmin, canTest } = usePermissions()
 
@@ -129,11 +132,13 @@ const page = ref(1)
 const pageSize = ref(10)
 
 const temp = reactive({
+  id: undefined,
   project_id: undefined,
   name: '',
   base_url: 'http://backend:8000',
   headers_text: '{\n  "accept": "application/json"\n}',
-  variables_text: '{\n  "frontend_url": "http://frontend:3000"\n}'
+  variables_text: '{\n  "frontend_url": "http://frontend:3000"\n}',
+  auth_config_text: ''
 })
 
 const rules = {
@@ -219,11 +224,29 @@ const pagedList = computed(() => {
 })
 
 const handleCreate = () => {
+  isEditing.value = false
+  temp.id = undefined
   temp.project_id = projects.value.length > 0 ? projects.value[0].id : undefined
   temp.name = ''
   temp.base_url = 'http://backend:8000'
   temp.headers_text = '{\n  "accept": "application/json"\n}'
   temp.variables_text = '{\n  "frontend_url": "http://frontend:3000"\n}'
+  temp.auth_config_text = ''
+  dialogVisible.value = true
+  nextTick(() => {
+    dataFormRef.value?.clearValidate()
+  })
+}
+
+const handleEdit = (row) => {
+  isEditing.value = true
+  temp.id = row.id
+  temp.project_id = row.project_id
+  temp.name = row.name
+  temp.base_url = row.base_url
+  temp.headers_text = JSON.stringify(row.headers_json || {}, null, 2)
+  temp.variables_text = JSON.stringify(row.variables_json || {}, null, 2)
+  temp.auth_config_text = JSON.stringify(row.auth_config_json || {}, null, 2)
   dialogVisible.value = true
   nextTick(() => {
     dataFormRef.value?.clearValidate()
@@ -240,20 +263,31 @@ const handleReset = () => {
   page.value = 1
 }
 
-const createData = () => {
+const submitData = () => {
   dataFormRef.value?.validate(async (valid) => {
     if (valid) {
       try {
-        await api.post('/environments', {
+        const payload = {
           project_id: temp.project_id,
           name: temp.name,
           base_url: temp.base_url,
           headers_json: temp.headers_text ? JSON.parse(temp.headers_text) : null,
           variables_json: temp.variables_text ? JSON.parse(temp.variables_text) : null,
           auth_config_json: temp.auth_config_text ? JSON.parse(temp.auth_config_text) : null
-        })
+        }
+        if (isEditing.value) {
+          await api.put(`/environments/${temp.id}`, {
+            name: payload.name,
+            base_url: payload.base_url,
+            headers_json: payload.headers_json,
+            variables_json: payload.variables_json,
+            auth_config_json: payload.auth_config_json
+          })
+        } else {
+          await api.post('/environments', payload)
+        }
         dialogVisible.value = false
-        ElMessage.success('创建成功')
+        ElMessage.success(isEditing.value ? '更新成功' : '创建成功')
         getList()
       } catch (error) {
         ElMessage.error(error.message)

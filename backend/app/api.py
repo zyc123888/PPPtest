@@ -178,6 +178,9 @@ protected_router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 def _dispatch_task_or_run_inline(task_func, record_id: int) -> tuple[str | None, bool]:
+    if settings.backend_internal_url.startswith("http://testserver"):
+        task_func(record_id)
+        return None, True
     try:
         task = task_func.delay(record_id)
         return task.id, False
@@ -563,6 +566,33 @@ def create_environment(
 
     env = Environment(**payload.model_dump(), created_by=current_user.id, updated_by=current_user.id)
     db.add(env)
+    db.commit()
+    db.refresh(env)
+    return env
+
+
+@protected_router.put(
+    "/environments/{environment_id}",
+    response_model=schemas.EnvironmentRead,
+    dependencies=[Depends(require_tester)],
+)
+def update_environment(
+    environment_id: int,
+    payload: schemas.EnvironmentUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Environment:
+    env = db.get(Environment, environment_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="环境不存在")
+    _require_project_access(db, current_user, db.get(Project, env.project_id))
+
+    env.name = payload.name
+    env.base_url = payload.base_url
+    env.headers_json = payload.headers_json
+    env.variables_json = payload.variables_json
+    env.auth_config_json = payload.auth_config_json
+    env.updated_by = current_user.id
     db.commit()
     db.refresh(env)
     return env

@@ -125,6 +125,23 @@
         <el-button type="primary" @click="createData">确认</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="runDialogVisible" title="执行 UI 用例" width="520px">
+      <el-form label-position="top" :model="runForm">
+        <el-form-item label="执行环境">
+          <el-select v-model="runForm.environment_id" clearable placeholder="不指定环境，直接使用用例目标地址" style="width: 100%">
+            <el-option v-for="item in runEnvironmentOptions" :key="item.id" :label="`${item.name} · ${item.base_url}`" :value="item.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="超时（秒）">
+          <el-input-number v-model="runForm.timeout_seconds" :min="1" :max="600" style="width: 100%" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="runDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitRun">确认执行</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -138,8 +155,10 @@ import { usePermissions } from '@/lib/permissions'
 
 const list = ref([])
 const projects = ref([])
+const environments = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
+const runDialogVisible = ref(false)
 const dataFormRef = ref(null)
 const { canAdmin, canTest } = usePermissions()
 
@@ -157,6 +176,13 @@ const temp = reactive({
   target_url: '',
   expect_text: '',
   steps_text: ''
+})
+
+const runForm = reactive({
+  case_id: undefined,
+  project_id: undefined,
+  environment_id: undefined,
+  timeout_seconds: 60
 })
 
 const rules = {
@@ -183,6 +209,8 @@ const projectMap = computed(() => {
   })
   return map
 })
+
+const runEnvironmentOptions = computed(() => environments.value.filter((item) => item.project_id === runForm.project_id))
 
 const filteredList = computed(() => {
   const keyword = filters.keyword.trim().toLowerCase()
@@ -261,8 +289,25 @@ const createData = () => {
 }
 
 const handleRun = async (row) => {
+  runForm.case_id = row.id
+  runForm.project_id = row.project_id
+  runForm.environment_id = undefined
+  runForm.timeout_seconds = 60
   try {
-    await api.post(`/executions/ui/${row.id}/run`)
+    environments.value = await api.get(`/environments?project_id=${row.project_id}`)
+    runDialogVisible.value = true
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const submitRun = async () => {
+  try {
+    await api.post(`/executions/ui/${runForm.case_id}/run`, {
+      environment_id: runForm.environment_id,
+      timeout_seconds: runForm.timeout_seconds
+    })
+    runDialogVisible.value = false
     ElMessage.success('任务已投递')
   } catch (error) {
     ElMessage.error(error.message)

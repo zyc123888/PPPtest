@@ -176,6 +176,14 @@ class EnvironmentCreate(BaseModel):
     auth_config_json: dict | None = None
 
 
+class EnvironmentUpdate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    base_url: str = Field(..., min_length=5, max_length=255)
+    headers_json: dict | None = None
+    variables_json: dict | None = None
+    auth_config_json: dict | None = None
+
+
 class EnvironmentRead(ORMBaseModel):
     id: int
     project_id: int

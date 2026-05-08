@@ -259,6 +259,57 @@ def test_tools_endpoints(client) -> None:
     assert json_response.status_code == 200
     assert '"name": "平台"' in json_response.json()["result"]
 
+
+def test_environment_update_and_variables_api(client) -> None:
+    projects_response = client.get("/projects")
+    assert projects_response.status_code == 200
+    project_id = projects_response.json()[0]["id"]
+
+    create_response = client.post(
+        "/environments",
+        json={
+            "project_id": project_id,
+            "name": f"env_{time.time_ns()}",
+            "base_url": "http://backend:8000",
+            "headers_json": {"accept": "application/json"},
+            "variables_json": {"token": "abc"},
+            "auth_config_json": {"header_name": "Authorization", "token_prefix": "Bearer", "token": "{{token}}"},
+        },
+    )
+    assert create_response.status_code == 201
+    env_id = create_response.json()["id"]
+
+    update_response = client.put(
+        f"/environments/{env_id}",
+        json={
+            "name": "updated env",
+            "base_url": "http://testserver",
+            "headers_json": {"x-env": "test"},
+            "variables_json": {"token": "xyz"},
+            "auth_config_json": {"header_name": "Authorization", "token": "{{token}}"},
+        },
+    )
+    assert update_response.status_code == 200
+    payload = update_response.json()
+    assert payload["name"] == "updated env"
+    assert payload["base_url"] == "http://testserver"
+    assert payload["variables_json"]["token"] == "xyz"
+
+    variables_response = client.get(f"/environments/{env_id}/variables")
+    assert variables_response.status_code == 200
+    assert variables_response.json()["headers_json"]["x-env"] == "test"
+
+    variables_update_response = client.put(
+        f"/environments/{env_id}/variables",
+        json={
+            "headers_json": {"x-env": "changed"},
+            "variables_json": {"token": "final"},
+            "auth_config_json": {"header_name": "Authorization", "token_prefix": "Bearer", "token": "{{token}}"},
+        },
+    )
+    assert variables_update_response.status_code == 200
+    assert variables_update_response.json()["variables_json"]["token"] == "final"
+
     encoded = client.post("/tools/base64/encode", json={"payload": "hello-test"}).json()["result"]
     decoded = client.post("/tools/base64/decode", json={"payload": encoded}).json()["result"]
     assert decoded == "hello-test"
