@@ -391,6 +391,8 @@ def test_api_case_run(client) -> None:
     artifacts_payload = client.get(f"/executions/runs/{run_id}/artifacts")
     assert artifacts_payload.status_code == 200
     assert len(artifacts_payload.json()["artifacts"]) >= 1
+    artifact_download = client.get(f"/executions/runs/{run_id}/artifacts/0/download")
+    assert artifact_download.status_code == 200
 
     rerun_response = client.post(f"/executions/runs/{run_id}/rerun")
     assert rerun_response.status_code == 200
@@ -417,6 +419,11 @@ def test_ui_case_run(client) -> None:
 
 
 def test_plan_run_report(client) -> None:
+    from sqlalchemy import update
+
+    from app.core.database import SessionLocal
+    from app.models import TestPlanRun
+
     plans = client.get("/test-plans").json()
     plan_id = next(plan["id"] for plan in plans if plan["name"] == "演示回归计划")
     trigger = client.post(f"/test-plans/{plan_id}/run", json={})
@@ -436,6 +443,14 @@ def test_plan_run_report(client) -> None:
     pass_count = report_payload["plan_run"]["pass_count"]
     fail_count = report_payload["plan_run"]["fail_count"]
     assert total == pass_count + fail_count
+    with SessionLocal() as db:
+        db.execute(update(TestPlanRun).where(TestPlanRun.id == plan_run_id).values(retry_count=None))
+        db.commit()
+
+    list_response = client.get("/reports")
+    assert list_response.status_code == 200
+    assert any(item["id"] == plan_run_id for item in list_response.json())
+
     download_json = client.get(f"/reports/{plan_run_id}/download?format=json")
     assert download_json.status_code == 200
     assert download_json.headers.get("content-type", "").startswith("application/json")

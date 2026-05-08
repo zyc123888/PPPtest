@@ -140,6 +140,15 @@ def _serialize_environment_variables(env: Environment) -> schemas.EnvironmentVar
     )
 
 
+def _serialize_plan_run(plan_run: TestPlanRun) -> schemas.TestPlanRunRead:
+    payload = {
+        field: getattr(plan_run, field)
+        for field in schemas.TestPlanRunRead.model_fields.keys()
+    }
+    payload["retry_count"] = payload.get("retry_count") or 0
+    return schemas.TestPlanRunRead(**payload)
+
+
 def _case_snapshot(case) -> dict:
     payload = {
         "id": case.id,
@@ -178,7 +187,7 @@ protected_router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 def _dispatch_task_or_run_inline(task_func, record_id: int) -> tuple[str | None, bool]:
-    if settings.backend_internal_url.startswith("http://testserver"):
+    if settings.backend_internal_url.startswith("http://testserver") or settings.app_env == "local":
         task_func(record_id)
         return None, True
     try:
@@ -936,6 +945,43 @@ def get_run_artifacts(
     return schemas.ExecutionArtifactsRead(run_id=run.id, artifacts=run.artifacts_json or [])
 
 
+@protected_router.get("/executions/runs/{run_id}/artifacts/{artifact_index}/download")
+def download_run_artifact(
+    run_id: int,
+    artifact_index: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    run = db.get(TestRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="执行记录不存在")
+    _require_project_access(db, current_user, db.get(Project, run.project_id))
+
+    artifacts = run.artifacts_json or []
+    if artifact_index < 0 or artifact_index >= len(artifacts):
+        raise HTTPException(status_code=404, detail="执行产物不存在")
+
+    artifact = artifacts[artifact_index]
+    file_path = artifact.get("path")
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="执行产物文件不存在")
+
+    media_type = "application/octet-stream"
+    artifact_type = (artifact.get("type") or "").lower()
+    if artifact_type == "json":
+        media_type = "application/json"
+    elif artifact_type in {"txt", "log"}:
+        media_type = "text/plain; charset=utf-8"
+    elif artifact_type == "png":
+        media_type = "image/png"
+    elif artifact_type in {"jpg", "jpeg"}:
+        media_type = "image/jpeg"
+    elif artifact_type == "html":
+        media_type = "text/html; charset=utf-8"
+
+    return FileResponse(path=file_path, media_type=media_type, filename=artifact.get("name") or os.path.basename(file_path))
+
+
 @protected_router.post(
     "/executions/runs/{run_id}/rerun",
     response_model=schemas.TestRunRead,
@@ -1102,7 +1148,7 @@ def list_reports(
         plan = db.get(TestPlan, run.plan_id)
         project = db.get(Project, run.project_id)
         environment = db.get(Environment, run.environment_id) if run.environment_id else None
-        base_payload = schemas.TestPlanRunRead.model_validate(run).model_dump()
+        base_payload = _serialize_plan_run(run).model_dump()
         result.append(
             schemas.TestPlanRunView(
                 **base_payload,
@@ -1128,7 +1174,7 @@ def get_report(
     test_runs = list(
         db.scalars(select(TestRun).where(TestRun.plan_run_id == plan_run_id).order_by(TestRun.id.asc())).all()
     )
-    return schemas.ReportDetail(plan_run=plan_run, test_runs=test_runs)
+    return schemas.ReportDetail(plan_run=_serialize_plan_run(plan_run), test_runs=test_runs)
 
 
 @protected_router.get("/reports/{plan_run_id}/download")
@@ -1158,7 +1204,7 @@ def download_report_file(
         junit_path = os.path.join(plan_dir, "junit.xml")
 
         summary_payload = {
-            "plan_run": schemas.TestPlanRunRead.model_validate(plan_run).model_dump(),
+            "plan_run": _serialize_plan_run(plan_run).model_dump(),
             "test_runs": [schemas.TestRunRead.model_validate(run).model_dump() for run in runs],
         }
         with open(summary_path, "w", encoding="utf-8") as handle:
