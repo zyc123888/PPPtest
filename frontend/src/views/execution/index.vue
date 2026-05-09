@@ -131,12 +131,15 @@
     <el-dialog v-model="artifactDialogVisible" title="执行产物" width="760px">
       <el-empty v-if="!artifactData.length" description="暂无产物" />
       <div v-else class="artifact-list">
-        <div v-for="item in artifactData" :key="item.path" class="artifact-item">
+        <div v-for="(item, index) in artifactData" :key="`${item.path}-${index}`" class="artifact-item">
           <div>
             <div class="artifact-name">{{ item.name }}</div>
             <div class="artifact-path">{{ item.path }}</div>
           </div>
-          <el-button size="small" @click="copyArtifactPath(item.path)">复制路径</el-button>
+          <div class="artifact-actions">
+            <el-button size="small" type="primary" @click="downloadArtifact(index, item)">下载</el-button>
+            <el-button size="small" @click="copyArtifactPath(item.path)">复制路径</el-button>
+          </div>
         </div>
       </div>
     </el-dialog>
@@ -158,6 +161,7 @@ const artifactDialogVisible = ref(false)
 const currentRun = ref({})
 const logData = ref({})
 const artifactData = ref([])
+const artifactRunId = ref(null)
 const { canTest } = usePermissions()
 let timer = null
 
@@ -270,6 +274,7 @@ const openLogs = async (row) => {
 const openArtifacts = async (row) => {
   try {
     const data = await api.get(`/executions/runs/${row.id}/artifacts`)
+    artifactRunId.value = row.id
     artifactData.value = data.artifacts || []
     artifactDialogVisible.value = true
   } catch (error) {
@@ -293,6 +298,33 @@ const copyArtifactPath = async (path) => {
     ElMessage.success('路径已复制')
   } catch (error) {
     ElMessage.error('复制失败')
+  }
+}
+
+const downloadArtifact = async (artifactIndex, artifact) => {
+  if (!artifactRunId.value) return
+  try {
+    const token = localStorage.getItem('tp_token')
+    const response = await fetch(`/api/v1/executions/runs/${artifactRunId.value}/artifacts/${artifactIndex}/download`, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      }
+    })
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null)
+      throw new Error(payload?.detail || '下载失败')
+    }
+    const blob = await response.blob()
+    const objectUrl = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = objectUrl
+    link.download = artifact.name || `artifact_${artifactIndex}`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(objectUrl)
+  } catch (error) {
+    ElMessage.error(error.message || '下载失败')
   }
 }
 
@@ -334,6 +366,12 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: var(--color-text-secondary);
   word-break: break-all;
+}
+
+.artifact-actions {
+  display: flex;
+  gap: var(--space-8);
+  flex-shrink: 0;
 }
 
 @media (max-width: 960px) {
