@@ -38,4 +38,13 @@ done
 
 PPPTEST_RUN_MODE=docker bash scripts/health_check.sh
 compose_cmd exec -T backend pytest
-compose_cmd run --rm e2e
+
+E2E_SPECS=(
+  tests/admin_layout.spec.js
+  tests/full_flow.spec.js
+  tests/workspace_membership_flow.spec.js
+  tests/workspace_owner_guard.spec.js
+  tests/execution_artifact_download.spec.js
+)
+
+compose_cmd run --rm e2e npx playwright test "${E2E_SPECS[@]}" --reporter=line
