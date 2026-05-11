@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     bootstrap_retry_interval_seconds: int = 2
     initial_admin_password: str = "admin123"
     password_hash_iterations: int = 260000
+    normalize_mysql_charset_on_bootstrap: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",

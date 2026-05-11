@@ -76,7 +76,8 @@ test('生产级完整流程：项目-用例-计划-执行-报告', async ({ page
   // 报告中心 - 等待报告生成
   await page.getByRole('menuitem', { name: '报告中心' }).click()
   await page.getByRole('button', { name: '刷新' }).click()
-  await expect(page.getByText(planName)).toBeVisible({ timeout: 20000 })
-  await page.getByRole('row', { name: new RegExp(planName) }).getByRole('button', { name: '详情' }).click()
+  const reportRow = page.getByRole('row', { name: new RegExp(planName) })
+  await expect(reportRow).toBeVisible({ timeout: 20000 })
+  await reportRow.getByRole('button', { name: '详情' }).click()
   await expect(page.getByText(apiCaseName)).toBeVisible()
 })

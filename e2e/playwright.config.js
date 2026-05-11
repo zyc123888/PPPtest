@@ -5,7 +5,7 @@ module.exports = defineConfig({
   timeout: 60000,
   use: {
     baseURL: process.env.E2E_BASE_URL || 'http://localhost:3000',
-    headless: true
+    headless: true,
+    acceptDownloads: true
   }
 })
-

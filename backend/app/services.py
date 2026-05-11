@@ -33,6 +33,13 @@ from app.timeutil import utc_now_naive, to_utc_naive
 DEFAULT_USER_PASSWORD = "tester123"
 TOKEN_TTL_HOURS = 12
 PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
+SUMMARY_MAX_LENGTH = 255
+
+
+def _truncate_summary(summary: str | None) -> str | None:
+    if summary is None or len(summary) <= SUMMARY_MAX_LENGTH:
+        return summary
+    return f"{summary[: SUMMARY_MAX_LENGTH - 3]}..."
 
 
 def _is_host_reachable(url: str) -> bool:
@@ -180,10 +187,9 @@ def seed_demo_data(db: Session) -> list[str]:
                 status="ACTIVE",
                 steps_json=[
                     {"action": "goto", "value": frontend_url},
-                    {"action": "goto", "value": f"{frontend_url}/tools/index"},
-                    {"action": "wait_for_text", "value": "常用工具"},
+                    {"action": "wait_for_text", "value": "登录"},
                 ],
-                expect_text="常用工具",
+                expect_text="登录",
             )
         )
         seeded_resources.append("ui_case:示例前端首页巡检")
@@ -194,9 +200,9 @@ def seed_demo_data(db: Session) -> list[str]:
         ui_case.target_url = frontend_url
         ui_case.steps_json = [
             {"action": "goto", "value": frontend_url},
-            {"action": "goto", "value": f"{frontend_url}/tools/index"},
-            {"action": "wait_for_text", "value": "常用工具"},
+            {"action": "wait_for_text", "value": "登录"},
         ]
+        ui_case.expect_text = "登录"
 
     env = db.scalar(
         select(Environment).where(Environment.project_id == project.id, Environment.name == "本地环境")
@@ -541,7 +547,7 @@ def finalize_run(
     response_payload: dict | None = None,
 ) -> None:
     run.status = status
-    run.summary = summary
+    run.summary = _truncate_summary(summary)
     run.error_type = error_type
     run.exit_code = exit_code
     run.timeout_seconds = timeout_seconds

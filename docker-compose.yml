@@ -103,6 +103,8 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
+    volumes:
+      - ./backend/reports:/app/reports
     restart: unless-stopped
     deploy:
       resources:

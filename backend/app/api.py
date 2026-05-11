@@ -187,7 +187,11 @@ protected_router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 def _dispatch_task_or_run_inline(task_func, record_id: int) -> tuple[str | None, bool]:
-    if settings.backend_internal_url.startswith("http://testserver") or settings.app_env == "local":
+    if (
+        os.getenv("PYTEST_CURRENT_TEST")
+        or settings.backend_internal_url.startswith("http://testserver")
+        or settings.app_env == "local"
+    ):
         task_func(record_id)
         return None, True
     try:

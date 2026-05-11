@@ -38,6 +38,7 @@ done
 
 PPPTEST_RUN_MODE=docker bash scripts/health_check.sh
 compose_cmd exec -T backend pytest
+compose_cmd build e2e
 
 E2E_SPECS=(
   tests/admin_layout.spec.js

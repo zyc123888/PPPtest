@@ -77,7 +77,7 @@ def ensure_schema(db_engine) -> list[str]:
             schema_changes.append(f"{table_name}.{column_name}:varchar({min_length})")
 
     with db_engine.begin() as connection:
-        if db_engine.url.get_backend_name().startswith("mysql"):
+        if settings.normalize_mysql_charset_on_bootstrap and db_engine.url.get_backend_name().startswith("mysql"):
             db_name = db_engine.url.database or "test_platform"
             connection.execute(
                 text(

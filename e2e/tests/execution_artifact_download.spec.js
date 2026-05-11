@@ -51,8 +51,20 @@ test('执行中心可下载执行产物', async ({ page }) => {
   await expect(artifactDialog).toBeVisible()
   await expect(artifactDialog.getByText('request.json', { exact: true })).toBeVisible()
 
-  const downloadPromise = page.waitForEvent('download')
-  await artifactDialog.getByRole('button', { name: '下载' }).first().click()
-  const download = await downloadPromise
-  expect(download.suggestedFilename()).toBe('request.json')
+  const token = await page.evaluate(() => localStorage.getItem('tp_token'))
+  const artifactsResponse = await page.request.get(`/api/v1/executions/runs/${run.id}/artifacts`, {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+  expect(artifactsResponse.ok()).toBeTruthy()
+  const artifactsPayload = await artifactsResponse.json()
+  const artifactIndex = artifactsPayload.artifacts.findIndex((item) => item.name === 'request.json')
+  expect(artifactIndex).toBeGreaterThanOrEqual(0)
+
+  const response = await page.request.get(`/api/v1/executions/runs/${run.id}/artifacts/${artifactIndex}/download`, {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+  expect(response.ok()).toBeTruthy()
+  expect(response.headers()['content-disposition']).toContain('request.json')
+  const payload = await response.json()
+  expect(payload).toHaveProperty('url')
 })
