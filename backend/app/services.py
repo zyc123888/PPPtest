@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import redis
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -17,6 +17,9 @@ from app.core.database import SessionLocal, engine, init_db
 from app.models import (
     APICase,
     Environment,
+    ExecutionArtifact,
+    ExecutionLog,
+    ExecutionStep,
     Project,
     TestPlan,
     TestPlanCase,
@@ -40,6 +43,65 @@ def _truncate_summary(summary: str | None) -> str | None:
     if summary is None or len(summary) <= SUMMARY_MAX_LENGTH:
         return summary
     return f"{summary[: SUMMARY_MAX_LENGTH - 3]}..."
+
+
+def _stringify_detail(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _sync_execution_details(
+    db: Session,
+    run: TestRun,
+    *,
+    stdout_text: str | None,
+    stderr_text: str | None,
+    artifacts_json: list | None,
+    step_results_json: list | None,
+) -> None:
+    db.execute(delete(ExecutionLog).where(ExecutionLog.run_id == run.id))
+    db.execute(delete(ExecutionArtifact).where(ExecutionArtifact.run_id == run.id))
+    db.execute(delete(ExecutionStep).where(ExecutionStep.run_id == run.id))
+
+    if stdout_text is not None:
+        db.add(ExecutionLog(run_id=run.id, stream="stdout", content=stdout_text))
+    if stderr_text is not None:
+        db.add(ExecutionLog(run_id=run.id, stream="stderr", content=stderr_text))
+
+    for artifact in artifacts_json or []:
+        if not isinstance(artifact, dict):
+            continue
+        name = str(artifact.get("name") or "artifact")
+        path = str(artifact.get("path") or "")
+        if not path:
+            continue
+        db.add(
+            ExecutionArtifact(
+                run_id=run.id,
+                name=name[:255],
+                path=path[:512],
+                artifact_type=(str(artifact.get("type"))[:50] if artifact.get("type") else None),
+                meta_json=artifact,
+            )
+        )
+
+    for index, step in enumerate(step_results_json or [], start=1):
+        if not isinstance(step, dict):
+            continue
+        db.add(
+            ExecutionStep(
+                run_id=run.id,
+                step_index=index,
+                name=str(step.get("name") or f"step_{index}")[:120],
+                status=str(step.get("status") or "UNKNOWN")[:20],
+                detail=_stringify_detail(step.get("detail")),
+                duration_ms=step.get("duration_ms") if isinstance(step.get("duration_ms"), int) else None,
+                raw_json=step,
+            )
+        )
 
 
 def _is_host_reachable(url: str) -> bool:
@@ -559,6 +621,14 @@ def finalize_run(
     run.request_payload = request_payload
     run.response_payload = response_payload
     run.finished_at = utc_now_naive()
+    _sync_execution_details(
+        db,
+        run,
+        stdout_text=stdout_text,
+        stderr_text=stderr_text,
+        artifacts_json=artifacts_json,
+        step_results_json=step_results_json,
+    )
     db.commit()
     db.refresh(run)
 

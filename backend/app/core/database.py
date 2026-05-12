@@ -212,5 +212,20 @@ def ensure_schema(db_engine) -> list[str]:
             "idx_test_plan_runs_project_status",
             "CREATE INDEX IF NOT EXISTS idx_test_plan_runs_project_status ON test_plan_runs(project_id, status)",
         )
+        create_index_if_missing(
+            connection,
+            "idx_execution_logs_run_id",
+            "CREATE INDEX IF NOT EXISTS idx_execution_logs_run_id ON execution_logs(run_id)",
+        )
+        create_index_if_missing(
+            connection,
+            "idx_execution_artifacts_run_id",
+            "CREATE INDEX IF NOT EXISTS idx_execution_artifacts_run_id ON execution_artifacts(run_id)",
+        )
+        create_index_if_missing(
+            connection,
+            "idx_execution_steps_run_status",
+            "CREATE INDEX IF NOT EXISTS idx_execution_steps_run_status ON execution_steps(run_id, status)",
+        )
 
     return schema_changes

@@ -14,6 +14,9 @@ from app.core.database import get_db
 from app.models import (
     APICase,
     Environment,
+    ExecutionArtifact,
+    ExecutionLog,
+    ExecutionStep,
     Project,
     TestPlan,
     TestPlanCase,
@@ -924,15 +927,26 @@ def get_run_logs(
     if run is None:
         raise HTTPException(status_code=404, detail="执行记录不存在")
     _require_project_access(db, current_user, db.get(Project, run.project_id))
+    logs = list(db.scalars(select(ExecutionLog).where(ExecutionLog.run_id == run.id)).all())
+    steps = list(
+        db.scalars(
+            select(ExecutionStep)
+            .where(ExecutionStep.run_id == run.id)
+            .order_by(ExecutionStep.step_index)
+        ).all()
+    )
+    stdout_text = next((item.content for item in logs if item.stream == "stdout"), run.stdout_text)
+    stderr_text = next((item.content for item in logs if item.stream == "stderr"), run.stderr_text)
+    step_results = [step.raw_json for step in steps if step.raw_json] or run.step_results_json
     return schemas.ExecutionLogRead(
         run_id=run.id,
         status=run.status,
-        stdout_text=run.stdout_text,
-        stderr_text=run.stderr_text,
+        stdout_text=stdout_text,
+        stderr_text=stderr_text,
         exit_code=run.exit_code,
         error_type=run.error_type,
         timeout_seconds=run.timeout_seconds,
-        step_results_json=run.step_results_json,
+        step_results_json=step_results,
     )
 
 
@@ -946,7 +960,23 @@ def get_run_artifacts(
     if run is None:
         raise HTTPException(status_code=404, detail="执行记录不存在")
     _require_project_access(db, current_user, db.get(Project, run.project_id))
-    return schemas.ExecutionArtifactsRead(run_id=run.id, artifacts=run.artifacts_json or [])
+    artifacts = list(
+        db.scalars(
+            select(ExecutionArtifact)
+            .where(ExecutionArtifact.run_id == run.id)
+            .order_by(ExecutionArtifact.id)
+        ).all()
+    )
+    payload = [
+        artifact.meta_json
+        or {
+            "name": artifact.name,
+            "path": artifact.path,
+            "type": artifact.artifact_type,
+        }
+        for artifact in artifacts
+    ] or (run.artifacts_json or [])
+    return schemas.ExecutionArtifactsRead(run_id=run.id, artifacts=payload)
 
 
 @protected_router.get("/executions/runs/{run_id}/artifacts/{artifact_index}/download")
@@ -961,7 +991,22 @@ def download_run_artifact(
         raise HTTPException(status_code=404, detail="执行记录不存在")
     _require_project_access(db, current_user, db.get(Project, run.project_id))
 
-    artifacts = run.artifacts_json or []
+    artifact_rows = list(
+        db.scalars(
+            select(ExecutionArtifact)
+            .where(ExecutionArtifact.run_id == run.id)
+            .order_by(ExecutionArtifact.id)
+        ).all()
+    )
+    artifacts = [
+        artifact.meta_json
+        or {
+            "name": artifact.name,
+            "path": artifact.path,
+            "type": artifact.artifact_type,
+        }
+        for artifact in artifact_rows
+    ] or (run.artifacts_json or [])
     if artifact_index < 0 or artifact_index >= len(artifacts):
         raise HTTPException(status_code=404, detail="执行产物不存在")
 

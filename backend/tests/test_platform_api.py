@@ -394,6 +394,18 @@ def test_api_case_run(client) -> None:
     artifact_download = client.get(f"/executions/runs/{run_id}/artifacts/0/download")
     assert artifact_download.status_code == 200
 
+    from sqlalchemy import func, select
+
+    from app.core.database import SessionLocal
+    from app.models import ExecutionArtifact, ExecutionLog, ExecutionStep
+
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(ExecutionLog).where(ExecutionLog.run_id == run_id)) >= 1
+        assert db.scalar(
+            select(func.count()).select_from(ExecutionArtifact).where(ExecutionArtifact.run_id == run_id)
+        ) >= 1
+        assert db.scalar(select(func.count()).select_from(ExecutionStep).where(ExecutionStep.run_id == run_id)) >= 1
+
     rerun_response = client.post(f"/executions/runs/{run_id}/rerun")
     assert rerun_response.status_code == 200
     assert rerun_response.json()["retry_count"] >= 1

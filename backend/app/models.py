@@ -235,6 +235,51 @@ class TestRun(Base):
     project = relationship("Project", back_populates="test_runs")
     environment = relationship("Environment", back_populates="test_runs")
     plan_run = relationship("TestPlanRun", back_populates="test_runs")
+    logs = relationship("ExecutionLog", back_populates="run", cascade="all, delete-orphan")
+    artifacts = relationship("ExecutionArtifact", back_populates="run", cascade="all, delete-orphan")
+    steps = relationship("ExecutionStep", back_populates="run", cascade="all, delete-orphan")
+
+
+class ExecutionLog(Base):
+    __tablename__ = "execution_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("test_runs.id"), nullable=False, index=True)
+    stream: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+
+    run = relationship("TestRun", back_populates="logs")
+
+
+class ExecutionArtifact(Base):
+    __tablename__ = "execution_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("test_runs.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    path: Mapped[str] = mapped_column(String(512), nullable=False)
+    artifact_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    meta_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+
+    run = relationship("TestRun", back_populates="artifacts")
+
+
+class ExecutionStep(Base):
+    __tablename__ = "execution_steps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("test_runs.id"), nullable=False, index=True)
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    raw_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+
+    run = relationship("TestRun", back_populates="steps")
 
 
 class User(Base):
