@@ -112,7 +112,31 @@
           <el-input :model-value="formatJson(currentRun.response_payload)" type="textarea" :rows="14" readonly />
         </el-tab-pane>
         <el-tab-pane label="步骤" name="steps">
-          <el-input :model-value="formatJson(currentRun.step_results_json)" type="textarea" :rows="14" readonly />
+          <el-empty v-if="!currentSteps.length" description="暂无步骤结果" />
+          <el-table v-else :data="currentSteps" border class="step-table">
+            <el-table-column label="#" prop="index" width="70" align="center" />
+            <el-table-column label="步骤" prop="name" min-width="160" show-overflow-tooltip />
+            <el-table-column label="状态" width="110" align="center">
+              <template #default="scope">
+                <el-tag size="small" :type="stepStatusType(scope.row.status)">{{ statusText(scope.row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="耗时" width="110" align="center">
+              <template #default="scope">
+                {{ scope.row.duration_ms ? scope.row.duration_ms + 'ms' : '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="详情" min-width="260">
+              <template #default="scope">
+                <span class="step-detail">{{ formatStepDetail(scope.row.detail) }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-collapse class="raw-json-collapse">
+            <el-collapse-item title="原始步骤 JSON" name="raw">
+              <el-input :model-value="formatJson(currentRun.step_results_json)" type="textarea" :rows="10" readonly />
+            </el-collapse-item>
+          </el-collapse>
         </el-tab-pane>
       </el-tabs>
     </el-dialog>
@@ -126,7 +150,26 @@
           <el-input :model-value="logData.stderr_text || ''" type="textarea" :rows="16" readonly />
         </el-tab-pane>
         <el-tab-pane label="步骤结果">
-          <el-input :model-value="formatJson(logData.step_results_json)" type="textarea" :rows="16" readonly />
+          <el-empty v-if="!logSteps.length" description="暂无步骤结果" />
+          <el-table v-else :data="logSteps" border class="step-table">
+            <el-table-column label="#" prop="index" width="70" align="center" />
+            <el-table-column label="步骤" prop="name" min-width="160" show-overflow-tooltip />
+            <el-table-column label="状态" width="110" align="center">
+              <template #default="scope">
+                <el-tag size="small" :type="stepStatusType(scope.row.status)">{{ statusText(scope.row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="详情" min-width="320">
+              <template #default="scope">
+                <span class="step-detail">{{ formatStepDetail(scope.row.detail) }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-collapse class="raw-json-collapse">
+            <el-collapse-item title="原始步骤 JSON" name="raw">
+              <el-input :model-value="formatJson(logData.step_results_json)" type="textarea" :rows="10" readonly />
+            </el-collapse-item>
+          </el-collapse>
         </el-tab-pane>
       </el-tabs>
     </el-dialog>
@@ -201,6 +244,13 @@ const statusType = (status) => {
   return 'info'
 }
 
+const stepStatusType = (status) => {
+  if (status === 'SUCCESS') return 'success'
+  if (['FAILED', 'ERROR', 'TIMEOUT'].includes(status)) return 'danger'
+  if (['RUNNING', 'PENDING'].includes(status)) return 'warning'
+  return 'info'
+}
+
 const canCancel = (row) => {
   return canTest.value && ['PENDING', 'RUNNING'].includes(row.status)
 }
@@ -218,6 +268,30 @@ const formatJson = (val) => {
     return String(val)
   }
 }
+
+const normalizeSteps = (steps) => {
+  if (!Array.isArray(steps)) return []
+  return steps.map((step, index) => ({
+    index: index + 1,
+    name: step?.name || `step_${index + 1}`,
+    status: step?.status || 'UNKNOWN',
+    detail: step?.detail ?? step,
+    duration_ms: step?.duration_ms || null
+  }))
+}
+
+const formatStepDetail = (detail) => {
+  if (detail === null || detail === undefined || detail === '') return '-'
+  if (typeof detail === 'string') return detail
+  try {
+    return JSON.stringify(detail)
+  } catch (e) {
+    return String(detail)
+  }
+}
+
+const currentSteps = computed(() => normalizeSteps(currentRun.value.step_results_json))
+const logSteps = computed(() => normalizeSteps(logData.value.step_results_json))
 
 const getList = async () => {
   try {
@@ -395,6 +469,24 @@ onBeforeUnmount(() => {
   display: flex;
   gap: var(--space-8);
   flex-shrink: 0;
+}
+
+.step-table {
+  margin-top: 12px;
+}
+
+.step-detail {
+  display: inline-block;
+  max-width: 100%;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.raw-json-collapse {
+  margin-top: 12px;
 }
 
 @media (max-width: 960px) {
