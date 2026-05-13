@@ -22,6 +22,7 @@
             <el-option label="失败" value="FAILED" />
             <el-option label="异常" value="ERROR" />
             <el-option label="超时" value="TIMEOUT" />
+            <el-option label="取消" value="CANCELLED" />
           </el-select>
         </el-form-item>
         <el-form-item label="关键字">
@@ -61,6 +62,7 @@
             <el-button size="small" @click="handleDetail(scope.row)">详情</el-button>
             <el-button size="small" @click="openLogs(scope.row)">日志</el-button>
             <el-button size="small" @click="openArtifacts(scope.row)">产物</el-button>
+            <el-button v-if="canCancel(scope.row)" size="small" type="danger" @click="handleCancel(scope.row)">取消</el-button>
             <el-button v-if="canTest" size="small" type="primary" @click="handleRerun(scope.row)">重跑</el-button>
           </template>
         </el-table-column>
@@ -76,6 +78,7 @@
             <el-button size="small" @click="handleDetail(item)">详情</el-button>
             <el-button size="small" @click="openLogs(item)">日志</el-button>
             <el-button size="small" @click="openArtifacts(item)">产物</el-button>
+            <el-button v-if="canCancel(item)" size="small" type="danger" @click="handleCancel(item)">取消</el-button>
             <el-button v-if="canTest" size="small" type="primary" @click="handleRerun(item)">重跑</el-button>
           </div>
         </div>
@@ -149,7 +152,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
 
@@ -196,6 +199,10 @@ const statusType = (status) => {
   if (['RUNNING', 'PENDING', 'degraded', 'loading'].includes(status)) return 'warning'
   if (status === 'FAILED') return 'danger'
   return 'info'
+}
+
+const canCancel = (row) => {
+  return canTest.value && ['PENDING', 'RUNNING'].includes(row.status)
 }
 
 const formatTime = (val) => {
@@ -288,6 +295,22 @@ const handleRerun = async (row) => {
     ElMessage.success('重跑任务已提交')
     getList()
   } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const handleCancel = async (row) => {
+  try {
+    await ElMessageBox.confirm(`确认取消执行 #${row.id}？`, '取消执行', {
+      type: 'warning',
+      confirmButtonText: '确认取消',
+      cancelButtonText: '关闭'
+    })
+    await api.post(`/executions/runs/${row.id}/cancel`, {})
+    ElMessage.success('执行已取消')
+    getList()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
     ElMessage.error(error.message)
   }
 }

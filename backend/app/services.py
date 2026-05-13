@@ -583,12 +583,15 @@ def create_test_run(
     return run
 
 
-def mark_run_started(db: Session, run: TestRun) -> None:
+def mark_run_started(db: Session, run: TestRun) -> bool:
+    if run.status == "CANCELLED":
+        return False
     run.status = "RUNNING"
     run.summary = "任务执行中"
     run.started_at = utc_now_naive()
     db.commit()
     db.refresh(run)
+    return True
 
 
 def finalize_run(

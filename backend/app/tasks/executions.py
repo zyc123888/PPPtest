@@ -471,7 +471,8 @@ def run_api_case(run_id: int) -> dict:
             finalize_run(db, run, status="FAILED", summary="关联的项目或接口用例不存在", error_type="SYSTEM")
             return {"status": "FAILED", "summary": "关联记录不存在"}
 
-        mark_run_started(db, run)
+        if not mark_run_started(db, run):
+            return {"status": "CANCELLED", "summary": "执行已取消"}
         result = _execute_api_case(db, run, case, project)
         status = result["status"]
         summary = result["summary"]
@@ -540,7 +541,8 @@ def run_ui_case(run_id: int) -> dict:
             finalize_run(db, run, status="FAILED", summary="UI 用例不存在", error_type="SYSTEM")
             return {"status": "FAILED", "summary": "UI 用例不存在"}
 
-        mark_run_started(db, run)
+        if not mark_run_started(db, run):
+            return {"status": "CANCELLED", "summary": "执行已取消"}
         project = db.get(Project, run.project_id)
         if project is None:
             finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
@@ -638,7 +640,9 @@ def run_test_plan(plan_run_id: int) -> dict:
                         finalize_run(db, run, status="FAILED", summary="接口用例不存在", error_type="SYSTEM")
                         fail_count += 1
                         continue
-                    mark_run_started(db, run)
+                    if not mark_run_started(db, run):
+                        fail_count += 1
+                        continue
                     result = _execute_api_case(db, run, case, project)
                 elif run.case_type == "UI":
                     case = db.get(UICase, run.case_id)
@@ -646,7 +650,9 @@ def run_test_plan(plan_run_id: int) -> dict:
                         finalize_run(db, run, status="FAILED", summary="UI 用例不存在", error_type="SYSTEM")
                         fail_count += 1
                         continue
-                    mark_run_started(db, run)
+                    if not mark_run_started(db, run):
+                        fail_count += 1
+                        continue
                     result = _execute_ui_case(db, run, case, project)
                 else:
                     finalize_run(db, run, status="FAILED", summary="未知用例类型", error_type="SYSTEM")

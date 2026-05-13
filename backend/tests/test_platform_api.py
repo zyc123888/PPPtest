@@ -411,6 +411,36 @@ def test_api_case_run(client) -> None:
     assert rerun_response.json()["retry_count"] >= 1
 
 
+def test_cancel_pending_execution(client) -> None:
+    from app.core.database import SessionLocal
+    from app.models import APICase
+    from app.services import create_test_run
+
+    api_cases = client.get("/api-cases").json()
+    case_id = next(case["id"] for case in api_cases if case["name"] == "示例健康检查接口")
+
+    with SessionLocal() as db:
+        case = db.get(APICase, case_id)
+        run = create_test_run(
+            db,
+            project_id=case.project_id,
+            environment_id=None,
+            case_type="API",
+            case_id=case.id,
+            case_name=case.name,
+        )
+        run_id = run.id
+
+    cancel_response = client.post(f"/executions/runs/{run_id}/cancel")
+    assert cancel_response.status_code == 200
+    payload = cancel_response.json()
+    assert payload["status"] == "CANCELLED"
+    assert payload["error_type"] == "CANCELLED"
+
+    second_cancel = client.post(f"/executions/runs/{run_id}/cancel")
+    assert second_cancel.status_code == 400
+
+
 def test_ui_case_run(client) -> None:
     ui_cases = client.get("/ui-cases").json()
     case_id = next(case["id"] for case in ui_cases if case["name"] == "示例前端首页巡检")

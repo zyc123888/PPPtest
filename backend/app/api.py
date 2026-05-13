@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app import schemas, services
 from app.core.config import settings
+from app.core.celery_app import celery_app
 from app.core.database import get_db
 from app.models import (
     APICase,
@@ -1072,6 +1073,35 @@ def rerun_execution(
         db.commit()
         db.refresh(rerun)
     return rerun
+
+
+@protected_router.post(
+    "/executions/runs/{run_id}/cancel",
+    response_model=schemas.TestRunRead,
+    dependencies=[Depends(require_tester)],
+)
+def cancel_execution(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TestRun:
+    run = db.get(TestRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="执行记录不存在")
+    _require_project_access(db, current_user, db.get(Project, run.project_id))
+    if run.status in {"SUCCESS", "FAILED", "ERROR", "TIMEOUT", "CANCELLED"}:
+        raise HTTPException(status_code=400, detail="当前状态不允许取消")
+
+    if run.task_id:
+        celery_app.control.revoke(run.task_id, terminate=True)
+
+    run.status = "CANCELLED"
+    run.summary = "执行已取消"
+    run.error_type = "CANCELLED"
+    run.finished_at = utc_now_naive()
+    db.commit()
+    db.refresh(run)
+    return run
 
 
 @protected_router.post(
