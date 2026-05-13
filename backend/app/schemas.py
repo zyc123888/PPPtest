@@ -241,6 +241,7 @@ class TestPlanCaseRead(ORMBaseModel):
 
 class TestPlanRunCreate(BaseModel):
     environment_id: int | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=600)
 
 
 class TestPlanRunRead(ORMBaseModel):

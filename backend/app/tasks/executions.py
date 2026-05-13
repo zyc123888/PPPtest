@@ -67,6 +67,15 @@ def _resolve_environment(db: Session, project: Project, environment_id: int | No
     return env
 
 
+def _run_timeout_seconds(run: TestRun) -> int:
+    return run.timeout_seconds or settings.request_timeout_seconds
+
+
+def _playwright_timeout_ms(run: TestRun, fallback_seconds: int | None = None) -> int:
+    seconds = fallback_seconds or _run_timeout_seconds(run)
+    return max(1, seconds) * 1000
+
+
 def _build_runtime_headers(environment: Environment | None, case_headers: dict | None, variables: dict | None) -> dict:
     headers = {}
     if environment and environment.headers_json:
@@ -153,7 +162,7 @@ def _execute_api_case_httpx(db: Session, run: TestRun, case: APICase, project: P
                 json=rendered_body,
             )
     else:
-        with httpx.Client(timeout=settings.request_timeout_seconds) as client:
+        with httpx.Client(timeout=_run_timeout_seconds(run)) as client:
             response = client.request(
                 case.method.upper(),
                 target_url,
@@ -243,7 +252,7 @@ def _execute_api_case_pytest(db: Session, run: TestRun, case: APICase, project: 
                 "HEADERS": json.dumps(headers, ensure_ascii=False),
                 "BODY": json.dumps(rendered_body, ensure_ascii=False) if rendered_body else "",
                 "EXPECTED_STATUS": str(case.expected_status),
-                "TIMEOUT": str(settings.request_timeout_seconds),
+                "TIMEOUT": str(_run_timeout_seconds(run)),
                 "RESULT_PATH": result_path,
             }
         )
@@ -253,7 +262,7 @@ def _execute_api_case_pytest(db: Session, run: TestRun, case: APICase, project: 
             capture_output=True,
             text=True,
             env=env,
-            timeout=settings.request_timeout_seconds + 20,
+            timeout=_run_timeout_seconds(run) + 20,
         )
 
         response_payload = {}
@@ -321,21 +330,23 @@ def _execute_ui_case(db: Session, run: TestRun, case: UICase, project: Project) 
             for step in steps:
                 action = step.get("action")
                 if action == "goto":
-                    page.goto(step["value"], wait_until="networkidle", timeout=30000)
+                    page.goto(step["value"], wait_until="networkidle", timeout=_playwright_timeout_ms(run, 30))
                 elif action == "wait_for_text":
-                    page.locator(f"text={step['value']}").first.wait_for(timeout=20000)
+                    page.locator(f"text={step['value']}").first.wait_for(timeout=_playwright_timeout_ms(run, 20))
                 elif action == "click":
-                    page.locator(step["selector"]).first.click(timeout=20000)
+                    page.locator(step["selector"]).first.click(timeout=_playwright_timeout_ms(run, 20))
                 elif action == "fill":
-                    page.locator(step["selector"]).first.fill(step.get("value", ""), timeout=20000)
+                    page.locator(step["selector"]).first.fill(
+                        step.get("value", ""), timeout=_playwright_timeout_ms(run, 20)
+                    )
                 elif action == "assert_text":
-                    page.locator(f"text={step['value']}").first.wait_for(timeout=20000)
+                    page.locator(f"text={step['value']}").first.wait_for(timeout=_playwright_timeout_ms(run, 20))
                 else:
                     raise ValueError(f"不支持的步骤类型: {action}")
                 step_results.append({"name": action, "status": "SUCCESS", "detail": step})
 
             expect_text = _render_template(case.expect_text, variables)
-            page.locator(f"text={expect_text}").first.wait_for(timeout=15000)
+            page.locator(f"text={expect_text}").first.wait_for(timeout=_playwright_timeout_ms(run, 15))
             step_results.append({"name": "assert_expect_text", "status": "SUCCESS", "detail": expect_text})
             screenshot = page.screenshot(full_page=True)
             screenshot_meta = _write_run_artifact(run.id, "ui-success.png", screenshot, binary=True)
@@ -501,7 +512,7 @@ def run_api_case(run_id: int) -> dict:
                 status="TIMEOUT",
                 summary=f"接口执行超时: {exc}",
                 error_type="TIMEOUT",
-                timeout_seconds=settings.request_timeout_seconds,
+                timeout_seconds=_run_timeout_seconds(run),
                 stderr_text=traceback.format_exc(),
                 duration_ms=int((time.perf_counter() - started_at) * 1000),
             )
@@ -576,7 +587,7 @@ def run_ui_case(run_id: int) -> dict:
                 status="TIMEOUT",
                 summary=f"UI 执行超时: {exc}",
                 error_type="TIMEOUT",
-                timeout_seconds=settings.request_timeout_seconds,
+                timeout_seconds=_run_timeout_seconds(run),
                 stderr_text=traceback.format_exc(),
                 artifacts_json=artifacts,
                 step_results_json=step_results,
@@ -686,7 +697,7 @@ def run_test_plan(plan_run_id: int) -> dict:
                     status="TIMEOUT",
                     summary=f"执行超时: {exc}",
                     error_type="TIMEOUT",
-                    timeout_seconds=settings.request_timeout_seconds,
+                    timeout_seconds=_run_timeout_seconds(run),
                     stderr_text=traceback.format_exc(),
                     artifacts_json=artifacts,
                     step_results_json=step_results,

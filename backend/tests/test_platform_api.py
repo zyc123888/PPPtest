@@ -368,7 +368,7 @@ def test_environment_variables_and_auth_config_api(client) -> None:
 def test_api_case_run(client) -> None:
     api_cases = client.get("/api-cases").json()
     case_id = next(case["id"] for case in api_cases if case["name"] == "示例健康检查接口")
-    trigger = client.post(f"/executions/api/{case_id}/run")
+    trigger = client.post(f"/executions/api/{case_id}/run", json={"timeout_seconds": 7})
     assert trigger.status_code == 200
     run_id = trigger.json()["id"]
 
@@ -381,6 +381,7 @@ def test_api_case_run(client) -> None:
 
     assert final_payload is not None
     assert final_payload["status"] == "SUCCESS", final_payload
+    assert final_payload["timeout_seconds"] == 7
     assert final_payload["stdout_text"] is not None
     assert isinstance(final_payload["artifacts_json"], list)
 
@@ -461,14 +462,14 @@ def test_ui_case_run(client) -> None:
 
 
 def test_plan_run_report(client) -> None:
-    from sqlalchemy import update
+    from sqlalchemy import select, update
 
     from app.core.database import SessionLocal
     from app.models import TestPlanRun
 
     plans = client.get("/test-plans").json()
     plan_id = next(plan["id"] for plan in plans if plan["name"] == "演示回归计划")
-    trigger = client.post(f"/test-plans/{plan_id}/run", json={})
+    trigger = client.post(f"/test-plans/{plan_id}/run", json={"timeout_seconds": 9})
     assert trigger.status_code == 200
     plan_run_id = trigger.json()["id"]
 
@@ -486,6 +487,11 @@ def test_plan_run_report(client) -> None:
     fail_count = report_payload["plan_run"]["fail_count"]
     assert total == pass_count + fail_count
     with SessionLocal() as db:
+        from app.models import TestRun
+
+        child_runs = db.scalars(select(TestRun).where(TestRun.plan_run_id == plan_run_id)).all()
+        assert child_runs
+        assert all(run.timeout_seconds == 9 for run in child_runs)
         db.execute(update(TestPlanRun).where(TestPlanRun.id == plan_run_id).values(retry_count=None))
         db.commit()
 

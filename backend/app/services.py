@@ -564,6 +564,7 @@ def create_test_run(
     case_type: str,
     case_id: int,
     case_name: str,
+    timeout_seconds: int | None = None,
 ) -> TestRun:
     run = TestRun(
         project_id=project_id,
@@ -574,6 +575,7 @@ def create_test_run(
         case_name=case_name,
         status="PENDING",
         summary="任务已提交，等待执行",
+        timeout_seconds=timeout_seconds,
         retry_count=0,
         max_retries=0,
     )
@@ -615,7 +617,8 @@ def finalize_run(
     run.summary = _truncate_summary(summary)
     run.error_type = error_type
     run.exit_code = exit_code
-    run.timeout_seconds = timeout_seconds
+    if timeout_seconds is not None:
+        run.timeout_seconds = timeout_seconds
     run.stdout_text = stdout_text
     run.stderr_text = stderr_text
     run.artifacts_json = artifacts_json

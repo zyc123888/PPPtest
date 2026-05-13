@@ -832,6 +832,7 @@ def trigger_test_plan(
         raise HTTPException(status_code=400, detail="测试计划未配置用例")
 
     environment_id = payload.environment_id if payload else None
+    timeout_seconds = payload.timeout_seconds if payload else None
     if environment_id is not None:
         env = db.get(Environment, environment_id)
         if env is None or env.project_id != plan.project_id:
@@ -859,6 +860,7 @@ def trigger_test_plan(
             case_type=plan_case.case_type,
             case_id=plan_case.case_id,
             case_name=plan_case.case_name,
+            timeout_seconds=timeout_seconds,
         )
 
     task_id, ran_inline = _dispatch_task_or_run_inline(run_test_plan, plan_run.id)
