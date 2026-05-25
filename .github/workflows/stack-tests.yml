@@ -17,6 +17,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Prepare report placeholders
+        run: |
+          mkdir -p backend/reports e2e/reports
+          : > backend/reports/pytest-stack.log
+          : > backend/reports/pytest-stack.xml
+          : > e2e/reports/e2e-stack.log
+
       - name: Compose up
         run: docker compose up --build -d
 
@@ -36,9 +43,6 @@ jobs:
         id: backend_pytest
         continue-on-error: true
         run: |
-          mkdir -p backend/reports
-          : > backend/reports/pytest-stack.log
-          : > backend/reports/pytest-stack.xml
           set +e
           docker compose exec -T backend pytest -q --junitxml=/app/reports/pytest-stack.xml 2>&1 | tee backend/reports/pytest-stack.log
           test_exit=${PIPESTATUS[0]}
@@ -71,8 +75,6 @@ jobs:
         id: e2e_run
         continue-on-error: true
         run: |
-          mkdir -p e2e/reports
-          : > e2e/reports/e2e-stack.log
           set +e
           docker compose run --rm \
             -e CI=1 \
