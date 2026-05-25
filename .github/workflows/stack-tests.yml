@@ -68,14 +68,45 @@ jobs:
         run: docker compose build e2e
 
       - name: Run e2e specs
-        run: >
-          docker compose run --rm e2e npx playwright test
-          tests/admin_layout.spec.js
-          tests/full_flow.spec.js
-          tests/workspace_membership_flow.spec.js
-          tests/workspace_owner_guard.spec.js
-          tests/execution_artifact_download.spec.js
-          --reporter=line
+        id: e2e_run
+        continue-on-error: true
+        run: |
+          mkdir -p e2e/reports
+          : > e2e/reports/e2e-stack.log
+          set +e
+          docker compose run --rm \
+            -e CI=1 \
+            -e PLAYWRIGHT_HTML_OUTPUT_DIR=/e2e/reports/html \
+            e2e sh -lc '
+              mkdir -p /e2e/reports &&
+              npx playwright test \
+                tests/admin_layout.spec.js \
+                tests/full_flow.spec.js \
+                tests/workspace_membership_flow.spec.js \
+                tests/workspace_owner_guard.spec.js \
+                tests/execution_artifact_download.spec.js \
+                --reporter=line,junit,html \
+                --output=/e2e/reports/test-results
+            ' 2>&1 | tee e2e/reports/e2e-stack.log
+          test_exit=${PIPESTATUS[0]}
+          echo "exit_code=${test_exit}" >> "$GITHUB_OUTPUT"
+          exit "${test_exit}"
+
+      - name: Upload e2e report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-report
+          path: |
+            e2e/reports/e2e-stack.log
+            e2e/reports/html
+            e2e/reports/test-results
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Fail job when e2e failed
+        if: steps.e2e_run.outputs.exit_code != '0'
+        run: exit 1
 
       - name: Dump stack diagnostics on failure
         if: failure()
