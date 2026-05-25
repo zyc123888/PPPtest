@@ -105,9 +105,24 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="caseDialogVisible" title="计划用例配置" width="860px">
+    <el-dialog v-model="caseDialogVisible" title="计划用例配置" width="980px">
       <template #default>
         <div class="section-gap">
+          <el-alert
+            v-if="moveResult"
+            :title="moveResult.title"
+            :description="moveResult.description"
+            type="success"
+            :closable="true"
+            class="section-gap"
+            @close="moveResult = null"
+          >
+            <template #default>
+              <div class="move-result-actions">
+                <el-button size="small" type="primary" @click="openMovedPlanCaseDialog">打开新计划</el-button>
+              </div>
+            </template>
+          </el-alert>
           <el-form :inline="true" class="query-form" label-position="top" :model="caseForm">
             <el-form-item label="用例类型">
               <el-select v-model="caseForm.case_type" placeholder="请选择" style="width: 160px">
@@ -120,7 +135,7 @@
                 <el-option
                   v-for="item in selectableCases"
                   :key="item.id"
-                  :label="item.name"
+                  :label="`${item.name} · ${item.review_status || 'DRAFT'} · ${item.version_no || '1.0.0'}`"
                   :value="item.id"
                 />
               </el-select>
@@ -128,18 +143,95 @@
             <el-form-item label="顺序">
               <el-input-number v-model="caseForm.order_index" :min="1" />
             </el-form-item>
+            <el-form-item v-if="canAdmin" label="评审覆盖">
+              <el-checkbox v-model="caseForm.allow_unapproved">允许加入未通过评审用例</el-checkbox>
+            </el-form-item>
             <el-form-item label=" " class="query-actions">
               <el-button v-if="canTest" type="primary" @click="addPlanCase">加入计划</el-button>
             </el-form-item>
           </el-form>
+          <div class="plan-case-toolbar">
+            <el-tag type="danger" effect="light">风险用例 {{ riskPlanCaseCount }}</el-tag>
+            <el-select v-model="caseFilter.riskMode" style="width: 180px">
+              <el-option label="全部用例" value="ALL" />
+              <el-option label="仅风险用例" value="RISK_ONLY" />
+              <el-option label="仅已通过评审" value="APPROVED_ONLY" />
+              <el-option label="仅看带风险加入" value="OVERRIDE_ONLY" />
+            </el-select>
+            <el-button
+              v-if="filteredPlanCases.length"
+              size="small"
+              @click="exportRiskCases"
+            >
+              导出当前清单
+            </el-button>
+            <el-button
+              v-if="canAdmin && filteredPlanCases.length && caseFilter.riskMode !== 'APPROVED_ONLY'"
+              size="small"
+              type="warning"
+              @click="moveFilteredPlanCases"
+            >
+              转移到待评审计划
+            </el-button>
+            <el-button
+              v-if="canAdmin && filteredPlanCases.length && caseFilter.riskMode !== 'APPROVED_ONLY'"
+              size="small"
+              type="danger"
+              @click="removeFilteredPlanCases"
+            >
+              批量移除当前结果
+            </el-button>
+          </div>
+          <div class="plan-case-hint">
+            默认仅允许加入评审状态为 `APPROVED` 的用例。
+            <span v-if="canAdmin">管理员勾选后可带风险加入，并记录添加人。</span>
+            <span>调整顺序请切换到“全部用例”视图。</span>
+          </div>
         </div>
 
-        <el-table v-loading="caseLoading" :data="planCases" border>
+        <el-table v-loading="caseLoading" :data="filteredPlanCases" border>
           <el-table-column label="顺序" prop="order_index" width="80" align="center" />
           <el-table-column label="类型" prop="case_type" width="90" align="center" />
           <el-table-column label="用例名称" prop="case_name" min-width="220" show-overflow-tooltip />
-          <el-table-column label="操作" width="120" align="center">
+          <el-table-column label="快照版本" min-width="120" align="center">
             <template #default="scope">
+              {{ scope.row.case_snapshot_json?.version_no || '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="快照评审" min-width="140" align="center">
+            <template #default="scope">
+              <el-tag
+                size="small"
+                :type="scope.row.case_snapshot_json?.review_status === 'APPROVED' ? 'success' : 'warning'"
+              >
+                {{ scope.row.case_snapshot_json?.review_status || '-' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="加入人" prop="created_by" width="100" align="center" />
+          <el-table-column label="风险备注" min-width="180" show-overflow-tooltip>
+            <template #default="scope">
+              {{ scope.row.case_snapshot_json?.review_status === 'APPROVED' ? '-' : (scope.row.case_snapshot_json?.review_note || '带风险加入计划') }}
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="220" align="center">
+            <template #default="scope">
+              <el-button
+                v-if="canTest"
+                size="small"
+                :disabled="caseFilter.riskMode !== 'ALL'"
+                @click="movePlanCase(scope.row, 'up')"
+              >
+                上移
+              </el-button>
+              <el-button
+                v-if="canTest"
+                size="small"
+                :disabled="caseFilter.riskMode !== 'ALL'"
+                @click="movePlanCase(scope.row, 'down')"
+              >
+                下移
+              </el-button>
               <el-button v-if="canAdmin" size="small" type="danger" @click="removePlanCase(scope.row)">移除</el-button>
             </template>
           </el-table-column>
@@ -155,7 +247,29 @@
           </el-select>
         </el-form-item>
       </el-form>
+      <div v-if="precheckResult" class="precheck-panel">
+        <div class="precheck-summary" :class="{ invalid: !precheckResult.is_valid }">{{ precheckResult.summary }}</div>
+        <div v-if="precheckResult.missing_variables?.length" class="precheck-tags">
+          <el-tag v-for="item in precheckResult.missing_variables" :key="item" size="small" type="danger">{{ item }}</el-tag>
+        </div>
+        <el-table
+          v-if="precheckResult.issues?.length"
+          :data="precheckResult.issues.slice(0, 20)"
+          size="small"
+          border
+          class="precheck-table"
+        >
+          <el-table-column label="范围" prop="scope" min-width="140" show-overflow-tooltip />
+          <el-table-column label="字段" prop="field" min-width="140" show-overflow-tooltip />
+          <el-table-column label="缺失变量" min-width="160" show-overflow-tooltip>
+            <template #default="scope">
+              {{ scope.row.missing_variables.join(', ') }}
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
       <template #footer>
+        <el-button @click="handlePrecheck">执行前校验</el-button>
         <el-button @click="runDialogVisible = false">取消</el-button>
         <el-button type="primary" @click="submitRun">确认执行</el-button>
       </template>
@@ -208,7 +322,12 @@ const rules = {
 const caseForm = reactive({
   case_type: 'API',
   case_id: undefined,
-  order_index: 1
+  order_index: 1,
+  allow_unapproved: false
+})
+
+const caseFilter = reactive({
+  riskMode: 'ALL'
 })
 
 const runForm = reactive({
@@ -216,6 +335,8 @@ const runForm = reactive({
 })
 
 const planCases = ref([])
+const precheckResult = ref(null)
+const moveResult = ref(null)
 
 const projectMap = computed(() => {
   const map = {}
@@ -225,8 +346,29 @@ const projectMap = computed(() => {
   return map
 })
 
+const riskPlanCaseCount = computed(() =>
+  planCases.value.filter((item) => item.case_snapshot_json?.review_status !== 'APPROVED').length
+)
+
+const filteredPlanCases = computed(() => {
+  if (caseFilter.riskMode === 'RISK_ONLY') {
+    return planCases.value.filter((item) => item.case_snapshot_json?.review_status !== 'APPROVED')
+  }
+  if (caseFilter.riskMode === 'APPROVED_ONLY') {
+    return planCases.value.filter((item) => item.case_snapshot_json?.review_status === 'APPROVED')
+  }
+  if (caseFilter.riskMode === 'OVERRIDE_ONLY') {
+    return planCases.value.filter((item) => item.case_snapshot_json?.review_status !== 'APPROVED' && item.created_by)
+  }
+  return planCases.value
+})
+
 const selectableCases = computed(() => {
-  return caseForm.case_type === 'UI' ? uiCases.value : apiCases.value
+  const source = caseForm.case_type === 'UI' ? uiCases.value : apiCases.value
+  if (canAdmin.value && caseForm.allow_unapproved) {
+    return source
+  }
+  return source.filter((item) => item.review_status === 'APPROVED')
 })
 
 const getList = async () => {
@@ -322,8 +464,12 @@ const loadCaseAssets = async (projectId) => {
 
 const openCaseDialog = async (plan) => {
   currentPlan.value = plan
+  moveResult.value = null
   caseForm.case_type = 'API'
   caseForm.case_id = undefined
+  caseForm.order_index = 1
+  caseForm.allow_unapproved = false
+  caseFilter.riskMode = 'ALL'
   await loadCaseAssets(plan.project_id)
   await loadPlanCases(plan.id)
   caseDialogVisible.value = true
@@ -339,9 +485,11 @@ const addPlanCase = async () => {
     await api.post(`/test-plans/${currentPlan.value.id}/cases`, {
       case_type: caseForm.case_type,
       case_id: caseForm.case_id,
-      order_index: caseForm.order_index
+      order_index: caseForm.order_index,
+      allow_unapproved: canAdmin.value ? caseForm.allow_unapproved : false
     })
     ElMessage.success('已加入计划')
+    caseForm.allow_unapproved = false
     loadPlanCases(currentPlan.value.id)
   } catch (error) {
     ElMessage.error(error.message)
@@ -359,9 +507,43 @@ const removePlanCase = async (row) => {
   }
 }
 
+const persistPlanCaseOrder = async () => {
+  if (!currentPlan.value) return
+  await api.post(`/test-plans/${currentPlan.value.id}/cases/reorder`, {
+    items: planCases.value.map((item, index) => ({
+      id: item.id,
+      order_index: index + 1,
+    })),
+  })
+}
+
+const movePlanCase = async (row, direction) => {
+  if (!currentPlan.value) return
+  if (caseFilter.riskMode !== 'ALL') {
+    ElMessage.warning('请切换到“全部用例”后再调整顺序')
+    return
+  }
+  const index = planCases.value.findIndex((item) => item.id === row.id)
+  if (index < 0) return
+  const targetIndex = direction === 'up' ? index - 1 : index + 1
+  if (targetIndex < 0 || targetIndex >= planCases.value.length) return
+  const next = [...planCases.value]
+  const [moved] = next.splice(index, 1)
+  next.splice(targetIndex, 0, moved)
+  planCases.value = next.map((item, idx) => ({ ...item, order_index: idx + 1 }))
+  try {
+    await persistPlanCaseOrder()
+  } catch (error) {
+    ElMessage.error(error.message)
+    await loadPlanCases(currentPlan.value.id)
+    return
+  }
+}
+
 const openRunDialog = async (plan) => {
   currentPlan.value = plan
   runForm.environment_id = undefined
+  precheckResult.value = null
   await loadCaseAssets(plan.project_id)
   runDialogVisible.value = true
 }
@@ -369,11 +551,182 @@ const openRunDialog = async (plan) => {
 const submitRun = async () => {
   if (!currentPlan.value) return
   try {
+    const passed = await precheckRun()
+    if (!passed) return
     await api.post(`/test-plans/${currentPlan.value.id}/run`, {
       environment_id: runForm.environment_id || null
     })
     ElMessage.success('计划已投递')
     runDialogVisible.value = false
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const showPrecheckResult = async (result) => {
+  precheckResult.value = result
+  if (result.is_valid) {
+    ElMessage.success('执行预检通过')
+    return true
+  }
+  return false
+}
+
+const precheckRun = async () => {
+  if (!currentPlan.value) return false
+  const suffix = runForm.environment_id ? `?environment_id=${runForm.environment_id}` : ''
+  const result = await api.get(`/test-plans/${currentPlan.value.id}/precheck${suffix}`)
+  return showPrecheckResult(result)
+}
+
+const handlePrecheck = async () => {
+  try {
+    await precheckRun()
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const exportRiskCases = () => {
+  if (!currentPlan.value || !filteredPlanCases.value.length) {
+    ElMessage.warning('当前没有可导出的计划用例')
+    return
+  }
+  const projectName = projectMap.value[currentPlan.value.project_id] || String(currentPlan.value.project_id)
+  const filterLabelMap = {
+    ALL: '全部用例',
+    RISK_ONLY: '仅风险用例',
+    APPROVED_ONLY: '仅已通过评审',
+    OVERRIDE_ONLY: '仅看带风险加入',
+  }
+  const exportedAt = new Date().toLocaleString('zh-CN', { hour12: false })
+  const rows = filteredPlanCases.value.map((item) => ({
+    execution_advice:
+      item.case_snapshot_json?.review_status === 'APPROVED'
+        ? '可执行'
+        : item.created_by
+          ? '高风险'
+          : '待评审',
+    order_index: item.order_index,
+    case_type: item.case_type,
+    case_name: item.case_name,
+    version_no: item.case_snapshot_json?.version_no || '',
+    review_status: item.case_snapshot_json?.review_status || '',
+    review_note: item.case_snapshot_json?.review_note || '',
+    created_by: item.created_by || '',
+  }))
+  const header = ['执行建议', '顺序', '类型', '用例名称', '快照版本', '快照评审', '风险备注', '加入人']
+  const meta = [
+    ['项目', projectName],
+    ['计划', currentPlan.value.name || '-'],
+    ['筛选模式', filterLabelMap[caseFilter.riskMode] || caseFilter.riskMode],
+    ['导出时间', exportedAt],
+    [],
+  ]
+  const lines = [
+    ...meta.map((items) => items.map((value) => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')),
+    header.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(','),
+    ...rows.map((row) =>
+      [
+        row.execution_advice,
+        row.order_index,
+        row.case_type,
+        row.case_name,
+        row.version_no,
+        row.review_status,
+        row.review_note,
+        row.created_by,
+      ]
+        .map((value) => `"${String(value ?? '').replace(/"/g, '""')}"`)
+        .join(',')
+    ),
+  ]
+  const blob = new Blob([`\uFEFF${lines.join('\n')}`], { type: 'text/csv;charset=utf-8;' })
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = `${currentPlan.value.name || 'plan'}-risk-cases.csv`
+  link.click()
+  URL.revokeObjectURL(link.href)
+  ElMessage.success(`已导出 ${rows.length} 条计划用例`)
+}
+
+const removeFilteredPlanCases = async () => {
+  if (!currentPlan.value || !filteredPlanCases.value.length) {
+    ElMessage.warning('当前没有可移除的计划用例')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认移除当前筛选结果中的 ${filteredPlanCases.value.length} 条计划用例？`,
+      '批量移除确认',
+      { type: 'warning', confirmButtonText: '移除', cancelButtonText: '取消' }
+    )
+    for (const item of filteredPlanCases.value) {
+      await api.delete(`/test-plans/${currentPlan.value.id}/cases/${item.id}`)
+    }
+    ElMessage.success(`已移除 ${filteredPlanCases.value.length} 条计划用例`)
+    await loadPlanCases(currentPlan.value.id)
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.message)
+  }
+}
+
+const moveFilteredPlanCases = async () => {
+  if (!currentPlan.value || !filteredPlanCases.value.length) {
+    ElMessage.warning('当前没有可转移的计划用例')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认把当前筛选结果中的 ${filteredPlanCases.value.length} 条用例转移到新建的待评审计划？`,
+      '转移确认',
+      { type: 'warning', confirmButtonText: '转移', cancelButtonText: '取消' }
+    )
+    const createdPlan = await api.post('/test-plans', {
+      project_id: currentPlan.value.project_id,
+      name: `${currentPlan.value.name}-待评审-${new Date().toISOString().slice(0, 10)}`,
+      description: `由计划「${currentPlan.value.name}」转移出的待评审风险用例`,
+    })
+    await api.post(`/test-plans/${createdPlan.id}/cases/batch`, {
+      items: filteredPlanCases.value.map((item) => ({
+        case_type: item.case_type,
+        case_id: item.case_id,
+      })),
+      order_start: 1,
+      allow_unapproved: true,
+    })
+    for (const item of filteredPlanCases.value) {
+      await api.delete(`/test-plans/${currentPlan.value.id}/cases/${item.id}`)
+    }
+    moveResult.value = {
+      title: `已转移到待评审计划：${createdPlan.name}`,
+      description: `来源计划：${currentPlan.value.name}。新计划说明已写入来源信息，可在计划列表中继续跟踪。`,
+      plan_id: createdPlan.id,
+      plan_name: createdPlan.name,
+    }
+    ElMessage.success(`已转移 ${filteredPlanCases.value.length} 条用例到计划「${createdPlan.name}」`)
+    await getList()
+    await loadPlanCases(currentPlan.value.id)
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.message)
+  }
+}
+
+const openMovedPlanCaseDialog = async () => {
+  if (!moveResult.value?.plan_id) return
+  try {
+    let targetPlan = list.value.find((item) => item.id === moveResult.value.plan_id)
+    if (!targetPlan) {
+      await getList()
+      targetPlan = list.value.find((item) => item.id === moveResult.value.plan_id)
+    }
+    if (!targetPlan) {
+      ElMessage.warning('未找到目标计划，请在列表中手动打开')
+      return
+    }
+    await openCaseDialog(targetPlan)
   } catch (error) {
     ElMessage.error(error.message)
   }
@@ -400,6 +753,14 @@ watch(() => caseForm.case_type, () => {
   caseForm.case_id = undefined
 })
 
+watch(() => caseForm.allow_unapproved, () => {
+  caseForm.case_id = undefined
+})
+
+watch(() => runForm.environment_id, () => {
+  precheckResult.value = null
+})
+
 onMounted(() => {
   getList()
 })
@@ -408,6 +769,52 @@ onMounted(() => {
 <style scoped>
 .mobile-cards {
   display: none;
+}
+
+.plan-case-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.precheck-panel {
+  margin-top: 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 12px;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.precheck-summary {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.precheck-summary.invalid {
+  color: var(--el-color-danger);
+}
+
+.precheck-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.precheck-table {
+  margin-top: 12px;
+}
+
+.plan-case-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.move-result-actions {
+  margin-top: 8px;
 }
 
 @media (max-width: 960px) {

@@ -47,6 +47,7 @@
         </el-table-column>
         <el-table-column v-if="canTest || canAdmin" label="操作" align="center" width="220">
           <template #default="scope">
+            <el-button v-if="canTest" size="small" @click="handleValidate(scope.row)">校验</el-button>
             <el-button v-if="canTest" size="small" @click="handleEdit(scope.row)">编辑</el-button>
             <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
           </template>
@@ -60,6 +61,7 @@
           <div class="mobile-card-meta">基础地址：{{ item.base_url }}</div>
           <div class="mobile-card-desc">创建时间：{{ formatTime(item.created_at) }}</div>
           <div v-if="canTest || canAdmin" class="mobile-card-actions">
+            <el-button v-if="canTest" size="small" @click="handleValidate(item)">校验</el-button>
             <el-button v-if="canTest" size="small" @click="handleEdit(item)">编辑</el-button>
             <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(item)">删除</el-button>
           </div>
@@ -96,11 +98,13 @@
         <el-form-item label="变量 JSON" prop="variables_text">
           <el-input v-model="temp.variables_text" type="textarea" :rows="4" placeholder='{"frontend_url": "http://frontend:3000"}' />
         </el-form-item>
+        <div class="form-tip">模板变量使用 `{{variable_name}}`。执行时若缺失变量，系统会直接报出变量名和字段位置。</div>
         <el-form-item label="认证配置 JSON" prop="auth_config_text">
           <el-input v-model="temp.auth_config_text" type="textarea" :rows="4" placeholder='{"header_name": "Authorization", "token_prefix": "Bearer", "token": "{{token}}"}' />
         </el-form-item>
       </el-form>
       <template #footer>
+        <el-button @click="handleValidateDraft">校验配置</el-button>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" @click="submitData">{{ isEditing ? '保存' : '确认' }}</el-button>
       </template>
@@ -263,18 +267,47 @@ const handleReset = () => {
   page.value = 1
 }
 
+const buildPayload = () => ({
+  project_id: temp.project_id,
+  name: temp.name,
+  base_url: temp.base_url,
+  headers_json: temp.headers_text ? JSON.parse(temp.headers_text) : null,
+  variables_json: temp.variables_text ? JSON.parse(temp.variables_text) : null,
+  auth_config_json: temp.auth_config_text ? JSON.parse(temp.auth_config_text) : null
+})
+
+const showValidationResult = async (title, result) => {
+  if (result.is_valid) {
+    ElMessage.success(`${title}校验通过`)
+    return
+  }
+  const lines = result.issues
+    .slice(0, 8)
+    .map((item) => `${item.scope} / ${item.field} / 缺失: ${item.missing_variables.join(', ')}`)
+    .join('\n')
+  await ElMessageBox.alert(lines, `${title}发现 ${result.issue_count} 个问题`, {
+    confirmButtonText: '知道了'
+  })
+}
+
+const handleValidateDraft = () => {
+  dataFormRef.value?.validate(async (valid) => {
+    if (!valid) return
+    try {
+      const payload = buildPayload()
+      const result = await api.post('/environments/validate-draft', payload)
+      await showValidationResult(`环境「${payload.name || '未命名'}」配置校验`, result)
+    } catch (error) {
+      ElMessage.error(error.message)
+    }
+  })
+}
+
 const submitData = () => {
   dataFormRef.value?.validate(async (valid) => {
     if (valid) {
       try {
-        const payload = {
-          project_id: temp.project_id,
-          name: temp.name,
-          base_url: temp.base_url,
-          headers_json: temp.headers_text ? JSON.parse(temp.headers_text) : null,
-          variables_json: temp.variables_text ? JSON.parse(temp.variables_text) : null,
-          auth_config_json: temp.auth_config_text ? JSON.parse(temp.auth_config_text) : null
-        }
+        const payload = buildPayload()
         if (isEditing.value) {
           await api.put(`/environments/${temp.id}`, {
             name: payload.name,
@@ -312,6 +345,15 @@ const handleDelete = async (row) => {
   }
 }
 
+const handleValidate = async (row) => {
+  try {
+    const result = await api.get(`/environments/${row.id}/validate`)
+    await showValidationResult(`环境「${row.name}」校验`, result)
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
 onMounted(() => {
   getList()
 })
@@ -320,6 +362,13 @@ onMounted(() => {
 <style scoped>
 .mobile-cards {
   display: none;
+}
+
+.form-tip {
+  margin: -4px 0 12px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 @media (max-width: 960px) {

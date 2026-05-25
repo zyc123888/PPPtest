@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "run_dir": "/Users/zhangyongcheng/Desktop/PPPtest/arale-pet-run",
+  "spritesheet": "/Users/zhangyongcheng/Desktop/PPPtest/arale-pet-run/final/spritesheet.webp",
+  "validation": "/Users/zhangyongcheng/Desktop/PPPtest/arale-pet-run/final/validation.json",
+  "contact_sheet": "/Users/zhangyongcheng/Desktop/PPPtest/arale-pet-run/qa/contact-sheet.png",
+  "review": "/Users/zhangyongcheng/Desktop/PPPtest/arale-pet-run/qa/review.json",
+  "videos": "/Users/zhangyongcheng/Desktop/PPPtest/arale-pet-run/qa/videos",
+  "package": "/Users/zhangyongcheng/.codex/pets/arale"
+}

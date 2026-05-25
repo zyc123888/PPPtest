@@ -20,6 +20,7 @@ from app.models import (
     ExecutionArtifact,
     ExecutionLog,
     ExecutionStep,
+    PerformanceCase,
     Project,
     TestPlan,
     TestPlanCase,
@@ -265,6 +266,26 @@ def seed_demo_data(db: Session) -> list[str]:
             {"action": "wait_for_text", "value": "登录"},
         ]
         ui_case.expect_text = "登录"
+
+    perf_case = db.scalar(select(PerformanceCase).where(PerformanceCase.name == "示例健康检查压测"))
+    if perf_case is None:
+        db.add(
+            PerformanceCase(
+                project_id=project.id,
+                name="示例健康检查压测",
+                method="GET",
+                path="/api/v1/system/health",
+                status="ACTIVE",
+                headers_json={"accept": "application/json"},
+                expected_status=200,
+                concurrency=4,
+                total_requests=12,
+                max_avg_response_ms=1500,
+                max_p95_response_ms=2500,
+                max_error_rate=0.1,
+            )
+        )
+        seeded_resources.append("performance_case:示例健康检查压测")
 
     env = db.scalar(
         select(Environment).where(Environment.project_id == project.id, Environment.name == "本地环境")
@@ -565,6 +586,7 @@ def create_test_run(
     case_id: int,
     case_name: str,
     timeout_seconds: int | None = None,
+    max_retries: int = 0,
 ) -> TestRun:
     run = TestRun(
         project_id=project_id,
@@ -577,7 +599,7 @@ def create_test_run(
         summary="任务已提交，等待执行",
         timeout_seconds=timeout_seconds,
         retry_count=0,
-        max_retries=0,
+        max_retries=max_retries,
     )
     db.add(run)
     db.commit()

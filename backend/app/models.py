@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -64,10 +64,14 @@ class APICase(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    folder_path: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     method: Mapped[str] = mapped_column(String(10), nullable=False, default="GET")
     path: Mapped[str] = mapped_column(String(255), nullable=False)
     priority: Mapped[str] = mapped_column(String(20), nullable=False, default="P2")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
+    review_status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")
+    version_no: Mapped[str] = mapped_column(String(30), nullable=False, default="1.0.0")
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     assertions_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     headers_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -89,9 +93,13 @@ class UICase(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    folder_path: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     target_url: Mapped[str] = mapped_column(String(255), nullable=False)
     priority: Mapped[str] = mapped_column(String(20), nullable=False, default="P2")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
+    review_status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")
+    version_no: Mapped[str] = mapped_column(String(30), nullable=False, default="1.0.0")
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     assertions_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     steps_json: Mapped[list] = mapped_column(JSON, nullable=False)
@@ -104,6 +112,59 @@ class UICase(Base):
     )
 
     project = relationship("Project", back_populates="ui_cases")
+
+
+class PerformanceCase(Base):
+    __tablename__ = "performance_cases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    folder_path: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    method: Mapped[str] = mapped_column(String(10), nullable=False, default="GET")
+    path: Mapped[str] = mapped_column(String(255), nullable=False)
+    priority: Mapped[str] = mapped_column(String(20), nullable=False, default="P2")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
+    review_status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")
+    version_no: Mapped[str] = mapped_column(String(30), nullable=False, default="1.0.0")
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    headers_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    body_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    expected_status: Mapped[int] = mapped_column(Integer, nullable=False, default=200)
+    concurrency: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    total_requests: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    max_avg_response_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_p95_response_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_error_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    project = relationship("Project")
+
+
+class CaseChangeHistory(Base):
+    __tablename__ = "case_change_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    case_type: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    case_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    case_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    action: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    version_no: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    review_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    snapshot_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    changed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now(), index=True)
+
+    project = relationship("Project")
 
 
 class Environment(Base):
@@ -158,6 +219,7 @@ class TestPlanCase(Base):
     case_name: Mapped[str] = mapped_column(String(120), nullable=False)
     case_snapshot_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
 
     plan = relationship("TestPlan", back_populates="cases")
@@ -280,6 +342,28 @@ class ExecutionStep(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
 
     run = relationship("TestRun", back_populates="steps")
+
+
+class DefectRecord(Base):
+    __tablename__ = "defect_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("test_runs.id"), nullable=True, index=True)
+    plan_run_id: Mapped[int | None] = mapped_column(ForeignKey("test_plan_runs.id"), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(180), nullable=False)
+    platform: Mapped[str] = mapped_column(String(30), nullable=False, default="GENERIC")
+    external_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    external_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="OPEN")
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="P2")
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class User(Base):

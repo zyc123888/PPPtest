@@ -4,8 +4,10 @@ import Login from '@/views/login/index.vue'
 import Dashboard from '@/views/dashboard/index.vue'
 import Workspace from '@/views/workspace/index.vue'
 import Project from '@/views/project/index.vue'
+import CaseCenter from '@/views/case/index.vue'
 import APICase from '@/views/case/api/index.vue'
 import UICase from '@/views/case/ui/index.vue'
+import PerformanceCase from '@/views/case/performance/index.vue'
 import Plan from '@/views/plan/index.vue'
 import Environment from '@/views/environment/index.vue'
 import Execution from '@/views/execution/index.vue'
@@ -63,6 +65,12 @@ export const constantRoutes = [
     meta: { title: '用例管理', icon: 'List' },
     children: [
       {
+        path: 'index',
+        component: CaseCenter,
+        name: 'CaseCenter',
+        meta: { title: '用例中心', icon: 'Collection' }
+      },
+      {
         path: 'api',
         component: APICase,
         name: 'APICase',
@@ -73,6 +81,12 @@ export const constantRoutes = [
         component: UICase,
         name: 'UICase',
         meta: { title: 'UI 用例', icon: 'Monitor' }
+      },
+      {
+        path: 'performance',
+        component: PerformanceCase,
+        name: 'PerformanceCase',
+        meta: { title: '性能用例', icon: 'Histogram' }
       }
     ]
   },

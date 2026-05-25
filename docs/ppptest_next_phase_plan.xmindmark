@@ -1,0 +1,173 @@
+PPPtest 下一阶段开发清单
+
+- 目标定位 [B1]
+    * 当前阶段
+        - 可运行测试平台原型
+        - 已具备项目-用例-计划-执行-报告主链路
+    * 下一阶段目标 [1]
+        - 先稳运行基座
+        - 再做真实执行闭环
+        - 最后补治理与平台化能力
+    * 评估原则
+        - P0: 必须先做
+        - P1: 真实可用关键项
+        - P2: 向成熟平台增强
+
+- P0 必做项 [B2]
+    * 基础运行层
+        - 固化数据库方案
+        - 清理 docker-compose 与启动依赖
+        - 增加数据库初始化/迁移机制
+        - 统一前后端配置管理
+        - 核心接口
+            * GET /api/v1/system/health
+            * GET /api/v1/system/info
+            * POST /api/v1/system/bootstrap
+    * 认证与权限基础层
+        - 登录走真实数据库账号
+        - 密码哈希化存储
+        - 登录态过期与禁用生效
+        - 核心接口鉴权
+        - 核心接口
+            * POST /api/v1/auth/login
+            * POST /api/v1/auth/logout
+            * GET /api/v1/auth/me
+            * GET /api/v1/users
+            * POST /api/v1/users
+            * PUT /api/v1/users/{id}
+    * 项目与环境基础模型
+        - 项目真实落库
+        - 环境与项目绑定
+        - 环境变量结构标准化
+        - 删除项目前做关联校验
+        - 核心接口
+            * GET /api/v1/projects
+            * POST /api/v1/projects
+            * PUT /api/v1/projects/{id}
+            * DELETE /api/v1/projects/{id}
+            * GET /api/v1/projects/{id}/environments
+            * POST /api/v1/projects/{id}/environments
+    * 测试用例真实管理
+        - 去掉 mock 数据
+        - 补齐标题/类型/优先级/状态/步骤/断言/标签
+        - API 用例支持 method/url/header/body/assertion
+        - UI 用例支持脚本入口
+        - 核心接口
+            * GET /api/v1/cases
+            * POST /api/v1/cases
+            * GET /api/v1/cases/{id}
+            * PUT /api/v1/cases/{id}
+            * DELETE /api/v1/cases/{id}
+    * 测试计划与执行主链路 [2]
+        - 计划与用例关系表
+        - 生成任务批次与执行记录
+        - 明确 pending/running/passed/failed/error/cancelled 状态
+        - 支持单用例和单计划执行
+        - 核心接口
+            * GET /api/v1/plans
+            * POST /api/v1/plans
+            * PUT /api/v1/plans/{id}
+            * POST /api/v1/plans/{id}/cases
+            * POST /api/v1/plans/{id}/run
+            * GET /api/v1/executions
+            * GET /api/v1/executions/{id}
+    * 报告基础层
+        - 基于真实执行记录生成
+        - 汇总总数/通过/失败/错误/耗时
+        - 报告追溯到用例与日志
+        - 下载生成真实文件
+        - 核心接口
+            * GET /api/v1/reports
+            * GET /api/v1/reports/{id}
+            * GET /api/v1/reports/{id}/download
+
+- P1 关键增强
+    * 自动化执行引擎 [^2](执行闭环依赖)
+        - worker 从队列消费任务
+        - pytest 执行 API/功能自动化
+        - Playwright 执行 UI 自动化
+        - 记录 stdout/stderr/退出码/耗时
+        - 支持超时与失败重试
+        - 核心接口
+            * POST /api/v1/executions/run-case
+            * POST /api/v1/executions/run-plan
+            * GET /api/v1/executions/{id}/logs
+            * GET /api/v1/executions/{id}/artifacts
+    * 环境变量与参数化执行
+        - 用例引用环境变量
+        - 执行时绑定环境
+        - 请求头/域名/鉴权按环境切换
+        - 核心接口
+            * GET /api/v1/environments/{id}/variables
+            * PUT /api/v1/environments/{id}/variables
+            * POST /api/v1/executions/{id}/rerun
+    * 前端主流程体验优化
+        - 统一查询区与分页区
+        - 执行页增加实时状态和日志入口
+        - 报告页增加汇总卡片和失败明细
+        - 补强 H5 适配
+    * 数据模型补强
+        - 增加 created_by/updated_by 审计字段
+        - 增加执行记录/执行步骤/报告/计划用例关系表
+        - 增加标签中间表
+        - 增加关键索引
+
+- P2 平台化增强
+    * 测试管理增强
+        - 用例目录树
+        - 标签体系
+        - 用例版本化
+        - 评审流
+        - 导入导出
+        - 核心接口
+            * POST /api/v1/cases/import
+            * GET /api/v1/cases/export
+            * POST /api/v1/cases/{id}/review
+    * 报告与趋势增强
+        - 历史趋势图
+        - 失败聚类
+        - 环境维度对比
+        - 核心接口
+            * GET /api/v1/reports/trends
+            * GET /api/v1/reports/summary
+            * GET /api/v1/reports/failures
+    * 权限与审计增强
+        - 项目级资源权限
+        - 审计日志
+        - 登录安全策略
+        - 敏感字段脱敏
+        - 核心接口
+            * GET /api/v1/audit/logs
+            * GET /api/v1/permissions
+            * PUT /api/v1/roles/{id}/permissions
+    * 平台集成能力
+        - Jenkins/GitHub Actions 触发执行
+        - webhook 回调
+        - 通知中心
+        - 缺陷系统联动
+        - 核心接口
+            * POST /api/v1/webhooks/execution
+            * POST /api/v1/integrations/ci/run
+            * POST /api/v1/integrations/issues/create
+
+- 推荐实施顺序 [S1]
+    * P0-1 基础运行层
+    * P0-2 认证与权限基础层
+    * P0-3 项目与环境模型
+    * P0-4 用例真实管理
+    * P0-5 计划与执行主链路
+    * P0-6 报告基础层
+    * P1-1 自动化执行引擎
+    * P1-2 环境变量与参数化
+    * P1-3 前端主流程优化
+    * P2 系列增强
+
+- 首批 8 个开工任务
+    * 固化数据库与启动链路
+    * 登录鉴权真实落库
+    * 用户密码哈希化
+    * 项目与环境真实管理
+    * 用例模型补齐并真实查询
+    * 计划与计划用例关系表
+    * 执行记录表与状态流转
+    * 报告基于真实执行生成

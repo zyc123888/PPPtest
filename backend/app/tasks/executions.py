@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
 from xml.sax.saxutils import escape
@@ -20,9 +22,20 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
-from app.models import APICase, Environment, Project, TestPlanRun, TestRun, UICase
+from app.models import APICase, Environment, PerformanceCase, Project, TestPlanRun, TestRun, UICase
 from app.services import finalize_run, mark_run_started
 from app.timeutil import utc_now_naive
+
+
+_TEMPLATE_VAR_PATTERN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+
+
+class MissingTemplateVariableError(ValueError):
+    def __init__(self, field_name: str, missing_keys: list[str]):
+        joined = ", ".join(missing_keys)
+        super().__init__(f"环境变量缺失: {joined}（字段: {field_name}）")
+        self.field_name = field_name
+        self.missing_keys = missing_keys
 
 
 def _safe_json_or_text(response: httpx.Response) -> dict:
@@ -39,7 +52,10 @@ def _open_db() -> Session:
     return SessionLocal()
 
 
-def _render_template(value: str, variables: dict | None) -> str:
+def _render_template(value: str, variables: dict | None, field_name: str = "value") -> str:
+    missing_keys = sorted({key for key in _TEMPLATE_VAR_PATTERN.findall(value) if not variables or key not in variables})
+    if missing_keys:
+        raise MissingTemplateVariableError(field_name, missing_keys)
     if not variables:
         return value
     rendered = value
@@ -48,13 +64,13 @@ def _render_template(value: str, variables: dict | None) -> str:
     return rendered
 
 
-def _render_data(value, variables: dict | None):
+def _render_data(value, variables: dict | None, field_name: str = "value"):
     if isinstance(value, str):
-        return _render_template(value, variables)
+        return _render_template(value, variables, field_name)
     if isinstance(value, dict):
-        return {key: _render_data(val, variables) for key, val in value.items()}
+        return {key: _render_data(val, variables, f"{field_name}.{key}") for key, val in value.items()}
     if isinstance(value, list):
-        return [_render_data(item, variables) for item in value]
+        return [_render_data(item, variables, f"{field_name}[{index}]") for index, item in enumerate(value)]
     return value
 
 
@@ -71,24 +87,125 @@ def _run_timeout_seconds(run: TestRun) -> int:
     return run.timeout_seconds or settings.request_timeout_seconds
 
 
+def _run_deadline(started_at: float, run: TestRun) -> float:
+    return started_at + float(_run_timeout_seconds(run))
+
+
+def _remaining_timeout_seconds(deadline: float) -> float:
+    return max(0.0, deadline - time.perf_counter())
+
+
+def _remaining_timeout_seconds_or_raise(run: TestRun, deadline: float) -> float:
+    remaining = _remaining_timeout_seconds(deadline)
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired(cmd=f"{run.case_type.lower()}-case", timeout=_run_timeout_seconds(run))
+    return remaining
+
+
 def _playwright_timeout_ms(run: TestRun, fallback_seconds: int | None = None) -> int:
     seconds = fallback_seconds or _run_timeout_seconds(run)
     return max(1, seconds) * 1000
 
 
+def _playwright_timeout_ms_from_deadline(run: TestRun, deadline: float, fallback_seconds: int | None = None) -> int:
+    remaining = _remaining_timeout_seconds_or_raise(run, deadline)
+    if fallback_seconds is not None:
+        remaining = min(remaining, float(fallback_seconds))
+    return max(1, int(remaining * 1000))
+
+
+def _retryable_status(status: str) -> bool:
+    return status in {"FAILED", "ERROR", "TIMEOUT"}
+
+
+def _append_retry_trace(summary: str, attempts: list[str]) -> str:
+    if not attempts:
+        return summary
+    return f"{summary}（重试轨迹: {'；'.join(attempts)}）"
+
+
+def _execute_case_with_retries(db: Session, run: TestRun, execute_once) -> dict:
+    attempts: list[str] = []
+    max_retries = max(run.max_retries or 0, 0)
+    base_retry_count = max(run.retry_count or 0, 0)
+    last_result: dict | None = None
+
+    for attempt_index in range(max_retries + 1):
+        deadline = _run_deadline(time.perf_counter(), run)
+        try:
+            last_result = execute_once(deadline)
+        except subprocess.TimeoutExpired as exc:
+            artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
+            last_result = {
+                "status": "TIMEOUT",
+                "summary": f"接口执行超时: {exc}",
+                "error_type": "TIMEOUT",
+                "timeout_seconds": _run_timeout_seconds(run),
+                "stderr_text": traceback.format_exc(),
+                "artifacts_json": artifacts,
+                "step_results_json": step_results,
+            }
+        except PlaywrightTimeoutError as exc:
+            artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
+            last_result = {
+                "status": "TIMEOUT",
+                "summary": f"UI 执行超时: {exc}",
+                "error_type": "TIMEOUT",
+                "timeout_seconds": _run_timeout_seconds(run),
+                "stderr_text": traceback.format_exc(),
+                "artifacts_json": artifacts,
+                "step_results_json": step_results,
+            }
+        except MissingTemplateVariableError as exc:
+            last_result = {
+                "status": "FAILED",
+                "summary": str(exc),
+                "error_type": "CONFIG",
+                "exit_code": 1,
+                "stdout_text": "",
+                "stderr_text": str(exc),
+                "artifacts_json": [],
+                "step_results_json": [],
+                "request_payload": None,
+                "response_payload": None,
+            }
+        except Exception as exc:
+            artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
+            last_result = {
+                "status": "ERROR",
+                "summary": f"执行异常: {exc}",
+                "error_type": "SYSTEM",
+                "stderr_text": traceback.format_exc(),
+                "artifacts_json": artifacts,
+                "step_results_json": step_results,
+            }
+
+        run.retry_count = base_retry_count + attempt_index
+        db.commit()
+        db.refresh(run)
+        if not _retryable_status(last_result["status"]) or attempt_index >= max_retries:
+            if attempt_index > 0:
+                last_result["summary"] = _append_retry_trace(last_result["summary"], attempts)
+            return last_result
+
+        attempts.append(f"第{attempt_index + 1}次{last_result['status']}")
+
+    return last_result or {"status": "ERROR", "summary": "执行结果为空"}
+
+
 def _build_runtime_headers(environment: Environment | None, case_headers: dict | None, variables: dict | None) -> dict:
     headers = {}
     if environment and environment.headers_json:
-        headers.update(_render_data(environment.headers_json, variables))
+        headers.update(_render_data(environment.headers_json, variables, "environment.headers_json"))
     if environment and environment.auth_config_json and isinstance(environment.auth_config_json, dict):
-        auth_config = _render_data(environment.auth_config_json, variables)
+        auth_config = _render_data(environment.auth_config_json, variables, "environment.auth_config_json")
         token = auth_config.get("token")
         if token:
             header_name = auth_config.get("header_name", "Authorization")
             token_prefix = auth_config.get("token_prefix", "Bearer")
             headers[header_name] = f"{token_prefix} {token}".strip()
     if case_headers:
-        headers.update(_render_data(case_headers, variables))
+        headers.update(_render_data(case_headers, variables, "case.headers_json"))
     return headers
 
 
@@ -134,13 +251,37 @@ def _normalize_exception_artifacts(run_id: int, exc: Exception) -> tuple[list[di
     return artifacts, steps or []
 
 
-def _execute_api_case_httpx(db: Session, run: TestRun, case: APICase, project: Project) -> dict:
+def _ui_step_detail(
+    step: dict,
+    *,
+    page_url: str | None,
+    selector: str | None = None,
+    value: str | None = None,
+    error: str | None = None,
+    screenshot: str | None = None,
+) -> dict:
+    detail = {
+        "action": step.get("action"),
+        "selector": selector,
+        "value": value,
+        "page_url": page_url,
+    }
+    if error:
+        detail["error"] = error
+    if screenshot:
+        detail["screenshot"] = screenshot
+    return detail
+
+
+def _execute_api_case_httpx(
+    db: Session, run: TestRun, case: APICase, project: Project, deadline: float | None = None
+) -> dict:
     environment = _resolve_environment(db, project, run.environment_id)
     variables = environment.variables_json if environment and environment.variables_json else None
-    base_url = _render_template(environment.base_url if environment else project.base_url, variables)
+    base_url = _render_template(environment.base_url if environment else project.base_url, variables, "base_url")
     headers = _build_runtime_headers(environment, case.headers_json, variables)
-    rendered_path = _render_template(case.path, variables)
-    rendered_body = _render_data(case.body_json, variables)
+    rendered_path = _render_template(case.path, variables, "case.path")
+    rendered_body = _render_data(case.body_json, variables, "case.body_json")
 
     target_url = urljoin(base_url.rstrip("/") + "/", rendered_path.lstrip("/"))
     request_payload = {
@@ -162,7 +303,8 @@ def _execute_api_case_httpx(db: Session, run: TestRun, case: APICase, project: P
                 json=rendered_body,
             )
     else:
-        with httpx.Client(timeout=_run_timeout_seconds(run)) as client:
+        timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
+        with httpx.Client(timeout=timeout_seconds) as client:
             response = client.request(
                 case.method.upper(),
                 target_url,
@@ -194,13 +336,15 @@ def _execute_api_case_httpx(db: Session, run: TestRun, case: APICase, project: P
     }
 
 
-def _execute_api_case_pytest(db: Session, run: TestRun, case: APICase, project: Project) -> dict:
+def _execute_api_case_pytest(
+    db: Session, run: TestRun, case: APICase, project: Project, deadline: float | None = None
+) -> dict:
     environment = _resolve_environment(db, project, run.environment_id)
     variables = environment.variables_json if environment and environment.variables_json else None
-    base_url = _render_template(environment.base_url if environment else project.base_url, variables)
+    base_url = _render_template(environment.base_url if environment else project.base_url, variables, "base_url")
     headers = _build_runtime_headers(environment, case.headers_json, variables)
-    rendered_path = _render_template(case.path, variables)
-    rendered_body = _render_data(case.body_json, variables)
+    rendered_path = _render_template(case.path, variables, "case.path")
+    rendered_body = _render_data(case.body_json, variables, "case.body_json")
     target_url = urljoin(base_url.rstrip("/") + "/", rendered_path.lstrip("/"))
     request_payload = {
         "method": case.method,
@@ -257,12 +401,14 @@ def _execute_api_case_pytest(db: Session, run: TestRun, case: APICase, project: 
             }
         )
 
+        timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
+
         result = subprocess.run(
             ["pytest", "-q", test_path],
             capture_output=True,
             text=True,
             env=env,
-            timeout=_run_timeout_seconds(run) + 20,
+            timeout=timeout_seconds,
         )
 
         response_payload = {}
@@ -300,79 +446,328 @@ def _execute_api_case_pytest(db: Session, run: TestRun, case: APICase, project: 
         }
 
 
-def _execute_api_case(db: Session, run: TestRun, case: APICase, project: Project) -> dict:
+def _execute_api_case(
+    db: Session, run: TestRun, case: APICase, project: Project, deadline: float | None = None
+) -> dict:
     engine = (settings.execution_engine or "httpx").lower()
     if engine == "pytest":
-        return _execute_api_case_pytest(db, run, case, project)
-    return _execute_api_case_httpx(db, run, case, project)
+        return _execute_api_case_pytest(db, run, case, project, deadline=deadline)
+    return _execute_api_case_httpx(db, run, case, project, deadline=deadline)
 
 
-def _execute_ui_case(db: Session, run: TestRun, case: UICase, project: Project) -> dict:
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int(round((percentile / 100) * (len(ordered) - 1)))))
+    return ordered[index]
+
+
+def _execute_performance_case(
+    db: Session, run: TestRun, case: PerformanceCase, project: Project, deadline: float | None = None
+) -> dict:
+    environment = _resolve_environment(db, project, run.environment_id)
+    variables = environment.variables_json if environment and environment.variables_json else None
+    base_url = _render_template(environment.base_url if environment else project.base_url, variables, "base_url")
+    headers = _build_runtime_headers(environment, case.headers_json, variables)
+    rendered_path = _render_template(case.path, variables, "case.path")
+    rendered_body = _render_data(case.body_json, variables, "case.body_json")
+    target_url = urljoin(base_url.rstrip("/") + "/", rendered_path.lstrip("/"))
+
+    total_requests = max(case.total_requests or 1, 1)
+    concurrency = max(1, min(case.concurrency or 1, total_requests))
+    request_payload = {
+        "method": case.method,
+        "url": target_url,
+        "headers": headers,
+        "body": rendered_body,
+        "expected_status": case.expected_status,
+        "concurrency": concurrency,
+        "total_requests": total_requests,
+        "thresholds": {
+            "max_avg_response_ms": case.max_avg_response_ms,
+            "max_p95_response_ms": case.max_p95_response_ms,
+            "max_error_rate": case.max_error_rate,
+        },
+    }
+
+    def perform_request(index: int) -> dict:
+        started_at = time.perf_counter()
+        parsed_url = urlparse(target_url)
+        response_status = 0
+        response_body = None
+        error = None
+        try:
+            if parsed_url.hostname == "testserver":
+                from app.main import app
+
+                with TestClient(app, base_url="http://testserver") as client:
+                    response = client.request(case.method.upper(), parsed_url.path, headers=headers, json=rendered_body)
+                response_status = response.status_code
+                response_body = response.text[:500]
+            else:
+                timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
+                with httpx.Client(timeout=timeout_seconds) as client:
+                    response = client.request(case.method.upper(), target_url, headers=headers, json=rendered_body)
+                response_status = response.status_code
+                response_body = response.text[:500]
+        except Exception as exc:
+            error = str(exc)
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        success = error is None and response_status == case.expected_status
+        return {
+            "index": index + 1,
+            "status": "SUCCESS" if success else "FAILED",
+            "status_code": response_status,
+            "duration_ms": duration_ms,
+            "error": error,
+            "response_sample": response_body,
+        }
+
+    started_at = time.perf_counter()
+    results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        future_map = {executor.submit(perform_request, index): index for index in range(total_requests)}
+        for future in as_completed(future_map):
+            results.append(future.result())
+
+    results.sort(key=lambda item: item["index"])
+    duration_values = [float(item["duration_ms"]) for item in results]
+    success_count = sum(1 for item in results if item["status"] == "SUCCESS")
+    failure_count = total_requests - success_count
+    error_rate = round(failure_count / total_requests, 4)
+    avg_response_ms = round(sum(duration_values) / len(duration_values), 1) if duration_values else 0.0
+    p95_response_ms = round(_percentile(duration_values, 95), 1) if duration_values else 0.0
+    throughput = round(total_requests / max(time.perf_counter() - started_at, 0.001), 2)
+
+    threshold_errors = []
+    if case.max_avg_response_ms is not None and avg_response_ms > case.max_avg_response_ms:
+        threshold_errors.append(f"平均响应 {avg_response_ms}ms 超过阈值 {case.max_avg_response_ms}ms")
+    if case.max_p95_response_ms is not None and p95_response_ms > case.max_p95_response_ms:
+        threshold_errors.append(f"P95 {p95_response_ms}ms 超过阈值 {case.max_p95_response_ms}ms")
+    if case.max_error_rate is not None and error_rate > case.max_error_rate:
+        threshold_errors.append(f"错误率 {round(error_rate * 100, 2)}% 超过阈值 {round(case.max_error_rate * 100, 2)}%")
+
+    step_results = [
+        {
+            "name": f"request_{item['index']}",
+            "status": item["status"],
+            "duration_ms": item["duration_ms"],
+            "detail": {
+                "status_code": item["status_code"],
+                "error": item["error"],
+                "response_sample": item["response_sample"],
+                "target_url": target_url,
+            },
+        }
+        for item in results
+    ]
+    step_results.append(
+        {
+            "name": "performance_summary",
+            "status": "SUCCESS" if not threshold_errors else "FAILED",
+            "detail": {
+                "avg_response_ms": avg_response_ms,
+                "p95_response_ms": p95_response_ms,
+                "error_rate": error_rate,
+                "throughput_rps": throughput,
+                "success_count": success_count,
+                "failure_count": failure_count,
+                "threshold_errors": threshold_errors,
+            },
+        }
+    )
+
+    response_payload = {
+        "avg_response_ms": avg_response_ms,
+        "p95_response_ms": p95_response_ms,
+        "error_rate": error_rate,
+        "throughput_rps": throughput,
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "results": results,
+    }
+    artifacts = [
+        _write_run_artifact(run.id, "performance-request.json", request_payload),
+        _write_run_artifact(run.id, "performance-summary.json", response_payload),
+        _write_run_artifact(run.id, "performance-results.json", results),
+    ]
+    summary = (
+        f"压测完成：成功 {success_count}/{total_requests}，平均 {avg_response_ms}ms，"
+        f"P95 {p95_response_ms}ms，错误率 {round(error_rate * 100, 2)}%"
+    )
+    if threshold_errors:
+        summary = f"{summary}；阈值未通过"
+    return {
+        "status": "SUCCESS" if not threshold_errors and failure_count == 0 else "FAILED",
+        "summary": summary,
+        "error_type": None if not threshold_errors and failure_count == 0 else "ASSERTION",
+        "exit_code": 0 if not threshold_errors and failure_count == 0 else 1,
+        "stdout_text": json.dumps(response_payload, ensure_ascii=False, indent=2),
+        "stderr_text": "\n".join(threshold_errors),
+        "artifacts_json": artifacts,
+        "request_payload": request_payload,
+        "response_payload": response_payload,
+        "step_results_json": step_results,
+    }
+
+
+def _execute_ui_case(
+    db: Session, run: TestRun, case: UICase, project: Project, deadline: float | None = None
+) -> dict:
     environment = _resolve_environment(db, project, run.environment_id)
     variables = environment.variables_json if environment and environment.variables_json else None
 
-    target_url = _render_template(case.target_url, variables)
+    target_url = _render_template(case.target_url, variables, "case.target_url")
     steps = []
     for step in case.steps_json:
         rendered_step = dict(step)
         if "value" in rendered_step and isinstance(rendered_step["value"], str):
-            rendered_step["value"] = _render_template(rendered_step["value"], variables)
+            rendered_step["value"] = _render_template(rendered_step["value"], variables, "case.steps_json.value")
         if "selector" in rendered_step and isinstance(rendered_step["selector"], str):
-            rendered_step["selector"] = _render_template(rendered_step["selector"], variables)
+            rendered_step["selector"] = _render_template(
+                rendered_step["selector"], variables, "case.steps_json.selector"
+            )
         steps.append(rendered_step)
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1440, "height": 900})
+        context.tracing.start(screenshots=True, snapshots=True, sources=True)
         page = context.new_page()
         step_results = []
-        try:
-            for step in steps:
-                action = step.get("action")
-                if action == "goto":
-                    page.goto(step["value"], wait_until="networkidle", timeout=_playwright_timeout_ms(run, 30))
-                elif action == "wait_for_text":
-                    page.locator(f"text={step['value']}").first.wait_for(timeout=_playwright_timeout_ms(run, 20))
-                elif action == "click":
-                    page.locator(step["selector"]).first.click(timeout=_playwright_timeout_ms(run, 20))
-                elif action == "fill":
-                    page.locator(step["selector"]).first.fill(
-                        step.get("value", ""), timeout=_playwright_timeout_ms(run, 20)
-                    )
-                elif action == "assert_text":
-                    page.locator(f"text={step['value']}").first.wait_for(timeout=_playwright_timeout_ms(run, 20))
-                else:
-                    raise ValueError(f"不支持的步骤类型: {action}")
-                step_results.append({"name": action, "status": "SUCCESS", "detail": step})
+        artifacts: list[dict] = []
+        trace_path = os.path.join(_ensure_run_dir(run.id), "ui-trace.zip")
 
-            expect_text = _render_template(case.expect_text, variables)
-            page.locator(f"text={expect_text}").first.wait_for(timeout=_playwright_timeout_ms(run, 15))
-            step_results.append({"name": "assert_expect_text", "status": "SUCCESS", "detail": expect_text})
-            screenshot = page.screenshot(full_page=True)
-            screenshot_meta = _write_run_artifact(run.id, "ui-success.png", screenshot, binary=True)
-            context.close()
-            browser.close()
+        def step_timeout(seconds: int) -> int:
+            return _playwright_timeout_ms_from_deadline(run, deadline, seconds) if deadline else _playwright_timeout_ms(run, seconds)
+
+        def capture_step_screenshot(index: int, action: str, suffix: str = "") -> dict | None:
+            filename = f"step-{index + 1:02d}-{action}{suffix}.png"
+            try:
+                content = page.screenshot(full_page=True)
+            except Exception:
+                return None
+            artifact = _write_run_artifact(run.id, filename, content, binary=True)
+            artifacts.append(artifact)
+            return artifact
+
+        try:
+            for index, step in enumerate(steps):
+                action = step.get("action")
+                started_at = time.perf_counter()
+                selector = step.get("selector")
+                value = step.get("value")
+                try:
+                    if action == "goto":
+                        page.goto(step["value"], wait_until="networkidle", timeout=step_timeout(30))
+                    elif action == "wait_for_text":
+                        page.locator(f"text={step['value']}").first.wait_for(timeout=step_timeout(20))
+                    elif action == "click":
+                        page.locator(step["selector"]).first.click(timeout=step_timeout(20))
+                    elif action == "fill":
+                        page.locator(step["selector"]).first.fill(step.get("value", ""), timeout=step_timeout(20))
+                    elif action == "assert_text":
+                        page.locator(f"text={step['value']}").first.wait_for(timeout=step_timeout(20))
+                    else:
+                        raise ValueError(f"不支持的步骤类型: {action}")
+                    screenshot_artifact = capture_step_screenshot(index, action or "step")
+                    step_results.append(
+                        {
+                            "name": action,
+                            "status": "SUCCESS",
+                            "duration_ms": int((time.perf_counter() - started_at) * 1000),
+                            "detail": _ui_step_detail(
+                                step,
+                                page_url=page.url,
+                                selector=selector,
+                                value=value if isinstance(value, str) else None,
+                                screenshot=screenshot_artifact["name"] if screenshot_artifact else None,
+                            ),
+                        }
+                    )
+                except Exception as exc:
+                    screenshot_artifact = capture_step_screenshot(index, action or "step", "-failure")
+                    step_results.append(
+                        {
+                            "name": action or f"step_{index + 1}",
+                            "status": "FAILED",
+                            "duration_ms": int((time.perf_counter() - started_at) * 1000),
+                            "detail": _ui_step_detail(
+                                step,
+                                page_url=page.url if hasattr(page, "url") else None,
+                                selector=selector,
+                                value=value if isinstance(value, str) else None,
+                                error=str(exc),
+                                screenshot=screenshot_artifact["name"] if screenshot_artifact else None,
+                            ),
+                        }
+                    )
+                    raise
+
+            expect_text = _render_template(case.expect_text, variables, "case.expect_text")
+            final_started_at = time.perf_counter()
+            page.locator(f"text={expect_text}").first.wait_for(timeout=step_timeout(15))
+            final_screenshot = capture_step_screenshot(len(steps), "assert-expect-text")
+            step_results.append(
+                {
+                    "name": "assert_expect_text",
+                    "status": "SUCCESS",
+                    "duration_ms": int((time.perf_counter() - final_started_at) * 1000),
+                    "detail": {
+                        "expect_text": expect_text,
+                        "page_url": page.url,
+                        "screenshot": final_screenshot["name"] if final_screenshot else None,
+                    },
+                }
+            )
+            summary_screenshot = page.screenshot(full_page=True)
+            success_artifact = _write_run_artifact(run.id, "ui-success.png", summary_screenshot, binary=True)
+            artifacts.append(success_artifact)
+            context.tracing.stop(path=trace_path)
+            if os.path.exists(trace_path):
+                artifacts.append({"name": "ui-trace.zip", "path": trace_path, "type": "zip"})
             return {
                 "status": "SUCCESS",
                 "summary": "UI 巡检执行成功",
                 "error_type": None,
                 "exit_code": 0,
-                "stdout_text": f"UI case visited {target_url}",
+                "stdout_text": f"UI case visited {target_url}\nfinal_url={page.url}",
                 "stderr_text": "",
-                "artifacts_json": [screenshot_meta],
+                "artifacts_json": artifacts,
                 "request_payload": {"target_url": target_url, "steps": steps},
-                "response_payload": {"expect_text": case.expect_text},
+                "response_payload": {"expect_text": expect_text, "final_url": page.url},
                 "step_results_json": step_results,
             }
         except Exception:
-            screenshot = page.screenshot(full_page=True)
-            error_artifacts = [
-                _write_run_artifact(run.id, "ui-failure.png", screenshot, binary=True),
-                _write_run_artifact(run.id, "ui-error.txt", traceback.format_exc()),
-            ]
+            failure_artifact = capture_step_screenshot(len(step_results), "ui", "-failure")
+            if failure_artifact is None:
+                try:
+                    screenshot = page.screenshot(full_page=True)
+                    failure_artifact = _write_run_artifact(run.id, "ui-failure.png", screenshot, binary=True)
+                    artifacts.append(failure_artifact)
+                except Exception:
+                    failure_artifact = None
+            error_text_artifact = _write_run_artifact(run.id, "ui-error.txt", traceback.format_exc())
+            artifacts.append(error_text_artifact)
+            try:
+                context.tracing.stop(path=trace_path)
+                if os.path.exists(trace_path):
+                    artifacts.append({"name": "ui-trace.zip", "path": trace_path, "type": "zip"})
+            except Exception:
+                pass
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "artifacts": artifacts,
+                        "steps": step_results,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        finally:
             context.close()
             browser.close()
-            raise RuntimeError(json.dumps({"artifacts": error_artifacts, "steps": step_results}, ensure_ascii=False))
 
 
 def _to_iso(dt: datetime | None) -> str | None:
@@ -484,7 +879,9 @@ def run_api_case(run_id: int) -> dict:
 
         if not mark_run_started(db, run):
             return {"status": "CANCELLED", "summary": "执行已取消"}
-        result = _execute_api_case(db, run, case, project)
+        result = _execute_case_with_retries(
+            db, run, lambda deadline: _execute_api_case(db, run, case, project, deadline=deadline)
+        )
         status = result["status"]
         summary = result["summary"]
         finalize_run(
@@ -503,20 +900,6 @@ def run_api_case(run_id: int) -> dict:
             response_payload=result["response_payload"],
         )
         return {"status": status, "summary": summary}
-    except subprocess.TimeoutExpired as exc:
-        run = db.get(TestRun, run_id)
-        if run is not None:
-            finalize_run(
-                db,
-                run,
-                status="TIMEOUT",
-                summary=f"接口执行超时: {exc}",
-                error_type="TIMEOUT",
-                timeout_seconds=_run_timeout_seconds(run),
-                stderr_text=traceback.format_exc(),
-                duration_ms=int((time.perf_counter() - started_at) * 1000),
-            )
-        return {"status": "TIMEOUT", "summary": str(exc)}
     except Exception as exc:
         run = db.get(TestRun, run_id)
         if run is not None:
@@ -525,7 +908,7 @@ def run_api_case(run_id: int) -> dict:
                 db,
                 run,
                 status="ERROR",
-                summary=f"接口执行异常: {exc}",
+                summary=f"执行异常: {exc}",
                 error_type="SYSTEM",
                 stderr_text=traceback.format_exc(),
                 artifacts_json=artifacts,
@@ -559,7 +942,9 @@ def run_ui_case(run_id: int) -> dict:
             finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
             return {"status": "FAILED", "summary": "关联项目不存在"}
 
-        result = _execute_ui_case(db, run, case, project)
+        result = _execute_case_with_retries(
+            db, run, lambda deadline: _execute_ui_case(db, run, case, project, deadline=deadline)
+        )
         summary = result["summary"]
         finalize_run(
             db,
@@ -577,24 +962,6 @@ def run_ui_case(run_id: int) -> dict:
             response_payload=result["response_payload"],
         )
         return {"status": result["status"], "summary": summary}
-    except PlaywrightTimeoutError as exc:
-        run = db.get(TestRun, run_id)
-        if run is not None:
-            artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
-            finalize_run(
-                db,
-                run,
-                status="TIMEOUT",
-                summary=f"UI 执行超时: {exc}",
-                error_type="TIMEOUT",
-                timeout_seconds=_run_timeout_seconds(run),
-                stderr_text=traceback.format_exc(),
-                artifacts_json=artifacts,
-                step_results_json=step_results,
-                duration_ms=int((time.perf_counter() - started_at) * 1000),
-                request_payload={"target_url": getattr(case, "target_url", None)},
-            )
-        return {"status": "TIMEOUT", "summary": str(exc)}
     except Exception as exc:
         run = db.get(TestRun, run_id)
         if run is not None:
@@ -603,13 +970,73 @@ def run_ui_case(run_id: int) -> dict:
                 db,
                 run,
                 status="ERROR",
-                summary=f"UI 执行异常: {exc}",
+                summary=f"执行异常: {exc}",
                 error_type="SYSTEM",
                 stderr_text=traceback.format_exc(),
                 artifacts_json=artifacts,
                 step_results_json=step_results,
                 duration_ms=int((time.perf_counter() - started_at) * 1000),
                 request_payload={"target_url": getattr(case, "target_url", None)},
+            )
+        return {"status": "ERROR", "summary": str(exc)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.run_performance_case")
+def run_performance_case(run_id: int) -> dict:
+    db = _open_db()
+    started_at = time.perf_counter()
+    try:
+        run = db.get(TestRun, run_id)
+        if run is None:
+            return {"status": "FAILED", "summary": f"执行记录 {run_id} 不存在"}
+
+        case = db.get(PerformanceCase, run.case_id)
+        if case is None:
+            finalize_run(db, run, status="FAILED", summary="性能用例不存在", error_type="SYSTEM")
+            return {"status": "FAILED", "summary": "性能用例不存在"}
+
+        if not mark_run_started(db, run):
+            return {"status": "CANCELLED", "summary": "执行已取消"}
+        project = db.get(Project, run.project_id)
+        if project is None:
+            finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
+            return {"status": "FAILED", "summary": "关联项目不存在"}
+
+        result = _execute_case_with_retries(
+            db, run, lambda deadline: _execute_performance_case(db, run, case, project, deadline=deadline)
+        )
+        finalize_run(
+            db,
+            run,
+            status=result["status"],
+            summary=result["summary"],
+            error_type=result.get("error_type"),
+            exit_code=result.get("exit_code"),
+            stdout_text=result.get("stdout_text"),
+            stderr_text=result.get("stderr_text"),
+            artifacts_json=result.get("artifacts_json"),
+            step_results_json=result.get("step_results_json"),
+            duration_ms=int((time.perf_counter() - started_at) * 1000),
+            request_payload=result["request_payload"],
+            response_payload=result["response_payload"],
+        )
+        return {"status": result["status"], "summary": result["summary"]}
+    except Exception as exc:
+        run = db.get(TestRun, run_id)
+        if run is not None:
+            artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
+            finalize_run(
+                db,
+                run,
+                status="ERROR",
+                summary=f"执行异常: {exc}",
+                error_type="SYSTEM",
+                stderr_text=traceback.format_exc(),
+                artifacts_json=artifacts,
+                step_results_json=step_results,
+                duration_ms=int((time.perf_counter() - started_at) * 1000),
             )
         return {"status": "ERROR", "summary": str(exc)}
     finally:
@@ -654,7 +1081,9 @@ def run_test_plan(plan_run_id: int) -> dict:
                     if not mark_run_started(db, run):
                         fail_count += 1
                         continue
-                    result = _execute_api_case(db, run, case, project)
+                    result = _execute_case_with_retries(
+                        db, run, lambda deadline: _execute_api_case(db, run, case, project, deadline=deadline)
+                    )
                 elif run.case_type == "UI":
                     case = db.get(UICase, run.case_id)
                     if case is None:
@@ -664,7 +1093,9 @@ def run_test_plan(plan_run_id: int) -> dict:
                     if not mark_run_started(db, run):
                         fail_count += 1
                         continue
-                    result = _execute_ui_case(db, run, case, project)
+                    result = _execute_case_with_retries(
+                        db, run, lambda deadline: _execute_ui_case(db, run, case, project, deadline=deadline)
+                    )
                 else:
                     finalize_run(db, run, status="FAILED", summary="未知用例类型", error_type="SYSTEM")
                     fail_count += 1
@@ -689,21 +1120,6 @@ def run_test_plan(plan_run_id: int) -> dict:
                     pass_count += 1
                 else:
                     fail_count += 1
-            except PlaywrightTimeoutError as exc:
-                artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
-                finalize_run(
-                    db,
-                    run,
-                    status="TIMEOUT",
-                    summary=f"执行超时: {exc}",
-                    error_type="TIMEOUT",
-                    timeout_seconds=_run_timeout_seconds(run),
-                    stderr_text=traceback.format_exc(),
-                    artifacts_json=artifacts,
-                    step_results_json=step_results,
-                    duration_ms=int((time.perf_counter() - case_started_at) * 1000),
-                )
-                fail_count += 1
             except Exception as exc:
                 artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
                 finalize_run(

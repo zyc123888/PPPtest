@@ -60,8 +60,10 @@ const menuItems = computed(() => {
       title: '用例管理',
       icon: 'List',
       children: [
+        { path: '/case/index', title: '用例中心', icon: 'Collection' },
         { path: '/case/api', title: '接口用例', icon: 'Link' },
-        { path: '/case/ui', title: 'UI 用例', icon: 'Monitor' }
+        { path: '/case/ui', title: 'UI 用例', icon: 'Monitor' },
+        { path: '/case/performance', title: '性能用例', icon: 'Histogram' }
       ]
     },
     { path: '/plan/index', title: '测试计划', icon: 'Calendar' },

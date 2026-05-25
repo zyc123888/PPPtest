@@ -12,6 +12,7 @@
           <el-select v-model="filters.caseType" clearable placeholder="全部" style="width: 160px">
             <el-option label="API" value="API" />
             <el-option label="UI" value="UI" />
+            <el-option label="PERF" value="PERF" />
           </el-select>
         </el-form-item>
         <el-form-item label="状态">
@@ -23,6 +24,16 @@
             <el-option label="异常" value="ERROR" />
             <el-option label="超时" value="TIMEOUT" />
             <el-option label="取消" value="CANCELLED" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="失败原因">
+          <el-select v-model="filters.errorType" clearable placeholder="全部" style="width: 180px">
+            <el-option
+              v-for="item in EXECUTION_ERROR_TYPE_OPTIONS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
           </el-select>
         </el-form-item>
         <el-form-item label="关键字">
@@ -45,7 +56,14 @@
             <el-tag size="small" :type="statusType(scope.row.status)">{{ statusText(scope.row.status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="错误类型" prop="error_type" width="120" align="center" />
+        <el-table-column label="错误类型" width="120" align="center">
+          <template #default="scope">
+            <el-tag v-if="scope.row.error_type" size="small" :type="errorTypeTag(scope.row.error_type)">
+              {{ errorTypeText(scope.row.error_type) }}
+            </el-tag>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="摘要" prop="summary" min-width="220" show-overflow-tooltip />
         <el-table-column label="耗时" width="110" align="center">
           <template #default="scope">
@@ -72,7 +90,7 @@
         <div v-for="item in pagedList" :key="item.id" class="mobile-card">
           <div class="mobile-card-title">{{ item.case_name }}</div>
           <div class="mobile-card-meta">类型：{{ item.case_type }} · 状态：{{ statusText(item.status) }}</div>
-          <div class="mobile-card-meta">错误：{{ item.error_type || '-' }} · 耗时：{{ item.duration_ms ? item.duration_ms + 'ms' : '-' }}</div>
+          <div class="mobile-card-meta">错误：{{ errorTypeText(item.error_type) }} · 耗时：{{ item.duration_ms ? item.duration_ms + 'ms' : '-' }}</div>
           <div class="mobile-card-desc">{{ item.summary || '-' }}</div>
           <div class="mobile-card-actions">
             <el-button size="small" @click="handleDetail(item)">详情</el-button>
@@ -104,6 +122,10 @@
         <el-descriptions-item label="超时阈值">{{ currentRun.timeout_seconds ? currentRun.timeout_seconds + 's' : '-' }}</el-descriptions-item>
         <el-descriptions-item label="重跑次数">{{ currentRun.retry_count || 0 }}</el-descriptions-item>
       </el-descriptions>
+      <div v-if="isPrecheckFailure(currentRun)" class="precheck-callout">
+        <div class="precheck-callout-title">执行前预检失败</div>
+        <div class="precheck-callout-body">{{ currentRun.summary || '环境变量或模板配置校验未通过' }}</div>
+      </div>
       <el-tabs>
         <el-tab-pane label="请求" name="req">
           <el-input :model-value="formatJson(currentRun.request_payload)" type="textarea" :rows="14" readonly />
@@ -148,6 +170,10 @@
         </el-tab-pane>
         <el-tab-pane label="错误输出">
           <el-input :model-value="logData.stderr_text || ''" type="textarea" :rows="16" readonly />
+        </el-tab-pane>
+        <el-tab-pane v-if="isPrecheckFailure(logData)" label="预检摘要">
+          <el-alert :title="logData.error_type === 'CONFIG' ? '配置预检失败' : '预检失败'" type="error" :closable="false" />
+          <el-input :model-value="logData.stderr_text || logData.stdout_text || ''" type="textarea" :rows="8" readonly class="precheck-textarea" />
         </el-tab-pane>
         <el-tab-pane label="步骤结果">
           <el-empty v-if="!logSteps.length" description="暂无步骤结果" />
@@ -198,6 +224,13 @@ import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
+import {
+  EXECUTION_ERROR_TYPE_OPTIONS,
+  executionErrorTypeTag,
+  executionErrorTypeText,
+  executionStatusTag,
+  executionStatusText
+} from '@/lib/execution'
 
 const list = ref([])
 const listLoading = ref(true)
@@ -214,35 +247,15 @@ let timer = null
 const filters = reactive({
   status: '',
   caseType: '',
+  errorType: '',
   keyword: ''
 })
 
 const page = ref(1)
 const pageSize = ref(10)
 
-const statusText = (status) => {
-  const map = {
-    healthy: '正常',
-    degraded: '降级',
-    unhealthy: '异常',
-    PENDING: '排队中',
-    RUNNING: '执行中',
-    SUCCESS: '成功',
-    FAILED: '失败',
-    ERROR: '异常',
-    TIMEOUT: '超时',
-    CANCELLED: '取消',
-    loading: '加载中'
-  }
-  return map[status] || status
-}
-
-const statusType = (status) => {
-  if (['healthy', 'SUCCESS'].includes(status)) return 'success'
-  if (['RUNNING', 'PENDING', 'degraded', 'loading'].includes(status)) return 'warning'
-  if (status === 'FAILED') return 'danger'
-  return 'info'
-}
+const statusText = executionStatusText
+const statusType = executionStatusTag
 
 const stepStatusType = (status) => {
   if (status === 'SUCCESS') return 'success'
@@ -250,6 +263,11 @@ const stepStatusType = (status) => {
   if (['RUNNING', 'PENDING'].includes(status)) return 'warning'
   return 'info'
 }
+
+const isPrecheckFailure = (payload) => payload?.error_type === 'CONFIG'
+
+const errorTypeText = executionErrorTypeText
+const errorTypeTag = executionErrorTypeTag
 
 const canCancel = (row) => {
   return canTest.value && ['PENDING', 'RUNNING'].includes(row.status)
@@ -309,6 +327,7 @@ const filteredList = computed(() => {
   return list.value.filter((r) => {
     if (filters.status && r.status !== filters.status) return false
     if (filters.caseType && r.case_type !== filters.caseType) return false
+    if (filters.errorType && r.error_type !== filters.errorType) return false
     if (!keyword) return true
     return (
       String(r.case_name || '').toLowerCase().includes(keyword) ||
@@ -329,6 +348,7 @@ const handleSearch = () => {
 const handleReset = () => {
   filters.status = ''
   filters.caseType = ''
+  filters.errorType = ''
   filters.keyword = ''
   page.value = 1
 }
@@ -486,6 +506,29 @@ onBeforeUnmount(() => {
 }
 
 .raw-json-collapse {
+  margin-top: 12px;
+}
+
+.precheck-callout {
+  margin: 16px 0;
+  border: 1px solid rgba(220, 38, 38, 0.2);
+  background: linear-gradient(135deg, rgba(254, 242, 242, 0.96), rgba(255, 251, 235, 0.92));
+  border-radius: 14px;
+  padding: 14px 16px;
+}
+
+.precheck-callout-title {
+  color: var(--el-color-danger);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.precheck-callout-body {
+  color: var(--color-text);
+  line-height: 1.6;
+}
+
+.precheck-textarea {
   margin-top: 12px;
 }
 

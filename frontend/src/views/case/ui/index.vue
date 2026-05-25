@@ -51,10 +51,13 @@
           </template>
         </el-table-column>
         <el-table-column label="名称" prop="name" min-width="180" show-overflow-tooltip />
+        <el-table-column label="版本" prop="version_no" width="100" align="center" />
+        <el-table-column label="评审" prop="review_status" width="110" align="center" />
         <el-table-column label="目标地址" prop="target_url" min-width="240" show-overflow-tooltip />
         <el-table-column label="期望文本" prop="expect_text" min-width="200" show-overflow-tooltip />
-        <el-table-column label="操作" align="center" width="220">
+        <el-table-column label="操作" align="center" width="280">
           <template #default="scope">
+            <el-button v-if="canTest" size="small" @click="handleEdit(scope.row)">编辑</el-button>
             <el-button v-if="canTest" size="small" type="primary" @click="handleRun(scope.row)">立即执行</el-button>
             <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
           </template>
@@ -85,7 +88,7 @@
       </div>
     </el-card>
 
-    <el-dialog v-model="dialogVisible" title="新增 UI 用例" width="640px">
+    <el-dialog v-model="dialogVisible" :title="isEditing ? '编辑 UI 用例' : '新增 UI 用例'" width="640px">
       <el-form
         ref="dataFormRef"
         :model="temp"
@@ -105,8 +108,36 @@
         <el-form-item label="用例名称" prop="name">
           <el-input v-model="temp.name" placeholder="请输入用例名称" />
         </el-form-item>
+        <el-form-item label="目录/分组">
+          <el-input v-model="temp.folder_path" placeholder="例如：首页巡检/登录流程" />
+        </el-form-item>
         <el-form-item label="目标地址" prop="target_url">
           <el-input v-model="temp.target_url" placeholder="http://frontend:3000" />
+        </el-form-item>
+        <el-form-item label="标签">
+          <el-select v-model="temp.tags_json" multiple filterable allow-create default-first-option style="width: 100%" placeholder="例如：smoke、ui-core">
+            <el-option v-for="item in tagOptions" :key="item" :label="item" :value="item" />
+          </el-select>
+        </el-form-item>
+        <el-row>
+          <el-col :span="12">
+            <el-form-item label="评审状态">
+              <el-select v-model="temp.review_status" style="width: 100%">
+                <el-option label="DRAFT" value="DRAFT" />
+                <el-option label="IN_REVIEW" value="IN_REVIEW" />
+                <el-option label="APPROVED" value="APPROVED" />
+                <el-option label="REJECTED" value="REJECTED" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="当前版本">
+              <el-input v-model="temp.version_no" disabled />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="评审备注">
+          <el-input v-model="temp.review_note" type="textarea" :rows="3" placeholder="例如：页面巡检通过，可进入回归；或填写拒绝原因" />
         </el-form-item>
         <el-form-item label="期望文本" prop="expect_text">
           <el-input v-model="temp.expect_text" placeholder="期望出现的文本" />
@@ -122,7 +153,7 @@
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="createData">确认</el-button>
+        <el-button type="primary" @click="saveData">确认</el-button>
       </template>
     </el-dialog>
 
@@ -136,8 +167,33 @@
         <el-form-item label="超时（秒）">
           <el-input-number v-model="runForm.timeout_seconds" :min="1" :max="600" style="width: 100%" />
         </el-form-item>
+        <el-form-item label="失败后自动重试">
+          <el-input-number v-model="runForm.max_retries" :min="0" :max="3" style="width: 100%" />
+        </el-form-item>
       </el-form>
+      <div v-if="precheckResult" class="precheck-panel">
+        <div class="precheck-summary" :class="{ invalid: !precheckResult.is_valid }">{{ precheckResult.summary }}</div>
+        <div v-if="precheckResult.missing_variables?.length" class="precheck-tags">
+          <el-tag v-for="item in precheckResult.missing_variables" :key="item" size="small" type="danger">{{ item }}</el-tag>
+        </div>
+        <el-table
+          v-if="precheckResult.issues?.length"
+          :data="precheckResult.issues.slice(0, 20)"
+          size="small"
+          border
+          class="precheck-table"
+        >
+          <el-table-column label="范围" prop="scope" min-width="140" show-overflow-tooltip />
+          <el-table-column label="字段" prop="field" min-width="140" show-overflow-tooltip />
+          <el-table-column label="缺失变量" min-width="160" show-overflow-tooltip>
+            <template #default="scope">
+              {{ scope.row.missing_variables.join(', ') }}
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
       <template #footer>
+        <el-button @click="handlePrecheck">执行前校验</el-button>
         <el-button @click="runDialogVisible = false">取消</el-button>
         <el-button type="primary" @click="submitRun">确认执行</el-button>
       </template>
@@ -159,7 +215,10 @@ const environments = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
 const runDialogVisible = ref(false)
+const isEditing = ref(false)
+const editingCaseId = ref(undefined)
 const dataFormRef = ref(null)
+const precheckResult = ref(null)
 const { canAdmin, canTest } = usePermissions()
 
 const filters = reactive({
@@ -173,8 +232,13 @@ const pageSize = ref(10)
 const temp = reactive({
   project_id: undefined,
   name: '',
+  folder_path: '',
   target_url: '',
+  review_status: 'DRAFT',
+  version_no: '1.0.0',
+  review_note: '',
   expect_text: '',
+  tags_json: [],
   steps_text: ''
 })
 
@@ -182,7 +246,8 @@ const runForm = reactive({
   case_id: undefined,
   project_id: undefined,
   environment_id: undefined,
-  timeout_seconds: 60
+  timeout_seconds: 60,
+  max_retries: 0
 })
 
 const rules = {
@@ -208,6 +273,12 @@ const projectMap = computed(() => {
     map[p.id] = p.name
   })
   return map
+})
+
+const tagOptions = computed(() => {
+  const tags = new Set()
+  list.value.forEach((item) => (item.tags_json || []).forEach((tag) => tags.add(tag)))
+  return Array.from(tags).sort((a, b) => a.localeCompare(b, 'zh-CN'))
 })
 
 const runEnvironmentOptions = computed(() => environments.value.filter((item) => item.project_id === runForm.project_id))
@@ -248,9 +319,16 @@ const getList = async () => {
 const handleCreate = () => {
   temp.project_id = projects.value.length > 0 ? projects.value[0].id : undefined
   temp.name = ''
+  temp.folder_path = ''
   temp.target_url = 'http://frontend:3000'
+  temp.review_status = 'DRAFT'
+  temp.version_no = '1.0.0'
+  temp.review_note = ''
   temp.expect_text = ''
+  temp.tags_json = []
   temp.steps_text = '[\n  {\n    "action": "goto",\n    "value": "http://frontend:3000"\n  }\n]'
+  isEditing.value = false
+  editingCaseId.value = undefined
   dialogVisible.value = true
   nextTick(() => {
     dataFormRef.value?.clearValidate()
@@ -267,19 +345,48 @@ const handleReset = () => {
   page.value = 1
 }
 
-const createData = () => {
+const handleEdit = (row) => {
+  temp.project_id = row.project_id
+  temp.name = row.name
+  temp.folder_path = row.folder_path || ''
+  temp.target_url = row.target_url
+  temp.review_status = row.review_status || 'DRAFT'
+  temp.version_no = row.version_no || '1.0.0'
+  temp.review_note = row.review_note || ''
+  temp.expect_text = row.expect_text
+  temp.tags_json = [...(row.tags_json || [])]
+  temp.steps_text = row.steps_json ? JSON.stringify(row.steps_json, null, 2) : '[]'
+  isEditing.value = true
+  editingCaseId.value = row.id
+  dialogVisible.value = true
+  nextTick(() => {
+    dataFormRef.value?.clearValidate()
+  })
+}
+
+const saveData = () => {
   dataFormRef.value?.validate(async (valid) => {
     if (valid) {
       try {
-        await api.post('/ui-cases', {
+        const payload = {
           project_id: temp.project_id,
           name: temp.name,
+          folder_path: temp.folder_path || null,
           target_url: temp.target_url,
+          review_status: temp.review_status,
+          version_no: temp.version_no,
+          review_note: temp.review_note || null,
           expect_text: temp.expect_text,
+          tags_json: temp.tags_json.length ? temp.tags_json : null,
           steps_json: temp.steps_text ? JSON.parse(temp.steps_text) : []
-        })
+        }
+        if (isEditing.value && editingCaseId.value) {
+          await api.put(`/ui-cases/${editingCaseId.value}`, payload)
+        } else {
+          await api.post('/ui-cases', payload)
+        }
         dialogVisible.value = false
-        ElMessage.success('创建成功')
+        ElMessage.success(isEditing.value ? '更新成功' : '创建成功')
         getList()
       } catch (error) {
         ElMessage.error(error.message)
@@ -293,6 +400,8 @@ const handleRun = async (row) => {
   runForm.project_id = row.project_id
   runForm.environment_id = undefined
   runForm.timeout_seconds = 60
+  runForm.max_retries = 0
+  precheckResult.value = null
   try {
     environments.value = await api.get(`/environments?project_id=${row.project_id}`)
     runDialogVisible.value = true
@@ -303,12 +412,38 @@ const handleRun = async (row) => {
 
 const submitRun = async () => {
   try {
+    const passed = await precheckRun()
+    if (!passed) return
     await api.post(`/executions/ui/${runForm.case_id}/run`, {
       environment_id: runForm.environment_id,
-      timeout_seconds: runForm.timeout_seconds
+      timeout_seconds: runForm.timeout_seconds,
+      max_retries: runForm.max_retries
     })
     runDialogVisible.value = false
     ElMessage.success('任务已投递')
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const showPrecheckResult = async (result) => {
+  precheckResult.value = result
+  if (result.is_valid) {
+    ElMessage.success('执行预检通过')
+    return true
+  }
+  return false
+}
+
+const precheckRun = async () => {
+  const suffix = runForm.environment_id ? `?environment_id=${runForm.environment_id}` : ''
+  const result = await api.get(`/executions/ui/${runForm.case_id}/precheck${suffix}`)
+  return showPrecheckResult(result)
+}
+
+const handlePrecheck = async () => {
+  try {
+    await precheckRun()
   } catch (error) {
     ElMessage.error(error.message)
   }
@@ -338,6 +473,35 @@ onMounted(() => {
 <style scoped>
 .mobile-cards {
   display: none;
+}
+
+.precheck-panel {
+  margin-top: 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 12px;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.precheck-summary {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.precheck-summary.invalid {
+  color: var(--el-color-danger);
+}
+
+.precheck-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.precheck-table {
+  margin-top: 12px;
 }
 
 @media (max-width: 960px) {
