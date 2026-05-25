@@ -33,7 +33,26 @@ jobs:
           PPPTEST_RUN_MODE=docker bash scripts/health_check.sh
 
       - name: Backend pytest
-        run: docker compose exec -T backend pytest
+        id: backend_pytest
+        continue-on-error: true
+        run: docker compose exec -T backend pytest -q --junitxml=/app/reports/pytest-stack.xml
+
+      - name: Backend pytest verbose retry on failure
+        if: steps.backend_pytest.outcome == 'failure'
+        run: docker compose exec -T backend pytest -vv --maxfail=1 || true
+
+      - name: Upload backend pytest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-pytest-report
+          path: backend/reports/pytest-stack.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Fail job when backend pytest failed
+        if: steps.backend_pytest.outcome == 'failure'
+        run: exit 1
 
       - name: Build e2e image
         run: docker compose build e2e
