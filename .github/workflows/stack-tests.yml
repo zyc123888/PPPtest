@@ -17,8 +17,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Run production-like stack tests
-        run: bash scripts/run_stack_tests.sh
+      - name: Compose up
+        run: docker compose up --build -d
+
+      - name: Health check
+        run: |
+          for i in {1..40}; do
+            if PPPTEST_RUN_MODE=docker bash scripts/health_check.sh >/tmp/test-platform-health.log 2>&1; then
+              cat /tmp/test-platform-health.log
+              exit 0
+            fi
+            sleep 5
+          done
+          cat /tmp/test-platform-health.log || true
+          PPPTEST_RUN_MODE=docker bash scripts/health_check.sh
+
+      - name: Backend pytest
+        run: docker compose exec -T backend pytest
+
+      - name: Build e2e image
+        run: docker compose build e2e
+
+      - name: Run e2e specs
+        run: >
+          docker compose run --rm e2e npx playwright test
+          tests/admin_layout.spec.js
+          tests/full_flow.spec.js
+          tests/workspace_membership_flow.spec.js
+          tests/workspace_owner_guard.spec.js
+          tests/execution_artifact_download.spec.js
+          --reporter=line
 
       - name: Dump stack diagnostics on failure
         if: failure()
@@ -28,3 +56,7 @@ jobs:
           docker compose logs frontend --tail=200 || true
           docker compose logs worker --tail=200 || true
           docker compose logs mariadb --tail=200 || true
+
+      - name: Compose down
+        if: always()
+        run: docker compose down -v
