@@ -10,10 +10,21 @@ jobs:
   docker-stack-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Run production-like stack tests
         run: bash scripts/run_stack_tests.sh
+
+      - name: Dump stack diagnostics on failure
+        if: failure()
+        run: |
+          docker ps -a || true
+          docker compose logs backend --tail=200 || true
+          docker compose logs frontend --tail=200 || true
+          docker compose logs worker --tail=200 || true
+          docker compose logs mariadb --tail=200 || true
