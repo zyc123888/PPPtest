@@ -4,8 +4,38 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+CURRENT_STEP="bootstrap"
+
 cleanup() {
   compose_cmd down -v >/dev/null 2>&1 || true
+}
+
+dump_diagnostics() {
+  echo ""
+  echo "==== Stack diagnostics (step: ${CURRENT_STEP}) ===="
+  compose_cmd ps || true
+  compose_cmd logs backend --tail=200 || true
+  compose_cmd logs frontend --tail=200 || true
+  compose_cmd logs worker --tail=200 || true
+  compose_cmd logs mysql --tail=200 || true
+}
+
+on_error() {
+  local exit_code=$?
+  local failed_command="${BASH_COMMAND:-unknown}"
+  echo "❌ Stack tests failed at step: ${CURRENT_STEP}"
+  echo "❌ Failed command: ${failed_command}"
+  echo "❌ Exit code: ${exit_code}"
+  dump_diagnostics
+  exit "${exit_code}"
+}
+
+run_step() {
+  local name="$1"
+  shift
+  CURRENT_STEP="${name}"
+  echo "==== Running step: ${CURRENT_STEP} ===="
+  "$@"
 }
 
 compose_cmd() {
@@ -25,8 +55,9 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 trap cleanup EXIT
+trap on_error ERR
 
-compose_cmd up --build -d
+run_step "compose_up" compose_cmd up --build -d
 
 for _ in {1..40}; do
   if PPPTEST_RUN_MODE=docker bash scripts/health_check.sh >/tmp/test-platform-health.log 2>&1; then
@@ -36,9 +67,9 @@ for _ in {1..40}; do
   sleep 5
 done
 
-PPPTEST_RUN_MODE=docker bash scripts/health_check.sh
-compose_cmd exec -T backend pytest
-compose_cmd build e2e
+run_step "health_check" env PPPTEST_RUN_MODE=docker bash scripts/health_check.sh
+run_step "backend_pytest" compose_cmd exec -T backend pytest
+run_step "build_e2e_image" compose_cmd build e2e
 
 E2E_SPECS=(
   tests/admin_layout.spec.js
@@ -48,4 +79,4 @@ E2E_SPECS=(
   tests/execution_artifact_download.spec.js
 )
 
-compose_cmd run --rm e2e npx playwright test "${E2E_SPECS[@]}" --reporter=line
+run_step "run_e2e_specs" compose_cmd run --rm e2e npx playwright test "${E2E_SPECS[@]}" --reporter=line
