@@ -37,7 +37,8 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p backend/reports
-          rm -f backend/reports/pytest-stack.log backend/reports/pytest-stack.xml
+          : > backend/reports/pytest-stack.log
+          : > backend/reports/pytest-stack.xml
           set +e
           docker compose exec -T backend pytest -q --junitxml=/app/reports/pytest-stack.xml 2>&1 | tee backend/reports/pytest-stack.log
           test_exit=${PIPESTATUS[0]}
@@ -50,13 +51,13 @@ jobs:
 
       - name: Upload backend pytest report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: backend-pytest-report
           path: |
             backend/reports/pytest-stack.xml
             backend/reports/pytest-stack.log
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Fail job when backend pytest failed
