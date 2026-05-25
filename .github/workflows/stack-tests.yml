@@ -35,10 +35,17 @@ jobs:
       - name: Backend pytest
         id: backend_pytest
         continue-on-error: true
-        run: docker compose exec -T backend pytest -q --junitxml=/app/reports/pytest-stack.xml
+        run: |
+          mkdir -p backend/reports
+          rm -f backend/reports/pytest-stack.log backend/reports/pytest-stack.xml
+          set +e
+          docker compose exec -T backend pytest -q --junitxml=/app/reports/pytest-stack.xml 2>&1 | tee backend/reports/pytest-stack.log
+          test_exit=${PIPESTATUS[0]}
+          echo "exit_code=${test_exit}" >> "$GITHUB_OUTPUT"
+          exit "${test_exit}"
 
       - name: Backend pytest verbose retry on failure
-        if: steps.backend_pytest.outcome == 'failure'
+        if: steps.backend_pytest.outputs.exit_code != '0'
         run: docker compose exec -T backend pytest -vv --maxfail=1 || true
 
       - name: Upload backend pytest report
@@ -46,12 +53,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backend-pytest-report
-          path: backend/reports/pytest-stack.xml
-          if-no-files-found: warn
+          path: |
+            backend/reports/pytest-stack.xml
+            backend/reports/pytest-stack.log
+          if-no-files-found: error
           retention-days: 7
 
       - name: Fail job when backend pytest failed
-        if: steps.backend_pytest.outcome == 'failure'
+        if: steps.backend_pytest.outputs.exit_code != '0'
         run: exit 1
 
       - name: Build e2e image
