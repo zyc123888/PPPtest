@@ -602,6 +602,13 @@ def _case_snapshot(case) -> dict:
     return payload
 
 
+def _ensure_case_defaults(case) -> None:
+    if hasattr(case, "review_status") and not getattr(case, "review_status", None):
+        case.review_status = "DRAFT"
+    if hasattr(case, "version_no") and not getattr(case, "version_no", None):
+        case.version_no = "1.0.0"
+
+
 def _record_case_history(
     db: Session,
     *,
@@ -951,7 +958,10 @@ def list_api_cases(
         if not project_ids:
             return []
         stmt = stmt.where(APICase.project_id.in_(project_ids))
-    return list(db.scalars(stmt).all())
+    items = list(db.scalars(stmt).all())
+    for item in items:
+        _ensure_case_defaults(item)
+    return items
 
 
 @protected_router.get("/cases", response_model=list[schemas.UnifiedCaseRead])
@@ -1291,7 +1301,10 @@ def list_ui_cases(
         if not project_ids:
             return []
         stmt = stmt.where(UICase.project_id.in_(project_ids))
-    return list(db.scalars(stmt).all())
+    items = list(db.scalars(stmt).all())
+    for item in items:
+        _ensure_case_defaults(item)
+    return items
 
 
 @protected_router.put(
@@ -1361,7 +1374,10 @@ def list_performance_cases(
         if not project_ids:
             return []
         stmt = stmt.where(PerformanceCase.project_id.in_(project_ids))
-    return list(db.scalars(stmt).all())
+    items = list(db.scalars(stmt).all())
+    for item in items:
+        _ensure_case_defaults(item)
+    return items
 
 
 @protected_router.delete("/ui-cases/{case_id}", status_code=204, dependencies=[Depends(require_admin)])

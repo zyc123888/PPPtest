@@ -633,7 +633,9 @@ def _execute_ui_case(
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1440, "height": 900})
-        context.tracing.start(screenshots=True, snapshots=True, sources=True)
+        tracing = getattr(context, "tracing", None)
+        if tracing and hasattr(tracing, "start"):
+            tracing.start(screenshots=True, snapshots=True, sources=True)
         page = context.new_page()
         step_results = []
         artifacts: list[dict] = []
@@ -724,9 +726,10 @@ def _execute_ui_case(
             summary_screenshot = page.screenshot(full_page=True)
             success_artifact = _write_run_artifact(run.id, "ui-success.png", summary_screenshot, binary=True)
             artifacts.append(success_artifact)
-            context.tracing.stop(path=trace_path)
-            if os.path.exists(trace_path):
-                artifacts.append({"name": "ui-trace.zip", "path": trace_path, "type": "zip"})
+            if tracing and hasattr(tracing, "stop"):
+                tracing.stop(path=trace_path)
+                if os.path.exists(trace_path):
+                    artifacts.append({"name": "ui-trace.zip", "path": trace_path, "type": "zip"})
             return {
                 "status": "SUCCESS",
                 "summary": "UI 巡检执行成功",
@@ -751,9 +754,10 @@ def _execute_ui_case(
             error_text_artifact = _write_run_artifact(run.id, "ui-error.txt", traceback.format_exc())
             artifacts.append(error_text_artifact)
             try:
-                context.tracing.stop(path=trace_path)
-                if os.path.exists(trace_path):
-                    artifacts.append({"name": "ui-trace.zip", "path": trace_path, "type": "zip"})
+                if tracing and hasattr(tracing, "stop"):
+                    tracing.stop(path=trace_path)
+                    if os.path.exists(trace_path):
+                        artifacts.append({"name": "ui-trace.zip", "path": trace_path, "type": "zip"})
             except Exception:
                 pass
             raise RuntimeError(
