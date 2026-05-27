@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -273,6 +274,48 @@ def _ui_step_detail(
     return detail
 
 
+def _enabled_body_pairs(rows: list[dict] | None) -> dict:
+    return {
+        str(item.get("key")).strip(): item.get("value", "")
+        for item in rows or []
+        if item.get("enabled", True) and str(item.get("key", "")).strip()
+    }
+
+
+def _build_request_body_kwargs(body: object) -> dict:
+    if not body:
+        return {}
+    if not isinstance(body, dict) or "mode" not in body:
+        return {"json": body}
+
+    mode = body.get("mode")
+    if mode == "none":
+        return {}
+    if mode == "form-data":
+        return {"files": {key: (None, value) for key, value in _enabled_body_pairs(body.get("form_data")).items()}}
+    if mode == "x-www-form-urlencoded":
+        return {"data": _enabled_body_pairs(body.get("urlencoded"))}
+    if mode == "graphql":
+        graphql = body.get("graphql") or {}
+        return {"json": {"query": graphql.get("query", ""), "variables": graphql.get("variables") or {}}}
+    if mode == "binary":
+        binary = body.get("binary") or {}
+        content = binary.get("content") or binary.get("content_base64") or ""
+        if binary.get("encoding") == "base64":
+            return {"content": base64.b64decode(content) if content else b""}
+        return {"content": str(content).encode("utf-8")}
+    if mode == "raw":
+        raw = body.get("raw", "")
+        if body.get("raw_type", "json") == "json":
+            try:
+                return {"json": json.loads(raw) if isinstance(raw, str) else raw}
+            except Exception:
+                return {"content": raw}
+        return {"content": raw}
+
+    return {"json": body}
+
+
 def _execute_api_case_httpx(
     db: Session, run: TestRun, case: APICase, project: Project, deadline: float | None = None
 ) -> dict:
@@ -282,6 +325,7 @@ def _execute_api_case_httpx(
     headers = _build_runtime_headers(environment, case.headers_json, variables)
     rendered_path = _render_template(case.path, variables, "case.path")
     rendered_body = _render_data(case.body_json, variables, "case.body_json")
+    body_kwargs = _build_request_body_kwargs(rendered_body)
 
     target_url = urljoin(base_url.rstrip("/") + "/", rendered_path.lstrip("/"))
     request_payload = {
@@ -300,7 +344,7 @@ def _execute_api_case_httpx(
                 case.method.upper(),
                 parsed_url.path,
                 headers=headers,
-                json=rendered_body,
+                **body_kwargs,
             )
     else:
         timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
@@ -309,7 +353,7 @@ def _execute_api_case_httpx(
                 case.method.upper(),
                 target_url,
                 headers=headers,
-                json=rendered_body,
+                **body_kwargs,
             )
 
     status = "SUCCESS" if response.status_code == case.expected_status else "FAILED"
@@ -357,7 +401,46 @@ def _execute_api_case_pytest(
         """
         import json
         import os
+        import base64
         import httpx
+
+        def enabled_pairs(rows):
+            return {
+                str(item.get("key")): item.get("value", "")
+                for item in rows or []
+                if item.get("enabled", True) and str(item.get("key", "")).strip()
+            }
+
+        def request_body_kwargs(body):
+            if not body:
+                return {}
+            if not isinstance(body, dict) or "mode" not in body:
+                return {"json": body}
+            mode = body.get("mode")
+            if mode == "none":
+                return {}
+            if mode == "form-data":
+                return {"files": {key: (None, value) for key, value in enabled_pairs(body.get("form_data")).items()}}
+            if mode == "x-www-form-urlencoded":
+                return {"data": enabled_pairs(body.get("urlencoded"))}
+            if mode == "graphql":
+                graphql = body.get("graphql") or {}
+                return {"json": {"query": graphql.get("query", ""), "variables": graphql.get("variables") or {}}}
+            if mode == "binary":
+                binary = body.get("binary") or {}
+                content = binary.get("content") or binary.get("content_base64") or ""
+                if binary.get("encoding") == "base64":
+                    return {"content": base64.b64decode(content) if content else b""}
+                return {"content": str(content).encode("utf-8")}
+            if mode == "raw":
+                raw = body.get("raw", "")
+                if body.get("raw_type", "json") == "json":
+                    try:
+                        return {"json": json.loads(raw) if isinstance(raw, str) else raw}
+                    except Exception:
+                        return {"content": raw}
+                return {"content": raw}
+            return {"json": body}
 
         def test_api_case():
             url = os.environ["TARGET_URL"]
@@ -368,7 +451,7 @@ def _execute_api_case_pytest(
             expected = int(os.environ.get("EXPECTED_STATUS", "200"))
             timeout = float(os.environ.get("TIMEOUT", "30"))
 
-            response = httpx.request(method, url, headers=headers, json=body, timeout=timeout)
+            response = httpx.request(method, url, headers=headers, timeout=timeout, **request_body_kwargs(body))
             result = {
                 "status_code": response.status_code,
                 "body_text": response.text[:2000],
@@ -472,6 +555,7 @@ def _execute_performance_case(
     headers = _build_runtime_headers(environment, case.headers_json, variables)
     rendered_path = _render_template(case.path, variables, "case.path")
     rendered_body = _render_data(case.body_json, variables, "case.body_json")
+    body_kwargs = _build_request_body_kwargs(rendered_body)
     target_url = urljoin(base_url.rstrip("/") + "/", rendered_path.lstrip("/"))
 
     total_requests = max(case.total_requests or 1, 1)
@@ -502,13 +586,13 @@ def _execute_performance_case(
                 from app.main import app
 
                 with TestClient(app, base_url="http://testserver") as client:
-                    response = client.request(case.method.upper(), parsed_url.path, headers=headers, json=rendered_body)
+                    response = client.request(case.method.upper(), parsed_url.path, headers=headers, **body_kwargs)
                 response_status = response.status_code
                 response_body = response.text[:500]
             else:
                 timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
                 with httpx.Client(timeout=timeout_seconds) as client:
-                    response = client.request(case.method.upper(), target_url, headers=headers, json=rendered_body)
+                    response = client.request(case.method.upper(), target_url, headers=headers, **body_kwargs)
                 response_status = response.status_code
                 response_body = response.text[:500]
         except Exception as exc:

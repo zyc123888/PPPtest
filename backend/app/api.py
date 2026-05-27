@@ -973,6 +973,8 @@ def list_cases(
     status: str | None = None,
     review_status: str | None = None,
     tag: str | None = None,
+    tags: str | None = None,
+    tag_mode: str | None = Query(default="ANY", pattern="^(ANY|ALL)$"),
     keyword: str | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -993,7 +995,11 @@ def list_cases(
     normalized_priority = (priority or "").strip().upper()
     normalized_status = (status or "").strip().upper()
     normalized_review_status = (review_status or "").strip().upper()
-    tag_value = (tag or "").strip().lower()
+    single_tag_value = (tag or "").strip().lower()
+    tag_values = [item.strip().lower() for item in (tags or "").split(",") if item.strip()]
+    if single_tag_value and single_tag_value not in tag_values:
+        tag_values.append(single_tag_value)
+    normalized_tag_mode = (tag_mode or "ANY").strip().upper()
     items: list[schemas.UnifiedCaseRead] = []
 
     if normalized_type in {"", "API"}:
@@ -1010,8 +1016,13 @@ def list_cases(
                 continue
             if normalized_review_status and (case.review_status or "").upper() != normalized_review_status:
                 continue
-            if tag_value and tag_value not in {str(item).lower() for item in (case.tags_json or [])}:
-                continue
+            if tag_values:
+                case_tags = {str(item).lower() for item in (case.tags_json or [])}
+                if normalized_tag_mode == "ALL":
+                    if not all(value in case_tags for value in tag_values):
+                        continue
+                elif not any(value in case_tags for value in tag_values):
+                    continue
             if keyword_value and keyword_value not in f"{case.name} {case.path}".lower():
                 continue
             items.append(_serialize_unified_case("API", case))
@@ -1030,8 +1041,13 @@ def list_cases(
                 continue
             if normalized_review_status and (case.review_status or "").upper() != normalized_review_status:
                 continue
-            if tag_value and tag_value not in {str(item).lower() for item in (case.tags_json or [])}:
-                continue
+            if tag_values:
+                case_tags = {str(item).lower() for item in (case.tags_json or [])}
+                if normalized_tag_mode == "ALL":
+                    if not all(value in case_tags for value in tag_values):
+                        continue
+                elif not any(value in case_tags for value in tag_values):
+                    continue
             if keyword_value and keyword_value not in f"{case.name} {case.target_url} {case.expect_text}".lower():
                 continue
             items.append(_serialize_unified_case("UI", case))
@@ -1050,8 +1066,13 @@ def list_cases(
                 continue
             if normalized_review_status and (case.review_status or "").upper() != normalized_review_status:
                 continue
-            if tag_value and tag_value not in {str(item).lower() for item in (case.tags_json or [])}:
-                continue
+            if tag_values:
+                case_tags = {str(item).lower() for item in (case.tags_json or [])}
+                if normalized_tag_mode == "ALL":
+                    if not all(value in case_tags for value in tag_values):
+                        continue
+                elif not any(value in case_tags for value in tag_values):
+                    continue
             if keyword_value and keyword_value not in f"{case.name} {case.path}".lower():
                 continue
             items.append(_serialize_unified_case("PERF", case))
@@ -1065,6 +1086,256 @@ def list_cases(
         reverse=True,
     )
     return items
+
+
+@protected_router.get("/cases/export")
+def export_cases(
+    project_id: int | None = None,
+    case_type: str | None = None,
+    folder_path: str | None = None,
+    priority: str | None = None,
+    status: str | None = None,
+    review_status: str | None = None,
+    tag: str | None = None,
+    tags: str | None = None,
+    tag_mode: str | None = Query(default="ANY", pattern="^(ANY|ALL)$"),
+    keyword: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    items = list_cases(
+        project_id=project_id,
+        case_type=case_type,
+        folder_path=folder_path,
+        priority=priority,
+        status=status,
+        review_status=review_status,
+        tag=tag,
+        tags=tags,
+        tag_mode=tag_mode,
+        keyword=keyword,
+        db=db,
+        current_user=current_user,
+    )
+    return {
+        "count": len(items),
+        "items": [item.model_dump() for item in items],
+    }
+
+
+@protected_router.get("/cases/duplicates", response_model=list[schemas.CaseDuplicateGroup])
+def detect_duplicate_cases(
+    project_id: int | None = None,
+    case_type: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[schemas.CaseDuplicateGroup]:
+    if project_id:
+        _require_project_access(db, current_user, db.get(Project, project_id))
+        project_ids = [project_id]
+    elif current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return []
+    else:
+        project_ids = None
+
+    normalized_type = (case_type or "").strip().upper()
+    buckets: dict[tuple[str, str], list[schemas.CaseDuplicateItem]] = {}
+
+    def add_item(item_type: str, case, entry: str) -> None:
+        key = entry.strip().lower()
+        if not key:
+            return
+        buckets.setdefault((item_type, key), []).append(
+            schemas.CaseDuplicateItem(
+                case_type=item_type,
+                case_id=case.id,
+                project_id=case.project_id,
+                name=case.name,
+                folder_path=case.folder_path,
+                entry=entry,
+                review_status=getattr(case, "review_status", None),
+                updated_at=getattr(case, "updated_at", None),
+            )
+        )
+
+    if normalized_type in {"", "API"}:
+        stmt = select(APICase)
+        if project_ids is not None:
+            stmt = stmt.where(APICase.project_id.in_(project_ids))
+        for case in db.scalars(stmt).all():
+            add_item("API", case, f"{case.method.upper()} {case.path}")
+    if normalized_type in {"", "UI"}:
+        stmt = select(UICase)
+        if project_ids is not None:
+            stmt = stmt.where(UICase.project_id.in_(project_ids))
+        for case in db.scalars(stmt).all():
+            add_item("UI", case, case.target_url)
+    if normalized_type in {"", "PERF"}:
+        stmt = select(PerformanceCase)
+        if project_ids is not None:
+            stmt = stmt.where(PerformanceCase.project_id.in_(project_ids))
+        for case in db.scalars(stmt).all():
+            add_item("PERF", case, f"{case.method.upper()} {case.path}")
+
+    groups = [
+        schemas.CaseDuplicateGroup(case_type=item_type, duplicate_key=duplicate_key, count=len(items), items=items)
+        for (item_type, duplicate_key), items in buckets.items()
+        if len(items) > 1
+    ]
+    return sorted(groups, key=lambda item: (item.case_type, item.duplicate_key))
+
+
+@protected_router.post(
+    "/cases/import",
+    response_model=schemas.BatchActionResult,
+    dependencies=[Depends(require_tester)],
+)
+def import_cases(
+    payload: schemas.CaseImportPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.BatchActionResult:
+    affected_count = 0
+    for item in payload.items:
+        project = _require_project_access(db, current_user, db.get(Project, item.project_id))
+        case_type = item.case_type.upper()
+        if case_type == "API":
+            case = APICase(
+                project_id=project.id,
+                name=item.name,
+                folder_path=item.folder_path,
+                method=(item.method or "GET").upper(),
+                path=item.path or "/",
+                priority=item.priority,
+                status=item.status,
+                review_status=item.review_status,
+                version_no=item.version_no,
+                review_note=item.review_note,
+                tags_json=item.tags_json,
+                headers_json=item.headers_json,
+                body_json=item.body_json,
+                assertions_json=item.assertions_json,
+                expected_status=item.expected_status or 200,
+                created_by=current_user.id,
+                updated_by=current_user.id,
+            )
+            db.add(case)
+            db.flush()
+            _record_case_history(db, case_type="API", case=case, action="IMPORT", changed_by=current_user.id, summary="批量导入接口用例")
+        elif case_type == "UI":
+            case = UICase(
+                project_id=project.id,
+                name=item.name,
+                folder_path=item.folder_path,
+                target_url=item.target_url or "http://localhost",
+                priority=item.priority,
+                status=item.status,
+                review_status=item.review_status,
+                version_no=item.version_no,
+                review_note=item.review_note,
+                tags_json=item.tags_json,
+                steps_json=item.steps_json or [],
+                assertions_json=item.assertions_json,
+                expect_text=item.expect_text or "ok",
+                created_by=current_user.id,
+                updated_by=current_user.id,
+            )
+            db.add(case)
+            db.flush()
+            _record_case_history(db, case_type="UI", case=case, action="IMPORT", changed_by=current_user.id, summary="批量导入 UI 用例")
+        else:
+            case = PerformanceCase(
+                project_id=project.id,
+                name=item.name,
+                folder_path=item.folder_path,
+                method=(item.method or "GET").upper(),
+                path=item.path or "/",
+                priority=item.priority,
+                status=item.status,
+                review_status=item.review_status,
+                version_no=item.version_no,
+                review_note=item.review_note,
+                tags_json=item.tags_json,
+                headers_json=item.headers_json,
+                body_json=item.body_json,
+                expected_status=item.expected_status or 200,
+                concurrency=item.concurrency or 5,
+                total_requests=item.total_requests or 20,
+                max_avg_response_ms=item.max_avg_response_ms,
+                max_p95_response_ms=item.max_p95_response_ms,
+                max_error_rate=item.max_error_rate,
+                created_by=current_user.id,
+                updated_by=current_user.id,
+            )
+            db.add(case)
+            db.flush()
+            _record_case_history(db, case_type="PERF", case=case, action="IMPORT", changed_by=current_user.id, summary="批量导入性能用例")
+        affected_count += 1
+
+    db.commit()
+    return schemas.BatchActionResult(success=True, affected_count=affected_count, message=f"已导入 {affected_count} 条用例")
+
+
+@protected_router.get("/cases/folders", response_model=list[schemas.CaseFolderNode])
+def list_case_folders(
+    project_id: int | None = None,
+    case_type: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[schemas.CaseFolderNode]:
+    if project_id:
+        _require_project_access(db, current_user, db.get(Project, project_id))
+        project_ids = [project_id]
+    elif current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return []
+    else:
+        project_ids = None
+
+    normalized_type = (case_type or "").strip().upper()
+    folder_paths: list[str] = []
+    if normalized_type in {"", "API"}:
+        stmt = select(APICase.folder_path).where(APICase.folder_path.is_not(None))
+        if project_ids is not None:
+            stmt = stmt.where(APICase.project_id.in_(project_ids))
+        folder_paths.extend([str(item).strip() for item in db.scalars(stmt).all() if str(item).strip()])
+    if normalized_type in {"", "UI"}:
+        stmt = select(UICase.folder_path).where(UICase.folder_path.is_not(None))
+        if project_ids is not None:
+            stmt = stmt.where(UICase.project_id.in_(project_ids))
+        folder_paths.extend([str(item).strip() for item in db.scalars(stmt).all() if str(item).strip()])
+    if normalized_type in {"", "PERF"}:
+        stmt = select(PerformanceCase.folder_path).where(PerformanceCase.folder_path.is_not(None))
+        if project_ids is not None:
+            stmt = stmt.where(PerformanceCase.project_id.in_(project_ids))
+        folder_paths.extend([str(item).strip() for item in db.scalars(stmt).all() if str(item).strip()])
+
+    path_counts: dict[str, int] = {}
+    for raw_path in folder_paths:
+        segments = [part.strip() for part in raw_path.split("/") if part.strip()]
+        current = []
+        for segment in segments:
+            current.append(segment)
+            joined = "/".join(current)
+            path_counts[joined] = path_counts.get(joined, 0) + 1
+
+    node_map: dict[str, schemas.CaseFolderNode] = {}
+    for path in sorted(path_counts.keys(), key=lambda value: (value.count("/"), value)):
+        name = path.split("/")[-1]
+        node_map[path] = schemas.CaseFolderNode(name=name, path=path, count=path_counts[path], children=[])
+
+    roots: list[schemas.CaseFolderNode] = []
+    for path in sorted(node_map.keys(), key=lambda value: value):
+        node = node_map[path]
+        parent_path = path.rsplit("/", 1)[0] if "/" in path else ""
+        if parent_path and parent_path in node_map:
+            node_map[parent_path].children.append(node)
+        else:
+            roots.append(node)
+    return roots
 
 
 @protected_router.get("/cases/{case_type}/{case_id}/history", response_model=list[schemas.CaseHistoryRead])
@@ -1187,6 +1458,46 @@ def batch_review_cases(
         success=True,
         affected_count=affected_count,
         message=f"已评审 {affected_count} 条用例",
+    )
+
+
+@protected_router.post(
+    "/cases/batch-move-folder",
+    response_model=schemas.BatchActionResult,
+    dependencies=[Depends(require_tester)],
+)
+def batch_move_case_folder(
+    payload: schemas.CaseBatchMoveFolderPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.BatchActionResult:
+    target_folder = (payload.folder_path or "").strip() or None
+    affected_count = 0
+    for item in payload.items:
+        case = _load_case_entity(db, item.case_type, item.case_id)
+        if case is None:
+            continue
+        _require_project_access(db, current_user, db.get(Project, case.project_id))
+        if (case.folder_path or None) == target_folder:
+            continue
+        case.folder_path = target_folder
+        if hasattr(case, "updated_by"):
+            case.updated_by = current_user.id
+        _record_case_history(
+            db,
+            case_type=item.case_type,
+            case=case,
+            action="MOVE_FOLDER",
+            changed_by=current_user.id,
+            summary=f"移动目录到 {target_folder or '根目录'}",
+        )
+        affected_count += 1
+
+    db.commit()
+    return schemas.BatchActionResult(
+        success=True,
+        affected_count=affected_count,
+        message=f"已移动 {affected_count} 条用例",
     )
 
 

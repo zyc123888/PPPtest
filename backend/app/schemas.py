@@ -229,6 +229,31 @@ class UnifiedCaseRead(BaseModel):
     updated_at: datetime | None = None
 
 
+class CaseFolderNode(BaseModel):
+    name: str
+    path: str
+    count: int
+    children: list["CaseFolderNode"] = Field(default_factory=list)
+
+
+class CaseDuplicateItem(BaseModel):
+    case_type: str
+    case_id: int
+    project_id: int
+    name: str
+    folder_path: str | None = None
+    entry: str
+    review_status: str | None = None
+    updated_at: datetime | None = None
+
+
+class CaseDuplicateGroup(BaseModel):
+    case_type: str
+    duplicate_key: str
+    count: int
+    items: list[CaseDuplicateItem]
+
+
 class CaseHistoryRead(ORMBaseModel):
     id: int
     project_id: int
@@ -256,10 +281,46 @@ class CaseBatchUpdatePayload(BaseModel):
     add_tags: list[str] | None = None
 
 
+class CaseBatchMoveFolderPayload(BaseModel):
+    items: list[UnifiedCaseRef]
+    folder_path: str | None = Field(default=None, max_length=255)
+
+
 class CaseBatchReviewPayload(BaseModel):
     items: list[UnifiedCaseRef]
     review_status: str = Field(..., min_length=2, max_length=20)
     review_note: str | None = None
+
+
+class CaseImportItem(BaseModel):
+    case_type: str = Field(..., pattern="^(API|UI|PERF)$")
+    project_id: int
+    name: str = Field(..., min_length=2, max_length=120)
+    folder_path: str | None = None
+    priority: str = Field(default="P2", min_length=2, max_length=20)
+    status: str = Field(default="ACTIVE", min_length=2, max_length=20)
+    review_status: str = Field(default="DRAFT", min_length=2, max_length=20)
+    version_no: str = Field(default="1.0.0", min_length=1, max_length=30)
+    review_note: str | None = None
+    tags_json: list[str] | None = None
+    method: str | None = None
+    path: str | None = None
+    target_url: str | None = None
+    expected_status: int | None = None
+    steps_json: list[dict] | None = None
+    expect_text: str | None = None
+    headers_json: dict | None = None
+    body_json: dict | None = None
+    assertions_json: list[dict] | None = None
+    concurrency: int | None = None
+    total_requests: int | None = None
+    max_avg_response_ms: int | None = None
+    max_p95_response_ms: int | None = None
+    max_error_rate: float | None = None
+
+
+class CaseImportPayload(BaseModel):
+    items: list[CaseImportItem] = Field(default_factory=list)
 
 
 class CaseBatchPlanPayload(BaseModel):

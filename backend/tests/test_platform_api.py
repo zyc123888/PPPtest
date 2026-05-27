@@ -36,6 +36,37 @@ def test_protected_system_endpoints_require_login(client) -> None:
         assert anonymous_client.post("/system/bootstrap", json={"seed_demo_data": False}).status_code == 401
 
 
+def test_api_case_body_modes_build_request_kwargs() -> None:
+    from app.tasks.executions import _build_request_body_kwargs
+
+    raw_json = _build_request_body_kwargs({"mode": "raw", "raw_type": "json", "raw": '{"name":"ppp"}'})
+    assert raw_json == {"json": {"name": "ppp"}}
+
+    form = _build_request_body_kwargs(
+        {
+            "mode": "form-data",
+            "form_data": [
+                {"enabled": True, "key": "token", "value": "abc", "type": "text"},
+                {"enabled": False, "key": "ignored", "value": "nope", "type": "text"},
+            ],
+        }
+    )
+    assert form == {"files": {"token": (None, "abc")}}
+
+    urlencoded = _build_request_body_kwargs(
+        {"mode": "x-www-form-urlencoded", "urlencoded": [{"enabled": True, "key": "page", "value": "1"}]}
+    )
+    assert urlencoded == {"data": {"page": "1"}}
+
+    graphql = _build_request_body_kwargs(
+        {"mode": "graphql", "graphql": {"query": "query Viewer { viewer { id } }", "variables": {"id": 1}}}
+    )
+    assert graphql == {"json": {"query": "query Viewer { viewer { id } }", "variables": {"id": 1}}}
+
+    binary = _build_request_body_kwargs({"mode": "binary", "binary": {"content": "aGVsbG8=", "encoding": "base64"}})
+    assert binary == {"content": b"hello"}
+
+
 def test_admin_can_manage_users(client) -> None:
     username = f"tester_{time.time_ns()}"
     create_response = client.post(
@@ -1140,6 +1171,152 @@ def test_unified_case_center_lists_and_filters_cases(client) -> None:
     assert folder_cases.status_code == 200
     assert folder_cases.json()
     assert any(item["folder_path"] == "冒烟测试/登录模块" for item in folder_cases.json())
+
+    any_tag_cases = client.get("/cases?tags=smoke,not_exists&tag_mode=ANY")
+    assert any_tag_cases.status_code == 200
+    assert any(item["name"] == create_response.json()["name"] for item in any_tag_cases.json())
+
+    all_tag_cases = client.get("/cases?tags=smoke,login&tag_mode=ALL")
+    assert all_tag_cases.status_code == 200
+    assert any(item["name"] == create_response.json()["name"] for item in all_tag_cases.json())
+
+
+def test_case_folder_tree_lists_nested_paths(client) -> None:
+    project_id = client.get("/projects").json()[0]["id"]
+    create_response = client.post(
+        "/api-cases",
+        json={
+            "project_id": project_id,
+            "name": f"目录树用例_{time.time_ns()}",
+            "folder_path": "核心回归/登录/短信登录",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "priority": "P1",
+            "status": "ACTIVE",
+            "review_status": "APPROVED",
+            "expected_status": 200,
+        },
+    )
+    assert create_response.status_code == 201
+
+    response = client.get(f"/cases/folders?project_id={project_id}&case_type=API")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload
+    root = next((item for item in payload if item["path"] == "核心回归"), None)
+    assert root is not None
+    assert root["count"] >= 1
+    child = next((item for item in root["children"] if item["path"] == "核心回归/登录"), None)
+    assert child is not None
+    leaf = next((item for item in child["children"] if item["path"] == "核心回归/登录/短信登录"), None)
+    assert leaf is not None
+    assert leaf["count"] >= 1
+
+
+def test_case_export_and_import_json(client) -> None:
+    project_id = client.get("/projects").json()[0]["id"]
+    exported = client.get(f"/cases/export?project_id={project_id}&case_type=API")
+    assert exported.status_code == 200
+    payload = exported.json()
+    assert "items" in payload
+
+    imported = client.post(
+        "/cases/import",
+        json={
+            "items": [
+                {
+                    "case_type": "API",
+                    "project_id": project_id,
+                    "name": f"导入接口_{time.time_ns()}",
+                    "method": "GET",
+                    "path": "/api/v1/system/health",
+                    "priority": "P1",
+                    "status": "ACTIVE",
+                    "review_status": "APPROVED",
+                    "expected_status": 200,
+                },
+                {
+                    "case_type": "UI",
+                    "project_id": project_id,
+                    "name": f"导入UI_{time.time_ns()}",
+                    "target_url": "http://frontend:3000/login",
+                    "steps_json": [{"action": "goto", "value": "http://frontend:3000/login"}],
+                    "expect_text": "登录",
+                    "priority": "P2",
+                    "status": "ACTIVE",
+                    "review_status": "DRAFT",
+                },
+            ]
+        },
+    )
+    assert imported.status_code == 200
+    assert imported.json()["affected_count"] == 2
+
+
+def test_case_batch_move_folder_records_history(client) -> None:
+    project_id = client.get("/projects").json()[0]["id"]
+    create_response = client.post(
+        "/api-cases",
+        json={
+            "project_id": project_id,
+            "name": f"移动目录用例_{time.time_ns()}",
+            "folder_path": "旧目录",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "priority": "P1",
+            "status": "ACTIVE",
+            "review_status": "APPROVED",
+            "expected_status": 200,
+        },
+    )
+    assert create_response.status_code == 201
+    case_id = create_response.json()["id"]
+
+    moved = client.post(
+        "/cases/batch-move-folder",
+        json={
+            "items": [{"case_type": "API", "case_id": case_id}],
+            "folder_path": "新目录/登录",
+        },
+    )
+    assert moved.status_code == 200
+    assert moved.json()["affected_count"] == 1
+
+    listed = client.get("/cases?folder_path=新目录/登录")
+    assert listed.status_code == 200
+    assert any(item["case_type"] == "API" and item["case_id"] == case_id for item in listed.json())
+
+    history = client.get(f"/cases/API/{case_id}/history")
+    assert history.status_code == 200
+    assert history.json()[0]["action"] == "MOVE_FOLDER"
+
+
+def test_case_duplicate_detection_groups_matching_entries(client) -> None:
+    project_id = client.get("/projects").json()[0]["id"]
+    duplicate_path = f"/api/v1/duplicate-{time.time_ns()}"
+    for index in range(2):
+        response = client.post(
+            "/api-cases",
+            json={
+                "project_id": project_id,
+                "name": f"重复检测用例_{index}_{time.time_ns()}",
+                "method": "GET",
+                "path": duplicate_path,
+                "priority": "P1",
+                "status": "ACTIVE",
+                "review_status": "APPROVED",
+                "expected_status": 200,
+            },
+        )
+        assert response.status_code == 201
+
+    detected = client.get(f"/cases/duplicates?project_id={project_id}&case_type=API")
+    assert detected.status_code == 200
+    groups = detected.json()
+    group = next((item for item in groups if item["duplicate_key"] == f"get {duplicate_path}"), None)
+    assert group is not None
+    assert group["count"] == 2
+    assert {item["case_type"] for item in group["items"]} == {"API"}
 
 
 def test_case_center_batch_update_and_add_to_plan(client) -> None:

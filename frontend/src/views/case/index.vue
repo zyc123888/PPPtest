@@ -33,7 +33,7 @@
         </el-form-item>
         <el-form-item label="目录">
           <el-select v-model="filters.folderPath" clearable filterable placeholder="全部" style="width: 220px">
-            <el-option v-for="item in allFolders" :key="item" :label="item" :value="item" />
+            <el-option v-for="item in folderOptions" :key="item.path" :label="item.label" :value="item.path" />
           </el-select>
         </el-form-item>
         <el-form-item label="状态">
@@ -51,8 +51,14 @@
           </el-select>
         </el-form-item>
         <el-form-item label="标签">
-          <el-select v-model="filters.tag" clearable filterable placeholder="全部" style="width: 180px">
+          <el-select v-model="filters.tags" multiple clearable filterable placeholder="全部" style="width: 220px">
             <el-option v-for="item in allTags" :key="item" :label="item" :value="item" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="标签模式">
+          <el-select v-model="filters.tagMode" style="width: 120px">
+            <el-option label="任一匹配" value="ANY" />
+            <el-option label="全部匹配" value="ALL" />
           </el-select>
         </el-form-item>
         <el-form-item label="关键字">
@@ -79,7 +85,11 @@
           <el-button :type="quickFilter === 'PENDING_REVIEW' ? 'primary' : 'default'" @click="applyQuickFilter('PENDING_REVIEW')">待评审</el-button>
           <el-button :type="quickFilter === 'RECENT_CHANGED' ? 'primary' : 'default'" @click="applyQuickFilter('RECENT_CHANGED')">最近变更</el-button>
           <el-button v-if="quickFilter" @click="applyQuickFilter('')">取消快捷视图</el-button>
+          <el-button @click="exportCurrentCases">导出当前结果</el-button>
+          <el-button v-if="canTest" @click="openImportDialog">导入 JSON</el-button>
+          <el-button @click="openDuplicateDialog">重复检测</el-button>
           <el-button :disabled="!selectedRows.length" @click="openBatchUpdate">批量改状态/标签</el-button>
+          <el-button :disabled="!selectedRows.length" @click="openBatchMoveFolder">批量移动目录</el-button>
           <el-button :disabled="!selectedRows.length" @click="openBatchReview">批量评审</el-button>
           <el-button
             v-if="quickFilter === 'PENDING_REVIEW'"
@@ -274,6 +284,72 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="batchMoveFolderVisible" title="批量移动目录" width="520px">
+      <el-form label-position="top">
+        <el-form-item label="目标目录">
+          <el-select
+            v-model="batchMoveFolderForm.folder_path"
+            filterable
+            allow-create
+            clearable
+            default-first-option
+            placeholder="例如：核心回归/登录"
+            style="width: 100%"
+          >
+            <el-option v-for="item in folderOptions" :key="item.path" :label="item.label" :value="item.path" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="batchMoveFolderVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitBatchMoveFolder">确认</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="importVisible" title="导入用例 JSON" width="680px">
+      <el-form label-position="top">
+        <el-form-item label="JSON 内容">
+          <el-input v-model="importText" type="textarea" :rows="14" placeholder='{"items":[...]}' />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="importVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitImportCases">确认导入</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="duplicateVisible" title="重复用例检测" width="860px">
+      <div class="duplicate-summary">
+        <el-tag type="warning">重复分组 {{ duplicateGroups.length }}</el-tag>
+        <el-button size="small" @click="loadDuplicates">刷新</el-button>
+      </div>
+      <el-table v-loading="duplicateLoading" :data="duplicateGroups" border max-height="480">
+        <el-table-column label="类型" prop="case_type" width="90" align="center" />
+        <el-table-column label="重复键" prop="duplicate_key" min-width="220" show-overflow-tooltip />
+        <el-table-column label="数量" prop="count" width="90" align="center" />
+        <el-table-column label="用例" min-width="340">
+          <template #default="scope">
+            <div class="duplicate-items">
+              <el-tag
+                v-for="item in scope.row.items"
+                :key="`${item.case_type}-${item.case_id}`"
+                size="small"
+                class="clickable-tag"
+                @click="focusDuplicateGroup(scope.row)"
+              >
+                {{ item.name }}
+              </el-tag>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="120" align="center">
+          <template #default="scope">
+            <el-button size="small" @click="focusDuplicateGroup(scope.row)">筛选查看</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-dialog>
+
     <el-dialog v-model="historyVisible" title="用例变更历史" width="820px">
       <div v-if="historyTarget" class="history-title">
         {{ historyTarget.name }} · {{ historyTarget.case_type }} · {{ historyTarget.version_no || '-' }}
@@ -339,6 +415,7 @@ import { usePermissions } from '@/lib/permissions'
 const router = useRouter()
 const { canAdmin, canTest } = usePermissions()
 const list = ref([])
+const folderTree = ref([])
 const projects = ref([])
 const plans = ref([])
 const listLoading = ref(false)
@@ -348,6 +425,12 @@ const selectedRows = ref([])
 const batchUpdateVisible = ref(false)
 const batchPlanVisible = ref(false)
 const batchReviewVisible = ref(false)
+const batchMoveFolderVisible = ref(false)
+const importVisible = ref(false)
+const importText = ref('')
+const duplicateVisible = ref(false)
+const duplicateLoading = ref(false)
+const duplicateGroups = ref([])
 const historyVisible = ref(false)
 const historyList = ref([])
 const historyTarget = ref(null)
@@ -363,7 +446,8 @@ const filters = reactive({
   priority: '',
   status: '',
   reviewStatus: '',
-  tag: '',
+  tags: [],
+  tagMode: 'ANY',
   keyword: ''
 })
 
@@ -383,6 +467,10 @@ const batchReviewForm = reactive({
   review_note: ''
 })
 
+const batchMoveFolderForm = reactive({
+  folder_path: ''
+})
+
 const projectMap = computed(() => {
   const map = {}
   projects.value.forEach((item) => {
@@ -399,9 +487,19 @@ const allTags = computed(() => {
   return Array.from(tags).sort((a, b) => a.localeCompare(b, 'zh-CN'))
 })
 
-const allFolders = computed(() =>
-  Array.from(new Set(list.value.map((item) => item.folder_path).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'zh-CN'))
-)
+const flattenFolderTree = (nodes, depth = 0) => {
+  const rows = []
+  for (const node of nodes || []) {
+    rows.push({
+      path: node.path,
+      label: `${'　'.repeat(depth)}${node.name} (${node.count})`,
+    })
+    rows.push(...flattenFolderTree(node.children || [], depth + 1))
+  }
+  return rows
+}
+
+const folderOptions = computed(() => flattenFolderTree(folderTree.value))
 
 const typeCounts = computed(() =>
   list.value.reduce((acc, item) => {
@@ -505,17 +603,24 @@ const getList = async () => {
     if (filters.priority) params.set('priority', filters.priority)
     if (filters.status) params.set('status', filters.status)
     if (filters.reviewStatus) params.set('review_status', filters.reviewStatus)
-    if (filters.tag) params.set('tag', filters.tag)
+    if (filters.tags.length) params.set('tags', filters.tags.join(','))
+    params.set('tag_mode', filters.tagMode)
     if (filters.keyword.trim()) params.set('keyword', filters.keyword.trim())
     const query = params.toString() ? `?${params.toString()}` : ''
-    const [caseData, projectData, planData] = await Promise.all([
+    const folderParams = new URLSearchParams()
+    if (filters.projectId) folderParams.set('project_id', String(filters.projectId))
+    if (filters.caseType) folderParams.set('case_type', filters.caseType)
+    const folderQuery = folderParams.toString() ? `?${folderParams.toString()}` : ''
+    const [caseData, projectData, planData, folderData] = await Promise.all([
       api.get(`/cases${query}`),
       api.get('/projects'),
-      api.get('/test-plans')
+      api.get('/test-plans'),
+      api.get(`/cases/folders${folderQuery}`),
     ])
     list.value = caseData
     projects.value = projectData
     plans.value = planData
+    folderTree.value = folderData
     page.value = 1
   } catch (error) {
     ElMessage.error(error.message)
@@ -531,7 +636,8 @@ const handleReset = () => {
   filters.priority = ''
   filters.status = ''
   filters.reviewStatus = ''
-  filters.tag = ''
+  filters.tags = []
+  filters.tagMode = 'ANY'
   filters.keyword = ''
   quickFilter.value = ''
   getList()
@@ -678,6 +784,11 @@ const openBatchReview = () => {
   batchReviewVisible.value = true
 }
 
+const openBatchMoveFolder = () => {
+  batchMoveFolderForm.folder_path = selectedRows.value[0]?.folder_path || ''
+  batchMoveFolderVisible.value = true
+}
+
 const openQuickReview = () => {
   batchReviewForm.review_status = 'IN_REVIEW'
   batchReviewForm.review_note = ''
@@ -749,6 +860,91 @@ const submitBatchReview = async () => {
   }
 }
 
+const submitBatchMoveFolder = async () => {
+  try {
+    await api.post('/cases/batch-move-folder', {
+      items: selectionPayload(),
+      folder_path: batchMoveFolderForm.folder_path || null
+    })
+    batchMoveFolderVisible.value = false
+    ElMessage.success(`已移动 ${selectedRows.value.length} 条用例`)
+    selectedRows.value = []
+    getList()
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const exportCurrentCases = async () => {
+  try {
+    const params = new URLSearchParams()
+    if (filters.projectId) params.set('project_id', String(filters.projectId))
+    if (filters.caseType) params.set('case_type', filters.caseType)
+    if (filters.folderPath) params.set('folder_path', filters.folderPath)
+    if (filters.priority) params.set('priority', filters.priority)
+    if (filters.status) params.set('status', filters.status)
+    if (filters.reviewStatus) params.set('review_status', filters.reviewStatus)
+    if (filters.tags.length) params.set('tags', filters.tags.join(','))
+    params.set('tag_mode', filters.tagMode)
+    if (filters.keyword.trim()) params.set('keyword', filters.keyword.trim())
+    const query = params.toString() ? `?${params.toString()}` : ''
+    const payload = await api.get(`/cases/export${query}`)
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = `cases-export-${Date.now()}.json`
+    link.click()
+    URL.revokeObjectURL(link.href)
+    ElMessage.success(`已导出 ${payload.count || 0} 条用例`)
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const openImportDialog = () => {
+  importText.value = '{"items":[]}'
+  importVisible.value = true
+}
+
+const submitImportCases = async () => {
+  try {
+    const payload = JSON.parse(importText.value || '{}')
+    await api.post('/cases/import', payload)
+    importVisible.value = false
+    ElMessage.success('导入成功')
+    getList()
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const loadDuplicates = async () => {
+  duplicateLoading.value = true
+  try {
+    const params = new URLSearchParams()
+    if (filters.projectId) params.set('project_id', String(filters.projectId))
+    if (filters.caseType) params.set('case_type', filters.caseType)
+    const query = params.toString() ? `?${params.toString()}` : ''
+    duplicateGroups.value = await api.get(`/cases/duplicates${query}`)
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    duplicateLoading.value = false
+  }
+}
+
+const openDuplicateDialog = async () => {
+  duplicateVisible.value = true
+  await loadDuplicates()
+}
+
+const focusDuplicateGroup = async (group) => {
+  filters.caseType = group.case_type
+  filters.keyword = group.duplicate_key.replace(/^(GET|POST|PUT|DELETE|PATCH)\s+/i, '')
+  duplicateVisible.value = false
+  await getList()
+}
+
 const goCreate = (type) => {
   if (type === 'API') router.push('/case/api')
   else if (type === 'UI') router.push('/case/ui')
@@ -787,10 +983,17 @@ onMounted(() => {
 }
 
 .pending-stats,
-.history-flags {
+.history-flags,
+.duplicate-items,
+.duplicate-summary {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.duplicate-summary {
+  align-items: center;
+  margin-bottom: 12px;
 }
 
 .clickable-tag {
