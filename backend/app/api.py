@@ -1,8 +1,12 @@
 import json
 import os
 import re
+import threading
+import time
+from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree as ET
 
+import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -15,6 +19,9 @@ from app.core.celery_app import celery_app
 from app.core.database import get_db
 from app.models import (
     APICase,
+    AIModelConfig,
+    CaseGenerationArtifact,
+    CaseGenerationJob,
     CaseChangeHistory,
     DefectRecord,
     Environment,
@@ -32,7 +39,23 @@ from app.models import (
     Workspace,
     WorkspaceMember,
 )
-from app.tasks.executions import run_api_case, run_performance_case, run_test_plan, run_ui_case
+from app.execution_runtime import (
+    MissingTemplateVariableError,
+    prepare_http_request,
+)
+from app.tasks.case_generation import (
+    _normalize_model_base_url,
+    normalize_model_api_key,
+    run_case_generation_job,
+    sanitize_case_generation_payload,
+    validate_model_connection_config,
+)
+from app.tasks.executions import (
+    run_api_case,
+    run_performance_case,
+    run_test_plan,
+    run_ui_case,
+)
 from app.timeutil import utc_now_naive
 
 
@@ -536,6 +559,71 @@ def _serialize_plan_run(plan_run: TestPlanRun) -> schemas.TestPlanRunRead:
     return schemas.TestPlanRunRead(**payload)
 
 
+def _serialize_case_generation_job(job: CaseGenerationJob) -> schemas.CaseGenerationJobRead:
+    payload = {
+        field: getattr(job, field)
+        for field in schemas.CaseGenerationJobRead.model_fields.keys()
+    }
+    payload["input_payload_json"] = sanitize_case_generation_payload(payload.get("input_payload_json"))
+    return schemas.CaseGenerationJobRead(**payload)
+
+
+def _normalize_stale_case_generation_job(job: CaseGenerationJob, db: Session) -> None:
+    if job.status not in {"PENDING", "RUNNING"}:
+        return
+    if job.started_at is not None:
+        return
+    reference_time = job.updated_at or job.created_at or utc_now_naive()
+    age_seconds = (utc_now_naive() - reference_time).total_seconds()
+    stale_threshold_seconds = (
+        settings.case_gen_stale_seconds_with_task if job.task_id else settings.case_gen_stale_seconds_inline
+    )
+    if age_seconds < stale_threshold_seconds:
+        return
+    job.status = "FAILED"
+    job.summary = "任务未实际开始，已标记为失败"
+    job.error_message = "检测到历史遗留的未启动任务，请直接点击重跑"
+    job.finished_at = utc_now_naive()
+    progress = dict(job.progress_json or {})
+    stages = list(progress.get("stages") or [])
+    if not stages:
+        stages.append(
+            {
+                "key": "dispatch",
+                "title": "任务派发",
+                "status": "failed",
+                "summary": "任务未进入执行阶段，请重跑",
+            }
+        )
+    progress["stages"] = stages
+    job.progress_json = progress
+    job.task_id = None
+    db.commit()
+
+
+def _find_active_case_generation_job_for_user(db: Session, user_id: int) -> CaseGenerationJob | None:
+    jobs = list(
+        db.scalars(
+            select(CaseGenerationJob)
+            .where(CaseGenerationJob.created_by == user_id, CaseGenerationJob.status.in_(["PENDING", "RUNNING"]))
+            .order_by(CaseGenerationJob.id.desc())
+        ).all()
+    )
+    for job in jobs:
+        _normalize_stale_case_generation_job(job, db)
+    for job in jobs:
+        db.refresh(job)
+        if job.status in {"PENDING", "RUNNING"}:
+            return job
+    return None
+
+
+def _serialize_ai_model_config(config: AIModelConfig) -> schemas.AIModelConfigRead:
+    payload = schemas.AIModelConfigRead.model_validate(config).model_dump()
+    payload["api_key"] = "***已配置***" if config.api_key else None
+    return schemas.AIModelConfigRead(**payload)
+
+
 def _serialize_unified_case(case_type: str, case) -> schemas.UnifiedCaseRead:
     payload = {
         "case_type": case_type,
@@ -668,11 +756,12 @@ public_router = APIRouter()
 protected_router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
-def _dispatch_task_or_run_inline(task_func, record_id: int) -> tuple[str | None, bool]:
+def _dispatch_task_or_run_inline(
+    task_func, record_id: int, *, background_inline: bool = False
+) -> tuple[str | None, bool]:
     if (
         os.getenv("PYTEST_CURRENT_TEST")
         or settings.backend_internal_url.startswith("http://testserver")
-        or settings.app_env == "local"
     ):
         task_func(record_id)
         return None, True
@@ -680,6 +769,11 @@ def _dispatch_task_or_run_inline(task_func, record_id: int) -> tuple[str | None,
         task = task_func.delay(record_id)
         return task.id, False
     except Exception:
+        if background_inline:
+            # Celery broker 不可用时的兜底：长任务（如用例生成）丢到后台守护线程，
+            # 避免阻塞 FastAPI 工作线程数分钟。任务自身有 try/except 会把失败写回 DB。
+            threading.Thread(target=task_func, args=(record_id,), daemon=True).start()
+            return None, True
         task_func(record_id)
         return None, True
 
@@ -1338,6 +1432,325 @@ def list_case_folders(
     return roots
 
 
+@protected_router.get("/case-generation/jobs", response_model=list[schemas.CaseGenerationJobRead])
+def list_case_generation_jobs(
+    project_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[schemas.CaseGenerationJobRead]:
+    stmt = select(CaseGenerationJob).order_by(CaseGenerationJob.id.desc()).limit(50)
+    if project_id is not None:
+        project = db.get(Project, project_id)
+        _require_project_access(db, current_user, project)
+        stmt = stmt.where(CaseGenerationJob.project_id == project_id)
+    elif current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return []
+        stmt = stmt.where(CaseGenerationJob.project_id.in_(project_ids))
+    jobs = list(db.scalars(stmt).all())
+    for job in jobs:
+        _normalize_stale_case_generation_job(job, db)
+    return [_serialize_case_generation_job(item) for item in jobs]
+
+
+@protected_router.get("/case-generation/model-config", response_model=schemas.AIModelConfigRead | None)
+def get_case_generation_model_config(
+    workspace_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_workspace_access(db, current_user, workspace_id)
+    config = db.scalar(
+        select(AIModelConfig)
+        .where(AIModelConfig.workspace_id == workspace_id, AIModelConfig.is_active == 1)
+        .order_by(AIModelConfig.id.desc())
+    )
+    if config is None:
+        return None
+    return _serialize_ai_model_config(config)
+
+
+@protected_router.post(
+    "/case-generation/model-config",
+    response_model=schemas.AIModelConfigRead,
+    dependencies=[Depends(require_tester)],
+)
+def upsert_case_generation_model_config(
+    payload: schemas.AIModelConfigUpsert,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.AIModelConfigRead:
+    _require_workspace_access(db, current_user, payload.workspace_id)
+    try:
+        normalized_base_url, normalized_model = validate_model_connection_config(payload.model, payload.base_url, payload.api_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    normalized_api_key = normalize_model_api_key(payload.api_key)
+    config = db.scalar(
+        select(AIModelConfig)
+        .where(AIModelConfig.workspace_id == payload.workspace_id, AIModelConfig.is_active == 1)
+        .order_by(AIModelConfig.id.desc())
+    )
+    if config is None:
+        config = AIModelConfig(
+            workspace_id=payload.workspace_id,
+            provider=payload.provider,
+            name=payload.name,
+            base_url=normalized_base_url,
+            model=normalized_model,
+            api_key=normalized_api_key,
+            is_active=1,
+            created_by=current_user.id,
+            updated_by=current_user.id,
+        )
+        db.add(config)
+    else:
+        config.provider = payload.provider
+        config.name = payload.name
+        config.base_url = normalized_base_url
+        config.model = normalized_model
+        config.api_key = normalized_api_key
+        config.updated_by = current_user.id
+    db.commit()
+    db.refresh(config)
+    return _serialize_ai_model_config(config)
+
+
+@protected_router.post(
+    "/case-generation/jobs",
+    response_model=schemas.CaseGenerationJobRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
+def create_case_generation_job(
+    payload: schemas.CaseGenerationJobCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.CaseGenerationJobRead:
+    project = _require_project_access(db, current_user, db.get(Project, payload.project_id))
+    active_job = _find_active_case_generation_job_for_user(db, current_user.id)
+    if active_job is not None:
+        raise HTTPException(status_code=400, detail=f"你已有进行中的生成任务 #{active_job.id}，请先等待结束或手动停止")
+    source_url = (payload.source_url or "").strip() or None
+    markdown_text = (payload.markdown_text or "").strip() or None
+    if not markdown_text and not source_url:
+        raise HTTPException(status_code=400, detail="请提供需求文本、上传文件或需求文档链接")
+    model_config = db.scalar(
+        select(AIModelConfig)
+        .where(AIModelConfig.workspace_id == project.workspace_id, AIModelConfig.is_active == 1)
+        .order_by(AIModelConfig.id.desc())
+    )
+    direct_api_key = normalize_model_api_key(payload.openai_api_key)
+    if (model_config is None or not model_config.api_key) and direct_api_key:
+        normalized_base_url, normalized_model = validate_model_connection_config("gpt-5.5", None, direct_api_key)
+        model_config = AIModelConfig(
+            workspace_id=project.workspace_id,
+            provider="OPENAI",
+            name="任务提交临时模型配置",
+            base_url=normalized_base_url,
+            model=normalized_model,
+            api_key=direct_api_key,
+            is_active=1,
+            created_by=current_user.id,
+            updated_by=current_user.id,
+        )
+        db.add(model_config)
+        db.commit()
+        db.refresh(model_config)
+    if model_config is None or not model_config.api_key:
+        raise HTTPException(status_code=400, detail="请先配置该工作空间的模型连接信息")
+    input_payload = sanitize_case_generation_payload(payload.model_dump()) | {
+        "source_url": source_url,
+        "markdown_text": markdown_text,
+        "workspace_id": project.workspace_id,
+        "model_config_id": model_config.id,
+        "openai_model": model_config.model,
+        "openai_base_url": _normalize_model_base_url(model_config.model, model_config.base_url, model_config.api_key),
+    }
+    job = CaseGenerationJob(
+        workspace_id=project.workspace_id,
+        project_id=project.id,
+        name=payload.name,
+        mode=payload.mode,
+        status="PENDING",
+        source_document_name=payload.source_document_name,
+        progress_json={"stages": []},
+        input_payload_json=input_payload,
+        summary="任务已提交，等待生成",
+        created_by=current_user.id,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    task_id, ran_inline = _dispatch_task_or_run_inline(
+        run_case_generation_job, job.id, background_inline=True
+    )
+    if not ran_inline:
+        job.task_id = task_id
+        job.summary = f"任务已提交（task_id={task_id}）"
+        db.commit()
+        db.refresh(job)
+    return _serialize_case_generation_job(job)
+
+
+@protected_router.get("/case-generation/jobs/{job_id}", response_model=schemas.CaseGenerationJobDetail)
+def get_case_generation_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.CaseGenerationJobDetail:
+    job = db.get(CaseGenerationJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="生成任务不存在")
+    _require_project_access(db, current_user, db.get(Project, job.project_id))
+    _normalize_stale_case_generation_job(job, db)
+    artifacts = list(
+        db.scalars(
+            select(CaseGenerationArtifact)
+            .where(CaseGenerationArtifact.job_id == job.id)
+            .order_by(CaseGenerationArtifact.id.asc())
+        ).all()
+    )
+    return schemas.CaseGenerationJobDetail(
+        job=_serialize_case_generation_job(job),
+        artifacts=[schemas.CaseGenerationArtifactRead.model_validate(item) for item in artifacts],
+    )
+
+
+@protected_router.post(
+    "/case-generation/jobs/{job_id}/rerun",
+    response_model=schemas.CaseGenerationJobRead,
+    dependencies=[Depends(require_tester)],
+)
+def rerun_case_generation_job_api(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.CaseGenerationJobRead:
+    job = db.get(CaseGenerationJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="生成任务不存在")
+    _require_project_access(db, current_user, db.get(Project, job.project_id))
+    active_job = _find_active_case_generation_job_for_user(db, current_user.id)
+    if active_job is not None and active_job.id != job.id:
+        raise HTTPException(status_code=400, detail=f"你已有进行中的生成任务 #{active_job.id}，请先等待结束或手动停止")
+    
+    if job.status in {"PENDING", "RUNNING"}:
+        return _serialize_case_generation_job(job)
+    job.status = "PENDING"
+    job.summary = "任务重新提交，等待生成"
+    job.error_message = None
+    job.started_at = None
+    job.finished_at = None
+    job.task_id = None
+    job.progress_json = {"stages": []}
+    model_config = db.scalar(
+        select(AIModelConfig)
+        .where(AIModelConfig.workspace_id == job.workspace_id, AIModelConfig.is_active == 1)
+        .order_by(AIModelConfig.id.desc())
+    )
+    if model_config is None or not model_config.api_key:
+        raise HTTPException(status_code=400, detail="当前工作空间未配置可用模型，无法重跑")
+    payload = dict(job.input_payload_json or {})
+    payload["model_config_id"] = model_config.id
+    payload["openai_model"] = model_config.model
+    payload["openai_base_url"] = _normalize_model_base_url(model_config.model, model_config.base_url, model_config.api_key)
+    job.input_payload_json = payload
+    db.commit()
+    db.refresh(job)
+
+    task_id, ran_inline = _dispatch_task_or_run_inline(
+        run_case_generation_job, job.id, background_inline=True
+    )
+    if not ran_inline:
+        job.task_id = task_id
+        job.summary = f"任务重新提交（task_id={task_id}）"
+        db.commit()
+        db.refresh(job)
+    return _serialize_case_generation_job(job)
+
+
+@protected_router.post(
+    "/case-generation/jobs/{job_id}/cancel",
+    response_model=schemas.CaseGenerationJobRead,
+    dependencies=[Depends(require_tester)],
+)
+def cancel_case_generation_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.CaseGenerationJobRead:
+    job = db.get(CaseGenerationJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="生成任务不存在")
+    _require_project_access(db, current_user, db.get(Project, job.project_id))
+    if job.created_by != current_user.id:
+        raise HTTPException(status_code=403, detail="只能停止自己创建的生成任务")
+    _normalize_stale_case_generation_job(job, db)
+    db.refresh(job)
+    if job.status not in {"PENDING", "RUNNING"}:
+        raise HTTPException(status_code=400, detail="当前状态不允许停止")
+    if job.task_id:
+        celery_app.control.revoke(job.task_id, terminate=True)
+    progress = dict(job.progress_json or {})
+    stages = list(progress.get("stages") or [])
+    if stages:
+        stages[-1]["status"] = "failed"
+        stages[-1]["summary"] = "任务已手动停止"
+        progress["stages"] = stages
+        job.progress_json = progress
+    job.status = "CANCELLED"
+    job.task_id = None
+    job.summary = "生成已取消"
+    job.error_message = "任务已手动停止"
+    job.finished_at = utc_now_naive()
+    db.commit()
+    db.refresh(job)
+    return _serialize_case_generation_job(job)
+
+
+@protected_router.get("/case-generation/jobs/{job_id}/artifacts/{artifact_id}/download")
+def download_case_generation_artifact(
+    job_id: int,
+    artifact_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = db.get(CaseGenerationJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="生成任务不存在")
+    _require_project_access(db, current_user, db.get(Project, job.project_id))
+    artifact = db.get(CaseGenerationArtifact, artifact_id)
+    if artifact is None or artifact.job_id != job.id:
+        raise HTTPException(status_code=404, detail="生成产物不存在")
+    if not artifact.file_path or not os.path.exists(artifact.file_path):
+        raise HTTPException(status_code=404, detail="生成产物文件不存在")
+
+    media_type = "application/octet-stream"
+    artifact_type = artifact.artifact_type.lower()
+    if artifact_type in {
+        "orchestration_plan",
+        "evidence_trace",
+        "function_points",
+        "testcase_package",
+        "review_report",
+        "execution_proof",
+        "xmind_export_log",
+    }:
+        media_type = "application/json"
+    elif artifact_type == "xmindmark":
+        media_type = "text/markdown; charset=utf-8"
+    elif artifact_type == "xmind":
+        media_type = "application/vnd.xmind.workbook"
+    return FileResponse(
+        path=artifact.file_path,
+        media_type=media_type,
+        filename=artifact.file_name or os.path.basename(artifact.file_path),
+    )
+
+
 @protected_router.get("/cases/{case_type}/{case_id}/history", response_model=list[schemas.CaseHistoryRead])
 def list_case_history(
     case_type: str,
@@ -1523,6 +1936,87 @@ def create_api_case(
     _record_case_history(db, case_type="API", case=api_case, action="CREATE", changed_by=current_user.id, summary="创建接口用例")
     db.commit()
     return api_case
+
+
+@protected_router.post(
+    "/api-cases/debug",
+    response_model=schemas.APICaseDebugResponse,
+    dependencies=[Depends(require_tester)],
+)
+def debug_api_case(
+    payload: schemas.APICaseDebugRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.APICaseDebugResponse:
+    project = db.get(Project, payload.project_id)
+    _require_project_access(db, current_user, project)
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    environment = None
+    if payload.environment_id:
+        environment = db.get(Environment, payload.environment_id)
+        if environment is None or environment.project_id != project.id:
+            raise HTTPException(status_code=404, detail="执行环境不存在")
+    variables = environment.variables_json if environment and environment.variables_json else None
+    try:
+        prepared = prepare_http_request(
+            method=payload.method,
+            project=project,
+            environment=environment,
+            case_path=payload.path,
+            case_headers=payload.headers_json,
+            case_body=payload.body_json,
+            variables=variables,
+        )
+    except MissingTemplateVariableError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    started_at = time.perf_counter()
+
+    try:
+        parsed_url = urlparse(prepared.url)
+        if parsed_url.hostname == "testserver":
+            from app.main import app
+
+            from fastapi.testclient import TestClient
+
+            with TestClient(app, base_url="http://testserver") as client:
+                response = client.request(prepared.method, parsed_url.path, headers=prepared.headers, **prepared.kwargs())
+            response_headers = dict(response.headers)
+            response_text = response.text
+        else:
+            with httpx.Client(timeout=payload.timeout_seconds) as client:
+                response = client.request(prepared.method, prepared.url, headers=prepared.headers, **prepared.kwargs())
+            response_headers = dict(response.headers)
+            response_text = response.text
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"调试请求失败：{exc}") from exc
+
+    duration_ms = int((time.perf_counter() - started_at) * 1000)
+    try:
+        response_body = response.json()
+        body_type = "json"
+    except Exception:
+        response_body = response_text[:5000]
+        body_type = "text"
+
+    return schemas.APICaseDebugResponse(
+        request={
+            "method": prepared.method,
+            "url": prepared.url,
+            "headers": prepared.headers,
+            "body": prepared.body,
+        },
+        response={
+            "status_code": response.status_code,
+            "headers": response_headers,
+            "body": response_body,
+            "body_type": body_type,
+            "size": len(response.content),
+        },
+        duration_ms=duration_ms,
+    )
 
 
 @protected_router.put(

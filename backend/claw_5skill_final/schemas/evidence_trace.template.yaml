@@ -1,0 +1,38 @@
+project: "项目名称"
+generated_at: "2026-04-17"
+source_document: "requirement.md"
+image_summary:
+  image_link_count: 0
+  download_success_count: 0
+  download_failed_count: 0
+  image_observation_count: 0
+  pending_confirmation_count: 0
+images:
+  - image_id: "IMG-001"
+    image_url: "https://example.com/1.png"
+    local_path: "./downloads/IMG-001.png"
+    download_status: "success"
+    source_type: "image"
+    observed_elements:
+      - "搜索按钮"
+      - "分类页签"
+      - "书籍封面"
+    mapped_function_points:
+      - "FP-001"
+      - "FP-003"
+    notes:
+      - "图片中可见搜索入口"
+  - image_id: "IMG-002"
+    image_url: "https://example.com/2.png"
+    local_path: null
+    download_status: "failed"
+    source_type: "image"
+    observed_elements: []
+    mapped_function_points: []
+    notes:
+      - "下载失败，进入待确认清单"
+pending_confirmations:
+  - pending_id: "PENDING-001"
+    source: "image"
+    ref_id: "IMG-002"
+    message: "图片下载失败，无法完成识图"

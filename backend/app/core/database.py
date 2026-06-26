@@ -213,6 +213,7 @@ def ensure_schema(db_engine) -> list[str]:
             ("defect_records", "created_by", "ALTER TABLE defect_records ADD COLUMN created_by INTEGER NULL"),
             ("defect_records", "updated_by", "ALTER TABLE defect_records ADD COLUMN updated_by INTEGER NULL"),
             ("defect_records", "updated_at", "ALTER TABLE defect_records ADD COLUMN updated_at DATETIME NULL"),
+            ("case_generation_jobs", "progress_json", "ALTER TABLE case_generation_jobs ADD COLUMN progress_json JSON NULL"),
             ("environments", "auth_config_json", "ALTER TABLE environments ADD COLUMN auth_config_json JSON NULL"),
             ("environments", "created_by", "ALTER TABLE environments ADD COLUMN created_by INTEGER NULL"),
             ("environments", "updated_by", "ALTER TABLE environments ADD COLUMN updated_by INTEGER NULL"),
@@ -232,6 +233,7 @@ def ensure_schema(db_engine) -> list[str]:
             ("test_runs", "stderr_text", "ALTER TABLE test_runs ADD COLUMN stderr_text TEXT NULL"),
             ("test_runs", "artifacts_json", "ALTER TABLE test_runs ADD COLUMN artifacts_json JSON NULL"),
             ("test_runs", "step_results_json", "ALTER TABLE test_runs ADD COLUMN step_results_json JSON NULL"),
+            ("case_generation_jobs", "task_id", "ALTER TABLE case_generation_jobs ADD COLUMN task_id VARCHAR(120) NULL"),
         ]
         for table_name, column_name, ddl in extra_columns:
             add_column_if_missing(connection, table_name, column_name, ddl)

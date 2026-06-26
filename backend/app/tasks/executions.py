@@ -24,19 +24,23 @@ from app.core.config import settings
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
 from app.models import APICase, Environment, PerformanceCase, Project, TestPlanRun, TestRun, UICase
+from app.execution_runtime import (
+    MissingTemplateVariableError,
+    build_request_kwargs,
+    build_runtime_headers,
+    prepare_http_request,
+    render_data,
+    render_template,
+)
 from app.services import finalize_run, mark_run_started
 from app.timeutil import utc_now_naive
 
 
-_TEMPLATE_VAR_PATTERN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
-
-
-class MissingTemplateVariableError(ValueError):
-    def __init__(self, field_name: str, missing_keys: list[str]):
-        joined = ", ".join(missing_keys)
-        super().__init__(f"环境变量缺失: {joined}（字段: {field_name}）")
-        self.field_name = field_name
-        self.missing_keys = missing_keys
+# Backward-compatible aliases: old private names now delegate to the shared module.
+_render_template = render_template
+_render_data = render_data
+_build_runtime_headers = build_runtime_headers
+_build_request_body_kwargs = build_request_kwargs
 
 
 def _safe_json_or_text(response: httpx.Response) -> dict:
@@ -51,28 +55,6 @@ def _safe_json_or_text(response: httpx.Response) -> dict:
 
 def _open_db() -> Session:
     return SessionLocal()
-
-
-def _render_template(value: str, variables: dict | None, field_name: str = "value") -> str:
-    missing_keys = sorted({key for key in _TEMPLATE_VAR_PATTERN.findall(value) if not variables or key not in variables})
-    if missing_keys:
-        raise MissingTemplateVariableError(field_name, missing_keys)
-    if not variables:
-        return value
-    rendered = value
-    for key, val in variables.items():
-        rendered = rendered.replace(f"{{{{{key}}}}}", str(val))
-    return rendered
-
-
-def _render_data(value, variables: dict | None, field_name: str = "value"):
-    if isinstance(value, str):
-        return _render_template(value, variables, field_name)
-    if isinstance(value, dict):
-        return {key: _render_data(val, variables, f"{field_name}.{key}") for key, val in value.items()}
-    if isinstance(value, list):
-        return [_render_data(item, variables, f"{field_name}[{index}]") for index, item in enumerate(value)]
-    return value
 
 
 def _resolve_environment(db: Session, project: Project, environment_id: int | None) -> Environment | None:
@@ -194,22 +176,6 @@ def _execute_case_with_retries(db: Session, run: TestRun, execute_once) -> dict:
     return last_result or {"status": "ERROR", "summary": "执行结果为空"}
 
 
-def _build_runtime_headers(environment: Environment | None, case_headers: dict | None, variables: dict | None) -> dict:
-    headers = {}
-    if environment and environment.headers_json:
-        headers.update(_render_data(environment.headers_json, variables, "environment.headers_json"))
-    if environment and environment.auth_config_json and isinstance(environment.auth_config_json, dict):
-        auth_config = _render_data(environment.auth_config_json, variables, "environment.auth_config_json")
-        token = auth_config.get("token")
-        if token:
-            header_name = auth_config.get("header_name", "Authorization")
-            token_prefix = auth_config.get("token_prefix", "Bearer")
-            headers[header_name] = f"{token_prefix} {token}".strip()
-    if case_headers:
-        headers.update(_render_data(case_headers, variables, "case.headers_json"))
-    return headers
-
-
 def _ensure_run_dir(run_id: int) -> str:
     root_dir = settings.report_output_dir
     if not os.path.isabs(root_dir):
@@ -274,86 +240,47 @@ def _ui_step_detail(
     return detail
 
 
-def _enabled_body_pairs(rows: list[dict] | None) -> dict:
-    return {
-        str(item.get("key")).strip(): item.get("value", "")
-        for item in rows or []
-        if item.get("enabled", True) and str(item.get("key", "")).strip()
-    }
-
-
-def _build_request_body_kwargs(body: object) -> dict:
-    if not body:
-        return {}
-    if not isinstance(body, dict) or "mode" not in body:
-        return {"json": body}
-
-    mode = body.get("mode")
-    if mode == "none":
-        return {}
-    if mode == "form-data":
-        return {"files": {key: (None, value) for key, value in _enabled_body_pairs(body.get("form_data")).items()}}
-    if mode == "x-www-form-urlencoded":
-        return {"data": _enabled_body_pairs(body.get("urlencoded"))}
-    if mode == "graphql":
-        graphql = body.get("graphql") or {}
-        return {"json": {"query": graphql.get("query", ""), "variables": graphql.get("variables") or {}}}
-    if mode == "binary":
-        binary = body.get("binary") or {}
-        content = binary.get("content") or binary.get("content_base64") or ""
-        if binary.get("encoding") == "base64":
-            return {"content": base64.b64decode(content) if content else b""}
-        return {"content": str(content).encode("utf-8")}
-    if mode == "raw":
-        raw = body.get("raw", "")
-        if body.get("raw_type", "json") == "json":
-            try:
-                return {"json": json.loads(raw) if isinstance(raw, str) else raw}
-            except Exception:
-                return {"content": raw}
-        return {"content": raw}
-
-    return {"json": body}
-
-
 def _execute_api_case_httpx(
     db: Session, run: TestRun, case: APICase, project: Project, deadline: float | None = None
 ) -> dict:
     environment = _resolve_environment(db, project, run.environment_id)
     variables = environment.variables_json if environment and environment.variables_json else None
-    base_url = _render_template(environment.base_url if environment else project.base_url, variables, "base_url")
-    headers = _build_runtime_headers(environment, case.headers_json, variables)
-    rendered_path = _render_template(case.path, variables, "case.path")
-    rendered_body = _render_data(case.body_json, variables, "case.body_json")
-    body_kwargs = _build_request_body_kwargs(rendered_body)
+    prepared = prepare_http_request(
+        method=case.method,
+        project=project,
+        environment=environment,
+        case_path=case.path,
+        case_headers=case.headers_json,
+        case_body=case.body_json,
+        variables=variables,
+    )
 
-    target_url = urljoin(base_url.rstrip("/") + "/", rendered_path.lstrip("/"))
     request_payload = {
-        "method": case.method,
-        "url": target_url,
-        "headers": headers,
-        "body": rendered_body,
+        "method": prepared.method,
+        "url": prepared.url,
+        "headers": prepared.headers,
+        "body": prepared.body,
     }
 
-    parsed_url = urlparse(target_url)
+    parsed_url = urlparse(prepared.url)
     if parsed_url.hostname == "testserver":
         from app.main import app
 
         with TestClient(app, base_url="http://testserver") as client:
             response = client.request(
-                case.method.upper(),
+                prepared.method,
                 parsed_url.path,
-                headers=headers,
-                **body_kwargs,
+                headers=prepared.headers,
+                **prepared.kwargs(),
             )
     else:
         timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
         with httpx.Client(timeout=timeout_seconds) as client:
             response = client.request(
-                case.method.upper(),
-                target_url,
-                headers=headers,
-                **body_kwargs,
+                prepared.method,
+                prepared.url,
+                headers=prepared.headers,
+                **prepared.kwargs(),
             )
 
     status = "SUCCESS" if response.status_code == case.expected_status else "FAILED"
@@ -371,7 +298,7 @@ def _execute_api_case_httpx(
         "summary": summary,
         "error_type": None if status == "SUCCESS" else "ASSERTION",
         "exit_code": 0 if status == "SUCCESS" else 1,
-        "stdout_text": f"HTTP {case.method.upper()} {target_url}\nstatus={response.status_code}",
+        "stdout_text": f"HTTP {prepared.method} {prepared.url}\nstatus={response.status_code}",
         "stderr_text": "" if status == "SUCCESS" else summary,
         "artifacts_json": artifacts,
         "request_payload": request_payload,
@@ -385,16 +312,21 @@ def _execute_api_case_pytest(
 ) -> dict:
     environment = _resolve_environment(db, project, run.environment_id)
     variables = environment.variables_json if environment and environment.variables_json else None
-    base_url = _render_template(environment.base_url if environment else project.base_url, variables, "base_url")
-    headers = _build_runtime_headers(environment, case.headers_json, variables)
-    rendered_path = _render_template(case.path, variables, "case.path")
-    rendered_body = _render_data(case.body_json, variables, "case.body_json")
-    target_url = urljoin(base_url.rstrip("/") + "/", rendered_path.lstrip("/"))
+    prepared = prepare_http_request(
+        method=case.method,
+        project=project,
+        environment=environment,
+        case_path=case.path,
+        case_headers=case.headers_json,
+        case_body=case.body_json,
+        variables=variables,
+    )
+
     request_payload = {
-        "method": case.method,
-        "url": target_url,
-        "headers": headers,
-        "body": rendered_body,
+        "method": prepared.method,
+        "url": prepared.url,
+        "headers": prepared.headers,
+        "body": prepared.body,
     }
 
     test_code = textwrap.dedent(
@@ -474,10 +406,10 @@ def _execute_api_case_pytest(
         env = os.environ.copy()
         env.update(
             {
-                "TARGET_URL": target_url,
-                "METHOD": case.method.upper(),
-                "HEADERS": json.dumps(headers, ensure_ascii=False),
-                "BODY": json.dumps(rendered_body, ensure_ascii=False) if rendered_body else "",
+                "TARGET_URL": prepared.url,
+                "METHOD": prepared.method,
+                "HEADERS": json.dumps(prepared.headers, ensure_ascii=False),
+                "BODY": json.dumps(prepared.body, ensure_ascii=False) if prepared.body else "",
                 "EXPECTED_STATUS": str(case.expected_status),
                 "TIMEOUT": str(_run_timeout_seconds(run)),
                 "RESULT_PATH": result_path,
@@ -551,20 +483,23 @@ def _execute_performance_case(
 ) -> dict:
     environment = _resolve_environment(db, project, run.environment_id)
     variables = environment.variables_json if environment and environment.variables_json else None
-    base_url = _render_template(environment.base_url if environment else project.base_url, variables, "base_url")
-    headers = _build_runtime_headers(environment, case.headers_json, variables)
-    rendered_path = _render_template(case.path, variables, "case.path")
-    rendered_body = _render_data(case.body_json, variables, "case.body_json")
-    body_kwargs = _build_request_body_kwargs(rendered_body)
-    target_url = urljoin(base_url.rstrip("/") + "/", rendered_path.lstrip("/"))
+    prepared = prepare_http_request(
+        method=case.method,
+        project=project,
+        environment=environment,
+        case_path=case.path,
+        case_headers=case.headers_json,
+        case_body=case.body_json,
+        variables=variables,
+    )
 
     total_requests = max(case.total_requests or 1, 1)
     concurrency = max(1, min(case.concurrency or 1, total_requests))
     request_payload = {
-        "method": case.method,
-        "url": target_url,
-        "headers": headers,
-        "body": rendered_body,
+        "method": prepared.method,
+        "url": prepared.url,
+        "headers": prepared.headers,
+        "body": prepared.body,
         "expected_status": case.expected_status,
         "concurrency": concurrency,
         "total_requests": total_requests,
@@ -577,7 +512,7 @@ def _execute_performance_case(
 
     def perform_request(index: int) -> dict:
         started_at = time.perf_counter()
-        parsed_url = urlparse(target_url)
+        parsed_url = urlparse(prepared.url)
         response_status = 0
         response_body = None
         error = None
@@ -586,13 +521,13 @@ def _execute_performance_case(
                 from app.main import app
 
                 with TestClient(app, base_url="http://testserver") as client:
-                    response = client.request(case.method.upper(), parsed_url.path, headers=headers, **body_kwargs)
+                    response = client.request(prepared.method, parsed_url.path, headers=prepared.headers, **prepared.kwargs())
                 response_status = response.status_code
                 response_body = response.text[:500]
             else:
                 timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
                 with httpx.Client(timeout=timeout_seconds) as client:
-                    response = client.request(case.method.upper(), target_url, headers=headers, **body_kwargs)
+                    response = client.request(prepared.method, prepared.url, headers=prepared.headers, **prepared.kwargs())
                 response_status = response.status_code
                 response_body = response.text[:500]
         except Exception as exc:
@@ -641,7 +576,7 @@ def _execute_performance_case(
                 "status_code": item["status_code"],
                 "error": item["error"],
                 "response_sample": item["response_sample"],
-                "target_url": target_url,
+                "target_url": prepared.url,
             },
         }
         for item in results

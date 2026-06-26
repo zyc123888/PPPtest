@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import time
 
@@ -65,6 +66,540 @@ def test_api_case_body_modes_build_request_kwargs() -> None:
 
     binary = _build_request_body_kwargs({"mode": "binary", "binary": {"content": "aGVsbG8=", "encoding": "base64"}})
     assert binary == {"content": b"hello"}
+
+
+def test_case_generation_payload_masks_openai_key() -> None:
+    from app.tasks.case_generation import sanitize_case_generation_payload
+
+    payload = sanitize_case_generation_payload({"openai_api_key": "sk-test-secret", "name": "demo"})
+    assert payload["openai_api_key"] == "***已提供***"
+    assert payload["name"] == "demo"
+
+    cleaned = sanitize_case_generation_payload({"openai_api_key": "sk-test-secret"}, cleanup_secret=True)
+    assert cleaned["openai_api_key"] is None
+
+
+def test_case_generation_image_link_extraction() -> None:
+    from app.tasks.case_generation import _extract_image_links
+
+    markdown = """
+    # 需求
+    ![原型](https://example.com/prototype.png)
+    <img src="https://example.com/detail.jpg" />
+    ![重复](https://example.com/prototype.png)
+    """
+    assert _extract_image_links(markdown) == [
+        "https://example.com/detail.jpg",
+        "https://example.com/prototype.png",
+    ]
+
+
+def test_case_generation_batch_image_recognition(monkeypatch) -> None:
+    from app.tasks import case_generation
+
+    state = {"count": 0, "running": 0, "max_running": 0}
+
+    async def fake_call_openai_json_async(**kwargs):
+        state["count"] += 1
+        state["running"] += 1
+        state["max_running"] = max(state["max_running"], state["running"])
+        await asyncio.sleep(0.01)
+        image_ids = [item["text"].split("图片 ID: ", 1)[1].split("，", 1)[0] for item in kwargs["user_content"] if item.get("type") == "text" and item.get("text", "").startswith("图片 ID: ")]
+        if image_ids and image_ids[0] == "IMG-001":
+            result = {
+                "images": [
+                    {"image_id": f"IMG-{i:03d}", "summary": f"batch1 img {i}", "ui_elements": [], "requirement_hints": [], "risk_or_unclear": []}
+                    for i in range(1, 9)
+                ]
+            }
+        else:
+            result = {
+                "images": [
+                    {"image_id": f"IMG-{i:03d}", "summary": f"batch2 img {i}", "ui_elements": [], "requirement_hints": [], "risk_or_unclear": []}
+                    for i in range(9, 13)
+                ]
+            }
+        state["running"] -= 1
+        return result
+
+    monkeypatch.setattr(case_generation, "_call_openai_json_async", fake_call_openai_json_async)
+    monkeypatch.setattr(case_generation, "_image_to_data_url", lambda path: "data:image/png;base64,fake")
+
+    downloaded = []
+    for i in range(1, 13):
+        downloaded.append({
+            "image_id": f"IMG-{i:03d}",
+            "url": f"https://example.com/img{i}.png",
+            "file_name": f"image_{i:02d}.png",
+            "file_path": f"/tmp/images/image_{i:02d}.png",
+            "download_status": "success",
+        })
+
+    results = case_generation._analyze_images("sk-test", "gpt-4.1", None, downloaded)
+    assert len(results) == 12
+    assert state["count"] == 2
+    assert state["max_running"] >= 2
+    observed_ids = {item["image_id"] for item in results}
+    for i in range(1, 13):
+        assert f"IMG-{i:03d}" in observed_ids
+
+
+def test_case_generation_xmindmark_stable_format() -> None:
+    from app.tasks.case_generation import _validate_xmindmark
+
+    valid = "项目测试用例\n- 统计信息\n  - 用例总数：1\n- 模块：登录\n  - 场景：登录\n"
+    _validate_xmindmark(valid)
+
+    invalid = "# 项目测试用例\n\n## 模块\n"
+    try:
+        _validate_xmindmark(invalid)
+    except ValueError as exc:
+        assert "为空行" in str(exc) or "标准列表节点" in str(exc)
+    else:
+        raise AssertionError("invalid xmindmark should fail")
+
+
+def test_case_generation_skill_gate_rejects_invalid_output(monkeypatch) -> None:
+    from app.tasks import case_generation
+
+    calls = {"count": 0}
+
+    def fake_call_openai_json(**kwargs):
+        calls["count"] += 1
+        return {"function_points": []}
+
+    def always_fail(result):
+        raise ValueError("门禁失败")
+
+    monkeypatch.setattr(case_generation, "_call_openai_json", fake_call_openai_json)
+    try:
+        case_generation._call_skill_with_gate(
+            api_key="sk-test",
+            model="gpt-4.1",
+            skill_name="requirement-analyzer",
+            task_payload={"demo": True},
+            output_contract="{}",
+            validator=always_fail,
+            max_tokens=100,
+        )
+    except ValueError as exc:
+        assert "多次重试后仍未通过门禁" in str(exc)
+    else:
+        raise AssertionError("invalid skill output should fail")
+    assert calls["count"] == 3
+
+
+def test_case_generation_repairs_invalid_json_before_retry(monkeypatch) -> None:
+    from app.tasks import case_generation
+
+    calls = {"main": 0, "repair": 0}
+
+    async def fake_call_openai_json_async(**kwargs):
+        calls["main"] += 1
+        raise case_generation.ModelJSONParseError("bad json", raw_text='{"function_points": [')
+
+    async def fake_repair_model_json_async(**kwargs):
+        calls["repair"] += 1
+        return {"function_points": [{"fp_id": "FP-001"}]}
+
+    monkeypatch.setattr(case_generation, "_call_openai_json_async", fake_call_openai_json_async)
+    monkeypatch.setattr(case_generation, "_repair_model_json_async", fake_repair_model_json_async)
+
+    result = asyncio.run(
+        case_generation._call_skill_with_gate_async(
+            api_key="sk-test",
+            model="gpt-4.1",
+            skill_name="requirement-analyzer",
+            task_payload={"demo": True},
+            output_contract='{"function_points":[]}',
+            validator=lambda value: None,
+            max_tokens=100,
+        )
+    )
+
+    assert result["function_points"][0]["fp_id"] == "FP-001"
+    assert calls == {"main": 1, "repair": 1}
+
+
+def test_case_generation_retries_incomplete_json_before_repair(monkeypatch) -> None:
+    from app.tasks import case_generation
+
+    calls = {"main": 0, "repair": 0}
+    seen_max_tokens = []
+
+    async def fake_call_openai_json_async(**kwargs):
+        calls["main"] += 1
+        seen_max_tokens.append(kwargs["max_tokens"])
+        if calls["main"] == 1:
+            raise case_generation.ModelJSONParseError(
+                "模型输出 JSON 对象不完整，可能因 max_tokens 或模型响应中断被截断",
+                raw_text='{"function_points": [',
+            )
+        return {"function_points": [{"fp_id": "FP-002"}]}
+
+    async def fake_repair_model_json_async(**kwargs):
+        calls["repair"] += 1
+        return {"function_points": [{"fp_id": "FP-REPAIR"}]}
+
+    monkeypatch.setattr(case_generation, "_call_openai_json_async", fake_call_openai_json_async)
+    monkeypatch.setattr(case_generation, "_repair_model_json_async", fake_repair_model_json_async)
+
+    result = asyncio.run(
+        case_generation._call_skill_with_gate_async(
+            api_key="sk-test",
+            model="gpt-4.1",
+            skill_name="requirement-analyzer",
+            task_payload={"demo": True},
+            output_contract='{"function_points":[]}',
+            validator=lambda value: None,
+            max_tokens=100,
+        )
+    )
+
+    assert result["function_points"][0]["fp_id"] == "FP-002"
+    assert calls == {"main": 2, "repair": 0}
+    assert seen_max_tokens == [100, 150]
+
+
+def test_case_generation_testcase_gate_normalizes_template_steps_before_reject(monkeypatch) -> None:
+    from app.tasks import case_generation
+
+    async def fake_skill_with_gate_async(**kwargs):
+        return {
+            "testcases": [
+                {
+                    "case_id": "TC-TEMP-001",
+                    "fp_id": "FP-001",
+                    "title": "正常流程验证",
+                    "category": "functional",
+                    "priority": "P1",
+                    "preconditions": [],
+                    "test_data": [],
+                    "steps": [
+                        {"step_no": 1, "action": "进入对应页面"},
+                        {"step_no": 2, "action": "执行 正常流程验证"},
+                    ],
+                    "expected_results": ["符合预期"],
+                    "traceability": {"function_points": ["FP-001"], "sources": ["text"]},
+                    "generation_basis": {},
+                    "scenario_dimensions": ["functional"],
+                    "baseline_candidate": True,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(case_generation, "_call_skill_with_gate_async", fake_skill_with_gate_async)
+
+    result = case_generation._build_testcase_package(
+        {
+            "function_points": [
+                {
+                    "fp_id": "FP-001",
+                    "module": "登录模块",
+                    "scene": "验证码登录",
+                    "title": "验证码过期后允许重新获取并登录",
+                    "description": "验证码过期后用户可重新获取验证码完成登录",
+                    "source_refs": ["需求正文"],
+                    "rules": ["旧验证码失效，新验证码可登录"],
+                    "test_hints": {
+                        "positive": ["重新获取验证码后登录成功"],
+                        "boundary": ["验证码刚过期时提交"],
+                        "negative": ["输入旧验证码时登录失败"],
+                    },
+                    "priority_hint": "P1",
+                    "source_order": 1,
+                }
+            ]
+        },
+        [],
+        "sk-test",
+        "gpt-4.1",
+    )
+
+    case = result["testcases"][0]
+    steps_text = " ".join(case_generation._step_to_text(item) for item in case["steps"])
+    assert case["title"] != "正常流程验证"
+    assert "进入对应页面" not in steps_text
+    assert "执行 正常流程验证" not in steps_text
+
+
+def test_case_generation_requirement_allows_empty_intermediate_batches(monkeypatch) -> None:
+    from app.tasks import case_generation
+
+    monkeypatch.setattr(
+        case_generation,
+        "_build_requirement_section_batches",
+        lambda sections: [[sections[0]], [sections[1]]],
+    )
+
+    async def fake_skill_with_gate_async(**kwargs):
+        batch_index = kwargs["task_payload"]["batch"]["index"]
+        if batch_index == 1:
+            return {
+                "evidence_trace": {"image_summary": "背景说明", "images": [], "pending_confirmations": []},
+                "function_points": {"function_points": []},
+            }
+        return {
+            "evidence_trace": {"image_summary": "功能说明", "images": [], "pending_confirmations": []},
+            "function_points": {
+                "function_points": [
+                    {
+                        "fp_id": "FP-TEMP-001",
+                        "module": "登录模块",
+                        "scene": "验证码登录",
+                        "requirement_group_id": "RG-001",
+                        "requirement_group_title": "登录优化",
+                        "title": "验证码过期后允许重新获取并登录",
+                        "type": "functional",
+                        "description": "验证码过期后用户可重新获取验证码完成登录",
+                        "source_refs": ["功能说明"],
+                        "rules": ["旧验证码失效，新验证码可登录"],
+                        "test_hints": {
+                            "positive": ["重新获取验证码后登录成功"],
+                            "boundary": ["验证码刚过期时提交"],
+                            "negative": ["输入旧验证码时登录失败"],
+                        },
+                        "priority_hint": "P1",
+                        "atomicity_check": "可独立验证",
+                        "source_distribution": "text_only",
+                        "source_order": 2,
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(case_generation, "_call_skill_with_gate_async", fake_skill_with_gate_async)
+
+    result = case_generation._build_requirement_analysis(
+        job=type("Job", (), {"source_document_name": "demo.md"})(),
+        markdown_text="# 背景\n这里只是背景说明\n# 功能说明\n验证码过期后需要重新获取",
+        downloaded_images=[],
+        image_analysis=[],
+        api_key="sk-test",
+        model="gpt-4.1",
+    )
+
+    fps = result["function_points"]["function_points"]
+    assert len(fps) == 1
+    assert fps[0]["title"] == "验证码过期后允许重新获取并登录"
+
+
+def test_case_generation_gather_limited_respects_limit() -> None:
+    from app.tasks import case_generation
+
+    state = {"running": 0, "max_running": 0}
+
+    async def unit(index: int) -> int:
+        state["running"] += 1
+        state["max_running"] = max(state["max_running"], state["running"])
+        await asyncio.sleep(0.01)
+        state["running"] -= 1
+        return index
+
+    result = asyncio.run(case_generation._gather_limited([unit(index) for index in range(8)], limit=3))
+
+    assert result == list(range(8))
+    assert state["max_running"] <= 3
+
+
+def test_case_generation_update_stage_records_duration(monkeypatch) -> None:
+    from app.tasks import case_generation
+
+    class DummyDB:
+        def commit(self):
+            return None
+
+    job = type("Job", (), {"progress_json": {"stages": []}, "summary": ""})()
+    db = DummyDB()
+    monkeypatch.setattr(case_generation, "flag_modified", lambda *args, **kwargs: None)
+
+    case_generation._update_stage(job, db, "collect", "收集输入", "running", "开始收集")
+    case_generation._update_stage(job, db, "collect", "收集输入", "success", "收集完成")
+
+    stage = job.progress_json["stages"][0]
+    assert stage["key"] == "collect"
+    assert stage["status"] == "success"
+    assert "started_at" in stage
+    assert "updated_at" in stage
+    assert isinstance(stage.get("duration_ms"), int)
+
+
+def test_case_generation_non_retryable_error_fails_fast(monkeypatch) -> None:
+    from app.tasks import case_generation
+
+    calls = {"count": 0}
+
+    async def fake_call_openai_json_async(**kwargs):
+        calls["count"] += 1
+        raise RuntimeError("OpenAI 请求失败，HTTP 401：invalid_api_key")
+
+    monkeypatch.setattr(case_generation, "_call_openai_json_async", fake_call_openai_json_async)
+
+    try:
+        asyncio.run(
+            case_generation._call_skill_with_gate_async(
+                api_key="sk-test",
+                model="gpt-4.1",
+                skill_name="requirement-analyzer",
+                task_payload={"demo": True},
+                output_contract='{"function_points":[]}',
+                validator=lambda value: None,
+                max_tokens=100,
+            )
+        )
+    except ValueError as exc:
+        assert "不可重试错误" in str(exc)
+    else:
+        raise AssertionError("non-retryable error should fail fast")
+
+    assert calls["count"] == 1
+
+
+def test_case_generation_success_cleanup_keeps_final_xmind(tmp_path) -> None:
+    from app.tasks.case_generation import _cleanup_case_generation_output_dir
+
+    output_dir = tmp_path / "job_1"
+    image_dir = output_dir / "images"
+    image_dir.mkdir(parents=True)
+    final_xmind = output_dir / "result.xmind"
+    final_xmind.write_text("xmind", encoding="utf-8")
+    (output_dir / "testcase_package.json").write_text("{}", encoding="utf-8")
+    (image_dir / "image_01.png").write_bytes(b"png")
+
+    _cleanup_case_generation_output_dir(str(output_dir), keep_paths={str(final_xmind)})
+
+    assert final_xmind.exists()
+    assert not (output_dir / "testcase_package.json").exists()
+    assert not image_dir.exists()
+
+
+def test_case_generation_review_fail_blocks_export(monkeypatch) -> None:
+    from app.tasks import case_generation
+
+    async def fake_skill_with_gate_async(**kwargs):
+        return {
+            "summary": {"release_readiness": "fail"},
+            "coverage": {},
+            "method_coverage": {},
+            "dimension_matrix": {},
+            "evidence_trace": {},
+            "execution_proof": {},
+            "findings": [{"message": "覆盖不足"}],
+        }
+
+    monkeypatch.setattr(case_generation, "_call_skill_with_gate_async", fake_skill_with_gate_async)
+    try:
+        case_generation._build_review_report(
+            evidence_trace={"downloaded_images": []},
+            function_points={"function_points": [{"fp_id": "FP-001"}]},
+            testcase_package={"testcases": [{"priority": "P1"}]},
+            pending_confirmations=[],
+            api_key="sk-test",
+            model="gpt-4.1",
+        )
+    except ValueError as exc:
+        assert "禁止导出 XMind" in str(exc)
+    else:
+        raise AssertionError("review fail should block export")
+
+
+def test_case_generation_rejects_generic_case_titles(monkeypatch) -> None:
+    from app.tasks import case_generation
+
+    async def fake_skill_with_gate_async(**kwargs):
+        result = {
+            "testcases": [
+                {
+                    "case_id": "TC-001-001",
+                    "fp_id": "FP-001",
+                    "title": "正常流程验证",
+                    "category": "functional",
+                    "priority": "P1",
+                    "preconditions": ["已登录"],
+                    "test_data": [],
+                    "steps": ["进入页面", "点击提交"],
+                    "expected_results": ["系统正常"],
+                    "traceability": {"function_points": ["FP-001"]},
+                    "generation_basis": {"method": "equivalence"},
+                    "scenario_dimensions": ["functional"],
+                    "baseline_candidate": True,
+                }
+            ]
+        }
+        kwargs["validator"](result)
+        return result
+
+    monkeypatch.setattr(case_generation, "_call_skill_with_gate_async", fake_skill_with_gate_async)
+    try:
+        case_generation._build_testcase_package(
+            {
+                "function_points": [
+                    {
+                        "fp_id": "FP-001",
+                        "module": "登录模块",
+                        "scene": "账号登录",
+                        "title": "支持账号密码登录",
+                        "description": "用户输入账号密码后完成登录",
+                        "rules": ["密码错误时提示错误原因"],
+                    }
+                ]
+            },
+            [],
+            "sk-test",
+            "gpt-4.1",
+        )
+    except ValueError as exc:
+        assert "标题过于模板化" in str(exc)
+    else:
+        raise AssertionError("generic case title should fail")
+
+
+def test_case_generation_requires_skill_execution_proof() -> None:
+    from app.tasks.case_generation import _assert_required_skill_execution
+
+    try:
+        _assert_required_skill_execution([
+            {"skill": "requirement-analyzer", "status": "passed"},
+            {"skill": "testcase-designer", "status": "passed"},
+        ])
+    except ValueError as exc:
+        assert "quality-reviewer" in str(exc)
+    else:
+        raise AssertionError("missing required skill proof should fail")
+
+    _assert_required_skill_execution([
+        {"skill": "requirement-analyzer", "status": "passed"},
+        {"skill": "testcase-designer", "status": "passed"},
+        {"skill": "quality-reviewer", "status": "passed"},
+    ])
+
+
+def test_case_generation_job_response_masks_openai_key(client, monkeypatch) -> None:
+    from app import api as api_module
+
+    def fake_run_case_generation_job(job_id: int) -> None:
+        return None
+
+    monkeypatch.setattr(api_module, "run_case_generation_job", fake_run_case_generation_job)
+    project_id = client.get("/projects").json()[0]["id"]
+    response = client.post(
+        "/case-generation/jobs",
+        json={
+            "project_id": project_id,
+            "name": f"用例生成_{time.time_ns()}",
+            "source_type": "PASTE",
+            "markdown_text": "# 登录\n- 支持账号密码登录",
+            "openai_api_key": "sk-test-secret",
+            "openai_model": "gpt-4.1",
+        },
+    )
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["input_payload_json"]["openai_api_key"] == "***已提供***"
+
+    detail = client.get(f"/case-generation/jobs/{payload['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["job"]["input_payload_json"]["openai_api_key"] == "***已提供***"
 
 
 def test_admin_can_manage_users(client) -> None:
@@ -490,6 +1025,62 @@ def test_api_case_run(client) -> None:
     assert "summary" in plan_precheck.json()
     assert "scope_counts" in plan_precheck.json()
     assert "missing_variables" in plan_precheck.json()
+
+
+def test_api_case_debug_request_returns_response_preview(client) -> None:
+    api_case = next(case for case in client.get("/api-cases").json() if case["name"] == "示例健康检查接口")
+    response = client.post(
+        "/api-cases/debug",
+        json={
+            "project_id": api_case["project_id"],
+            "name": "调试健康检查",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "headers_json": {"accept": "application/json"},
+            "body_json": None,
+            "assertions_json": [{"type": "status_code", "expected": 200}],
+            "expected_status": 200,
+            "timeout_seconds": 5,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["request"]["method"] == "GET"
+    assert payload["response"]["status_code"] == 200
+    assert payload["duration_ms"] >= 0
+
+
+def test_api_case_debug_request_returns_400_when_environment_variables_missing(client) -> None:
+    from app.core.database import SessionLocal
+    from app.models import Environment
+
+    with SessionLocal() as db:
+        environment = db.get(Environment, 1)
+        environment.variables_json = {}
+        environment.auth_config_json = {
+            "header_name": "Authorization",
+            "token_prefix": "Bearer",
+            "token": "{{token}}",
+        }
+        db.commit()
+
+    response = client.post(
+        "/api-cases/debug",
+        json={
+            "project_id": 1,
+            "name": "调试健康检查",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "headers_json": {"accept": "application/json"},
+            "body_json": None,
+            "assertions_json": [{"type": "status_code", "expected": 200}],
+            "expected_status": 200,
+            "environment_id": 1,
+            "timeout_seconds": 5,
+        },
+    )
+    assert response.status_code == 400
+    assert "环境变量缺失" in response.json()["detail"]
 
 
 def test_cancel_pending_execution(client) -> None:

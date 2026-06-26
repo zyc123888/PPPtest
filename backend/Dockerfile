@@ -11,19 +11,23 @@ WORKDIR /app
 COPY requirements.txt .
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates gcc \
+    && apt-get install -y --no-install-recommends curl ca-certificates gcc nodejs npm \
     && python -m pip install --upgrade pip \
     && pip install -r requirements.txt \
+    && npm install -g xmindmark \
+    && xmindmark --version \
     && python -m playwright install --with-deps chromium \
     && addgroup --system app \
     && adduser --system --ingroup app --home /home/app app \
-    && mkdir -p /home/app /app \
+    && mkdir -p /home/app /app /app/reports /ms-playwright \
     && chown -R app:app /home/app /app /ms-playwright \
+    && chmod -R 777 /app/reports \
     && apt-get purge -y gcc \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY app ./app
+COPY claw_5skill_final ./claw_5skill_final
 COPY tests ./tests
 COPY pytest.ini ./pytest.ini
 

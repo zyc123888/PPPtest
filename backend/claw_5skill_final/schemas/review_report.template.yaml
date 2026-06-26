@@ -1,0 +1,56 @@
+project: "项目名称"
+reviewed_at: "2026-04-02"
+summary:
+  testcase_count: 0
+  duplicate_count: 0
+  uncovered_fp_count: 0
+  ambiguous_step_count: 0
+  unverifiable_expectation_count: 0
+  overall_score: 0
+  release_readiness: "conditional_pass"
+coverage:
+  fp_covered: 0
+  fp_total: 0
+  uncovered_fp_ids: []
+method_coverage:
+  equivalence: "covered"
+  boundary: "covered"
+  decision_table: "partial"
+  state_transition: "partial"
+  role_matrix: "partial"
+  entry_consistency: "partial"
+  default_or_empty: "partial"
+  error_tolerance: "covered"
+  time_or_sequence: "partial"
+  ui_interaction: "partial"
+evidence_trace:
+  image_link_count: 0
+  download_success_count: 0
+  download_failed_count: 0
+  pending_confirmation_count: 0
+  status: "complete"
+execution_proof:
+  text_fp_count: 0
+  text_and_image_fp_count: 0
+  image_or_inferred_fp_count: 0
+  image_observation_count: 0
+  summary_lines:
+    - "发现图片链接 0 个"
+    - "下载成功 0 个"
+    - "下载失败 0 个"
+dimension_matrix:
+  functional: "covered"
+  entry: "partial"
+  role: "partial"
+  data: "covered"
+  time: "partial"
+  environment: "missing"
+  consistency: "partial"
+findings:
+  - finding_id: "F-001"
+    severity: "medium"
+    type: "missing_coverage"
+    case_id: null
+    fp_id: "FP-003"
+    message: "功能点未覆盖"
+    suggestion: "补充至少一条正常流程和一条异常流程用例"

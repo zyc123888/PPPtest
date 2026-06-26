@@ -1,0 +1,61 @@
+version: "3.2-skill-only"
+project: "项目名称"
+analyzed_at: "2026-04-02"
+source_documents:
+  - "requirement.md"
+function_points:
+  - fp_id: "FP-001"
+    module: "功能模块"
+    scene: "波动分析"
+    source_order: "1"
+    title: "功能点名称"
+    type: "workflow"
+    description: "简要描述功能点"
+    source_refs:
+      - source_type: "text"
+        doc: "requirement.md"
+        section: "2.1"
+        quote: "原文片段"
+      - source_type: "image"
+        doc: "screenshot_01.png"
+        section: ""
+        quote: "图片中识别到的界面元素"
+    actors:
+      - "管理员"
+    entries:
+      - "主页面入口"
+      - "快捷入口"
+    preconditions:
+      - "用户已登录"
+    inputs:
+      - name: "开始日期"
+        type: "date"
+        required: true
+        constraints:
+          - "不可晚于结束日期"
+    outputs:
+      - "图表刷新成功"
+    rules:
+      - "开始日期和结束日期为必填"
+      - "默认展示最近 7 天数据"
+    states:
+      - from: "未筛选"
+        event: "点击查询"
+        to: "已筛选"
+    exceptions:
+      - "接口超时"
+      - "无权限"
+    dependencies:
+      - "依赖波动分析接口"
+    test_hints:
+      positive:
+        - "输入合法日期区间，查询成功"
+      boundary:
+        - "开始日期等于结束日期"
+      negative:
+        - "开始日期晚于结束日期"
+    priority_hint: "P1"
+    source_distribution: "text_and_image"
+    atomicity_check:
+      passed: true
+      issues: []

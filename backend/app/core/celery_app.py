@@ -14,6 +14,5 @@ celery_app.conf.update(
     timezone="Asia/Shanghai",
     enable_utc=False,
     result_expires=3600,
-    imports=("app.tasks.executions",),
+    imports=("app.tasks.executions", "app.tasks.case_generation"),
 )
-

@@ -35,6 +35,25 @@ class WorkspaceMember(Base):
     user = relationship("User", back_populates="workspace_members")
 
 
+class AIModelConfig(Base):
+    __tablename__ = "ai_model_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(30), nullable=False, default="OPENAI")
+    name: Mapped[str] = mapped_column(String(120), nullable=False, default="默认模型配置")
+    base_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    model: Mapped[str] = mapped_column(String(80), nullable=False, default="gpt-5.5")
+    api_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -56,6 +75,7 @@ class Project(Base):
     environments = relationship("Environment", back_populates="project", cascade="all, delete-orphan")
     test_plans = relationship("TestPlan", back_populates="project", cascade="all, delete-orphan")
     test_runs = relationship("TestRun", back_populates="project", cascade="all, delete-orphan")
+    case_generation_jobs = relationship("CaseGenerationJob", back_populates="project", cascade="all, delete-orphan")
 
 
 class APICase(Base):
@@ -66,7 +86,7 @@ class APICase(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     folder_path: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     method: Mapped[str] = mapped_column(String(10), nullable=False, default="GET")
-    path: Mapped[str] = mapped_column(String(255), nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
     priority: Mapped[str] = mapped_column(String(20), nullable=False, default="P2")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
     review_status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")
@@ -94,7 +114,7 @@ class UICase(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     folder_path: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    target_url: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_url: Mapped[str] = mapped_column(Text, nullable=False)
     priority: Mapped[str] = mapped_column(String(20), nullable=False, default="P2")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
     review_status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")
@@ -122,7 +142,7 @@ class PerformanceCase(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     folder_path: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     method: Mapped[str] = mapped_column(String(10), nullable=False, default="GET")
-    path: Mapped[str] = mapped_column(String(255), nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
     priority: Mapped[str] = mapped_column(String(20), nullable=False, default="P2")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
     review_status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")
@@ -342,6 +362,47 @@ class ExecutionStep(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
 
     run = relationship("TestRun", back_populates="steps")
+
+
+class CaseGenerationJob(Base):
+    __tablename__ = "case_generation_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    mode: Mapped[str] = mapped_column(String(30), nullable=False, default="MARKDOWN")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", index=True)
+    source_document_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    progress_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    input_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    project = relationship("Project", back_populates="case_generation_jobs")
+    artifacts = relationship("CaseGenerationArtifact", back_populates="job", cascade="all, delete-orphan")
+
+
+class CaseGenerationArtifact(Base):
+    __tablename__ = "case_generation_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("case_generation_jobs.id"), nullable=False, index=True)
+    artifact_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    file_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    content_json: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+
+    job = relationship("CaseGenerationJob", back_populates="artifacts")
 
 
 class DefectRecord(Base):

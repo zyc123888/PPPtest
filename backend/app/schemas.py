@@ -31,7 +31,7 @@ class APICaseCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=120)
     folder_path: str | None = Field(default=None, max_length=255)
     method: str = Field(default="GET", min_length=3, max_length=10)
-    path: str = Field(..., min_length=1, max_length=255)
+    path: str = Field(..., min_length=1)
     priority: str = Field(default="P2", min_length=2, max_length=20)
     status: str = Field(default="ACTIVE", min_length=2, max_length=20)
     review_status: str = Field(default="DRAFT", min_length=2, max_length=20)
@@ -71,11 +71,22 @@ class APICaseRead(ORMBaseModel):
     updated_at: datetime | None = None
 
 
+class APICaseDebugRequest(APICaseCreate):
+    environment_id: int | None = None
+    timeout_seconds: int = Field(default=30, ge=1, le=300)
+
+
+class APICaseDebugResponse(BaseModel):
+    request: dict
+    response: dict
+    duration_ms: int
+
+
 class UICaseCreate(BaseModel):
     project_id: int
     name: str = Field(..., min_length=2, max_length=120)
     folder_path: str | None = Field(default=None, max_length=255)
-    target_url: str = Field(..., min_length=5, max_length=255)
+    target_url: str = Field(..., min_length=5)
     priority: str = Field(default="P2", min_length=2, max_length=20)
     status: str = Field(default="ACTIVE", min_length=2, max_length=20)
     review_status: str = Field(default="DRAFT", min_length=2, max_length=20)
@@ -84,7 +95,7 @@ class UICaseCreate(BaseModel):
     tags_json: list[str] | None = None
     assertions_json: list[dict] | None = None
     steps_json: list[dict]
-    expect_text: str = Field(..., min_length=1, max_length=255)
+    expect_text: str = Field(..., min_length=1)
 
 
 class UICaseUpdate(UICaseCreate):
@@ -117,7 +128,7 @@ class PerformanceCaseCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=120)
     folder_path: str | None = Field(default=None, max_length=255)
     method: str = Field(default="GET", min_length=3, max_length=10)
-    path: str = Field(..., min_length=1, max_length=255)
+    path: str = Field(..., min_length=1)
     priority: str = Field(default="P2", min_length=2, max_length=20)
     status: str = Field(default="ACTIVE", min_length=2, max_length=20)
     review_status: str = Field(default="DRAFT", min_length=2, max_length=20)
@@ -192,6 +203,85 @@ class TestRunRead(ORMBaseModel):
     finished_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class CaseGenerationJobCreate(BaseModel):
+    project_id: int
+    name: str = Field(..., min_length=2, max_length=120)
+    mode: str = Field(default="MARKDOWN", min_length=2, max_length=30)
+    source_type: str = Field(default="PASTE", min_length=2, max_length=20)
+    source_document_name: str | None = Field(default=None, max_length=255)
+    source_url: str | None = Field(default=None, max_length=1000)
+    markdown_text: str | None = Field(default=None, min_length=10)
+    extra_notes: str | None = None
+    export_xmind: bool = True
+    openai_api_key: str | None = None
+
+
+class CaseGenerationProgressStage(BaseModel):
+    key: str
+    title: str
+    status: str
+    summary: str | None = None
+
+
+class AIModelConfigUpsert(BaseModel):
+    workspace_id: int
+    provider: str = Field(default="OPENAI", min_length=2, max_length=30)
+    name: str = Field(default="默认模型配置", min_length=2, max_length=120)
+    base_url: str | None = Field(default=None, max_length=1000)
+    model: str = Field(default="gpt-5.5", min_length=2, max_length=80)
+    api_key: str = Field(..., min_length=10, max_length=255)
+
+
+class AIModelConfigRead(ORMBaseModel):
+    id: int
+    workspace_id: int
+    provider: str
+    name: str
+    base_url: str | None = None
+    model: str
+    api_key: str | None = None
+    is_active: int
+    created_by: int | None = None
+    updated_by: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class CaseGenerationJobRead(ORMBaseModel):
+    id: int
+    workspace_id: int
+    project_id: int
+    name: str
+    mode: str
+    status: str
+    source_document_name: str | None = None
+    progress_json: dict | None = None
+    input_payload_json: dict | None = None
+    task_id: str | None = None
+    summary: str | None = None
+    error_message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_by: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class CaseGenerationArtifactRead(ORMBaseModel):
+    id: int
+    job_id: int
+    artifact_type: str
+    file_name: str | None = None
+    file_path: str | None = None
+    content_json: dict | list | None = None
+    created_at: datetime | None = None
+
+
+class CaseGenerationJobDetail(BaseModel):
+    job: CaseGenerationJobRead
+    artifacts: list[CaseGenerationArtifactRead] = Field(default_factory=list)
 
 
 class DashboardSummary(BaseModel):

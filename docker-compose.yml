@@ -42,6 +42,7 @@ services:
     build:
       context: ./backend
     container_name: ppptest-backend
+    user: "0:0"
     environment:
       APP_ENV: docker
       DATABASE_URL: mysql+pymysql://tester:tester123@mysql:3306/test_platform
@@ -53,6 +54,7 @@ services:
       BACKEND_PUBLIC_URL: http://127.0.0.1:8000
       FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
       CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+      CASE_GENERATION_RULES_DIR: claw_5skill_final
     depends_on:
       mysql:
         condition: service_healthy
@@ -85,6 +87,7 @@ services:
     build:
       context: ./backend
     container_name: ppptest-worker
+    user: "0:0"
     command: celery -A app.core.celery_app.celery_app worker -l info --pool=solo
     environment:
       APP_ENV: docker
@@ -96,6 +99,7 @@ services:
       FRONTEND_INTERNAL_URL: http://frontend:3000
       BACKEND_PUBLIC_URL: http://127.0.0.1:8000
       FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
+      CASE_GENERATION_RULES_DIR: claw_5skill_final
     depends_on:
       mysql:
         condition: service_healthy
