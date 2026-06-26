@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OmniTest Logo Design Preview</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', sans-serif;
+            background-color: #f8fafc;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 50px;
+            color: #1e293b;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            width: 100%;
+            max-width: 1000px;
+        }
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            text-align: center;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.05);
+            border: 1px solid #e2e8f0;
+            transition: transform 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+        }
+        .logo-wrapper {
+            margin-bottom: 20px;
+            display: inline-block;
+            padding: 20px;
+            border-radius: 15px;
+            background: #f1f5f9;
+        }
+        .dark-card {
+            background: #0f172a;
+            color: white;
+            border: 1px solid #1e293b;
+        }
+        .dark-card .logo-wrapper {
+            background: #1e293b;
+        }
+        h3 {
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+        p {
+            color: #64748b;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .dark-card p {
+            color: #94a3b8;
+        }
+        .brand-text {
+            font-size: 24px;
+            font-weight: 700;
+            margin-top: 15px;
+            letter-spacing: -0.5px;
+        }
+    </style>
+</head>
+<body>
+    <h1 style="margin-bottom: 40px;">OmniTest Logo 视觉方案预览</h1>
+    
+    <div class="container">
+        <!-- 方案 1: 现代科技风 (Light Mode) -->
+        <div class="card">
+            <div class="logo-wrapper">
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="10" stroke="url(#grad1)" stroke-width="2.5" stroke-linecap="round" />
+                    <path d="M8 12L11 15L16 9" stroke="#10B981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+                    <defs>
+                        <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#3B82F6" />
+                            <stop offset="100%" stop-color="#60A5FA" />
+                        </linearGradient>
+                    </defs>
+                </svg>
+            </div>
+            <h3>现代科技风 (Light)</h3>
+            <div class="brand-text" style="color: #3B82F6;">OmniTest</div>
+            <p>采用蓝色渐变圆环代表“全域”，绿色勾选代表“通过”。<br>适合作为主界面 Logo。</p>
+        </div>
+
+        <!-- 方案 2: 极简专业风 (Minimalist) -->
+        <div class="card">
+            <div class="logo-wrapper">
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="10" stroke="#1e293b" stroke-width="2" />
+                    <path d="M8 12L11 15L16 9" stroke="#3B82F6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+            </div>
+            <h3>极简专业风 (Minimal)</h3>
+            <div class="brand-text" style="color: #1e293b;">OmniTest</div>
+            <p>去除了渐变，使用高对比度的深色与蓝色。<br>适合文档、报告或极简风格界面。</p>
+        </div>
+
+        <!-- 方案 3: 赛博深色风 (Dark Mode) -->
+        <div class="card dark-card">
+            <div class="logo-wrapper">
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="10" stroke="url(#grad2)" stroke-width="2.5" stroke-linecap="round" />
+                    <path d="M8 12L11 15L16 9" stroke="#34D399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+                    <defs>
+                        <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#6366F1" />
+                            <stop offset="100%" stop-color="#A855F7" />
+                        </linearGradient>
+                    </defs>
+                </svg>
+            </div>
+            <h3>赛博深色风 (Dark)</h3>
+            <div class="brand-text" style="color: #A855F7;">OmniTest</div>
+            <p>采用紫色到蓝色的霓虹渐变，增强视觉冲击力。<br>适合深色模式或极客风格界面。</p>
+        </div>
+    </div>
+
+    <div style="margin-top: 50px; text-align: center; color: #64748b; font-size: 14px;">
+        提示：你可以直接将此页面保存为 .html 文件并在浏览器中打开预览
+    </div>
+</body>
+</html>

@@ -6,6 +6,26 @@
       </template>
     </PageHeader>
 
+    <div class="perf-hero section-gap">
+      <el-card class="page-card perf-hero__main" shadow="never">
+        <div class="perf-hero__kicker">Load Layer</div>
+        <div class="perf-hero__title">性能用例</div>
+        <div class="perf-hero__subtitle">把并发、总请求数和阈值要求集中在同一页面，执行链路和质量观察保持一致。</div>
+      </el-card>
+      <el-card class="page-card perf-hero__stat" shadow="never">
+        <el-statistic title="性能用例" :value="filteredList.length" />
+      </el-card>
+      <el-card class="page-card perf-hero__stat" shadow="never">
+        <el-statistic title="项目数" :value="projectCount" />
+      </el-card>
+      <el-card class="page-card perf-hero__stat" shadow="never">
+        <el-statistic title="筛选方法" :value="filters.method || 'ALL'" />
+      </el-card>
+      <el-card class="page-card perf-hero__stat" shadow="never">
+        <el-statistic title="阈值模板" :value="list.length ? '已配置' : '暂无'" />
+      </el-card>
+    </div>
+
     <el-card class="page-card section-gap" shadow="never">
       <el-form :inline="true" class="query-form" label-position="top" :model="filters">
         <el-form-item label="所属项目">
@@ -369,6 +389,8 @@ const pagedList = computed(() => {
   return filteredList.value.slice(start, start + pageSize.value)
 })
 
+const projectCount = computed(() => new Set(list.value.map((item) => item.project_id)).size)
+
 const handleCreate = () => {
   temp.project_id = projects.value.length ? projects.value[0].id : undefined
   temp.name = ''
@@ -542,6 +564,45 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.perf-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr));
+  gap: var(--space-12);
+}
+
+.perf-hero__main {
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.88)),
+    radial-gradient(circle at top right, rgba(20, 184, 166, 0.26), transparent 35%);
+  color: #f8fafc;
+}
+
+.perf-hero__kicker {
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.72);
+  margin-bottom: 10px;
+}
+
+.perf-hero__title {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: 10px;
+}
+
+.perf-hero__subtitle {
+  max-width: 760px;
+  color: rgba(226, 232, 240, 0.82);
+  line-height: 1.7;
+}
+
+.perf-hero__stat {
+  border-radius: 18px;
+}
+
 .mobile-cards {
   display: none;
 }
@@ -572,6 +633,14 @@ onMounted(() => {
 }
 
 @media (max-width: 960px) {
+  .perf-hero {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .perf-hero__main {
+    grid-column: 1 / -1;
+  }
+
   .el-table {
     display: none;
   }

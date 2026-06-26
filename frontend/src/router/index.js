@@ -8,6 +8,7 @@ import CaseCenter from '@/views/case/index.vue'
 import APICase from '@/views/case/api/index.vue'
 import UICase from '@/views/case/ui/index.vue'
 import PerformanceCase from '@/views/case/performance/index.vue'
+import CaseGenerator from '@/views/case/generator/index.vue'
 import Plan from '@/views/plan/index.vue'
 import Environment from '@/views/environment/index.vue'
 import Execution from '@/views/execution/index.vue'
@@ -87,6 +88,12 @@ export const constantRoutes = [
         component: PerformanceCase,
         name: 'PerformanceCase',
         meta: { title: '性能用例', icon: 'Histogram' }
+      },
+      {
+        path: 'generator',
+        component: CaseGenerator,
+        name: 'CaseGenerator',
+        meta: { title: '用例生成', icon: 'MagicStick' }
       }
     ]
   },
@@ -146,7 +153,7 @@ export const constantRoutes = [
         path: 'index',
         component: Tools,
         name: 'Tools',
-        meta: { title: '常用工具', icon: 'Tools' }
+        meta: { title: '常用工具', icon: 'Tools', testId: 'tab-tools' }
       }
     ]
   },

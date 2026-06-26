@@ -16,6 +16,7 @@
     </div>
 
     <div class="header-right">
+      <el-tag size="small" type="info" class="version-tag">v{{ appVersion }}</el-tag>
       <el-tag size="small" type="success">前端在线</el-tag>
       <el-dropdown trigger="click">
         <el-button text>
@@ -40,6 +41,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { CaretBottom, Expand, Fold, User } from '@element-plus/icons-vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { version as appVersion } from '../../../package.json'
 
 const route = useRoute()
 const router = useRouter()
@@ -81,6 +83,7 @@ const handleLogout = async () => {
   align-items: center;
   gap: var(--space-16);
   overflow: hidden;
+  min-width: 0;
 }
 
 .header-right {
@@ -89,5 +92,37 @@ const handleLogout = async () => {
   justify-content: flex-end;
   gap: var(--space-8);
   flex-shrink: 0;
+}
+
+.header-root :deep(.el-button.is-text) {
+  color: var(--color-text);
+}
+
+.header-root :deep(.el-button.is-text:hover) {
+  color: var(--color-primary);
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.header-root :deep(.el-breadcrumb__inner),
+.header-root :deep(.el-breadcrumb__separator) {
+  color: var(--color-text-secondary);
+}
+
+.header-root :deep(.el-tag--success) {
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.16);
+  color: #047857;
+}
+
+.header-root :deep(.el-dropdown .el-button) {
+  border-radius: 999px;
+  padding-inline: 10px;
+}
+
+.header-root :deep(.version-tag) {
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3px;
 }
 </style>

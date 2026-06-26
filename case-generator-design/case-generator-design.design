@@ -1,0 +1,33 @@
+{
+  "data": [
+    {
+      "id": "page-case-generator",
+      "title": "用例生成",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1750924800000,
+      "canvasData": {
+        "x": 0,
+        "y": 0,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/case-generator.html",
+        "interactions": []
+      }
+    }
+  ],
+  "config": {
+    "autoLayout": true,
+    "deviceType": "desktop",
+    "projectName": "用例生成",
+    "designLibrary": {
+      "name": "苹果",
+      "id": "dl_builtin_apple",
+      "version": null,
+      "scope": "built-in-global",
+      "path": "/Users/zhangyongcheng/.trae/design_libraries/dl_builtin_apple",
+      "versionSource": "selected-context"
+    }
+  }
+}

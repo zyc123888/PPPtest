@@ -64,13 +64,18 @@ onBeforeUnmount(() => {
 <style scoped>
 .layout-root {
   height: 100vh;
-  background: var(--color-bg);
+  background:
+    radial-gradient(circle at 10% 0%, rgba(99, 102, 241, 0.06), transparent 26%),
+    radial-gradient(circle at 100% 0%, rgba(168, 85, 247, 0.05), transparent 22%),
+    linear-gradient(180deg, #eef2ff 0%, #f8fbff 32%, #eef2f7 100%);
 }
 
 .layout-aside {
-  background: #ffffff;
-  border-right: 1px solid var(--el-border-color);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(249, 250, 255, 0.98));
+  border-right: 1px solid rgba(148, 163, 184, 0.18);
   overflow: hidden;
+  box-shadow: 8px 0 28px rgba(15, 23, 42, 0.04);
 }
 
 .layout-aside.is-mobile {
@@ -81,7 +86,7 @@ onBeforeUnmount(() => {
   z-index: 1201;
   transform: translateX(-100%);
   transition: transform 0.2s ease;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+  box-shadow: var(--shadow-float);
 }
 
 .layout-aside.is-mobile.is-open {
@@ -91,21 +96,22 @@ onBeforeUnmount(() => {
 .mobile-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.35);
+  background: rgba(15, 23, 42, 0.4);
   z-index: 1200;
 }
 
 .layout-header {
-  background: #ffffff;
-  border-bottom: 1px solid var(--el-border-color);
-  padding: 0 var(--space-16);
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(18px);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  padding: 0 var(--space-20);
   display: flex;
   align-items: center;
 }
 
 .layout-main {
   padding: 0;
-  background: var(--color-bg);
+  background: transparent;
   overflow: auto;
 }
 

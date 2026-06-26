@@ -95,6 +95,14 @@ async function request(path, options = {}) {
     return null
   }
 
+  if (options.responseType === 'blob') {
+    return response.blob()
+  }
+
+  if (options.responseType === 'text') {
+    return response.text()
+  }
+
   const text = await response.text()
   if (!text) return null
   return JSON.parse(text)
@@ -103,6 +111,9 @@ async function request(path, options = {}) {
 export const api = {
   get(path) {
     return request(path)
+  },
+  getBlob(path) {
+    return request(path, { responseType: 'blob' })
   },
   post(path, body) {
     if (body === undefined) {

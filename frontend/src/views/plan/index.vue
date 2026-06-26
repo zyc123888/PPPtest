@@ -6,6 +6,26 @@
       </template>
     </PageHeader>
 
+    <div class="plan-hero section-gap">
+      <el-card class="page-card plan-hero__main" shadow="never">
+        <div class="plan-hero__kicker">Execution Orchestration</div>
+        <div class="plan-hero__title">测试计划是执行的编排入口</div>
+        <div class="plan-hero__subtitle">把计划、用例配置和执行动作放在同一层级，减少切换成本，保证回归闭环清晰可见。</div>
+      </el-card>
+      <el-card class="page-card plan-hero__stat" shadow="never">
+        <el-statistic title="计划数量" :value="filteredList.length" />
+      </el-card>
+      <el-card class="page-card plan-hero__stat" shadow="never">
+        <el-statistic title="项目数" :value="projectCount" />
+      </el-card>
+      <el-card class="page-card plan-hero__stat" shadow="never">
+        <el-statistic title="可执行计划" :value="list.filter((item) => item.status === 'ACTIVE').length" />
+      </el-card>
+      <el-card class="page-card plan-hero__stat" shadow="never">
+        <el-statistic title="当前筛选" :value="filters.keyword ? '已筛选' : '全部'" />
+      </el-card>
+    </div>
+
     <el-card class="page-card section-gap" shadow="never">
       <el-form :inline="true" class="query-form" label-position="top" :model="filters">
         <el-form-item label="所属项目">
@@ -404,6 +424,8 @@ const pagedList = computed(() => {
   return filteredList.value.slice(start, start + pageSize.value)
 })
 
+const projectCount = computed(() => new Set(list.value.map((item) => item.project_id)).size)
+
 const handleCreate = () => {
   temp.project_id = projects.value.length > 0 ? projects.value[0].id : undefined
   temp.name = ''
@@ -767,6 +789,45 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.plan-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr));
+  gap: var(--space-12);
+}
+
+.plan-hero__main {
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.88)),
+    radial-gradient(circle at top right, rgba(99, 102, 241, 0.26), transparent 35%);
+  color: #f8fafc;
+}
+
+.plan-hero__kicker {
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.72);
+  margin-bottom: 10px;
+}
+
+.plan-hero__title {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: 10px;
+}
+
+.plan-hero__subtitle {
+  max-width: 760px;
+  color: rgba(226, 232, 240, 0.82);
+  line-height: 1.7;
+}
+
+.plan-hero__stat {
+  border-radius: 18px;
+}
+
 .mobile-cards {
   display: none;
 }
@@ -818,6 +879,14 @@ onMounted(() => {
 }
 
 @media (max-width: 960px) {
+  .plan-hero {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .plan-hero__main {
+    grid-column: 1 / -1;
+  }
+
   .el-table {
     display: none;
   }

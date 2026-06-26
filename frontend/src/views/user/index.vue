@@ -6,6 +6,26 @@
       </template>
     </PageHeader>
 
+    <div class="user-hero section-gap">
+      <el-card class="page-card user-hero__main" shadow="never">
+        <div class="user-hero__kicker">Access Layer</div>
+        <div class="user-hero__title">用户与角色</div>
+        <div class="user-hero__subtitle">把账号状态、角色和空间归属放在一起看，管理权限边界更直接。</div>
+      </el-card>
+      <el-card class="page-card user-hero__stat" shadow="never">
+        <el-statistic title="用户数量" :value="list.length" />
+      </el-card>
+      <el-card class="page-card user-hero__stat" shadow="never">
+        <el-statistic title="管理员" :value="adminCount" />
+      </el-card>
+      <el-card class="page-card user-hero__stat" shadow="never">
+        <el-statistic title="已绑定空间" :value="workspaceBoundCount" />
+      </el-card>
+      <el-card class="page-card user-hero__stat" shadow="never">
+        <el-statistic title="最近登录" :value="list.some((item) => item.last_login_at) ? '有' : '无'" />
+      </el-card>
+    </div>
+
     <el-card class="page-card" shadow="never">
       <el-table v-loading="listLoading" :data="list" border>
         <el-table-column label="ID" prop="id" align="center" width="80" />
@@ -167,6 +187,8 @@ const rules = computed(() => {
 
 const dialogTitle = computed(() => (isEdit.value ? '编辑用户' : '新增用户'))
 const passwordLabel = computed(() => (isEdit.value ? '重置密码（可选）' : '密码'))
+const adminCount = computed(() => list.value.filter((item) => item.role === 'admin').length)
+const workspaceBoundCount = computed(() => list.value.filter((item) => getWorkspaceMemberships(item).length > 0).length)
 
 const formatTime = (val) => {
   if (!val) return '-'
@@ -275,6 +297,57 @@ onMounted(() => {
   getList()
 })
 </script>
+
+<style scoped>
+.user-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr));
+  gap: var(--space-12);
+}
+
+.user-hero__main {
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.88)),
+    radial-gradient(circle at top right, rgba(168, 85, 247, 0.26), transparent 35%);
+  color: #f8fafc;
+}
+
+.user-hero__kicker {
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.72);
+  margin-bottom: 10px;
+}
+
+.user-hero__title {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: 10px;
+}
+
+.user-hero__subtitle {
+  max-width: 760px;
+  color: rgba(226, 232, 240, 0.82);
+  line-height: 1.7;
+}
+
+.user-hero__stat {
+  border-radius: 18px;
+}
+
+@media (max-width: 960px) {
+  .user-hero {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .user-hero__main {
+    grid-column: 1 / -1;
+  }
+}
+</style>
 
 <style scoped>
 .workspace-tags {

@@ -6,6 +6,30 @@
       </template>
     </PageHeader>
 
+    <div class="report-hero section-gap">
+      <el-card class="page-card report-hero__main" shadow="never">
+        <div class="report-hero__kicker">Quality Review</div>
+        <div class="report-hero__title">把执行结果、失败原因和趋势观察放在同一层</div>
+        <div class="report-hero__subtitle">
+          让报告不仅可下载，还能快速定位波动、预检失败和需要跟进的计划。
+        </div>
+      </el-card>
+      <el-card class="page-card report-hero__stat" shadow="never">
+        <el-statistic title="报告数量" :value="filteredReports.length" />
+      </el-card>
+      <el-card class="page-card report-hero__stat" shadow="never">
+        <el-statistic title="成功率" :value="insights.success_rate">
+          <template #suffix>%</template>
+        </el-statistic>
+      </el-card>
+      <el-card class="page-card report-hero__stat" shadow="never">
+        <el-statistic title="失败计划" :value="failedCount" />
+      </el-card>
+      <el-card class="page-card report-hero__stat" shadow="never">
+        <el-statistic title="失败用例" :value="failedCaseCount" />
+      </el-card>
+    </div>
+
     <div class="summary-grid section-gap">
       <el-card class="summary-card" shadow="never">
         <el-statistic title="报告数量" :value="filteredReports.length" />
@@ -838,6 +862,45 @@ onMounted(() => {
   gap: var(--space-12);
 }
 
+.report-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr));
+  gap: var(--space-12);
+}
+
+.report-hero__main {
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.88)),
+    radial-gradient(circle at top right, rgba(20, 184, 166, 0.28), transparent 35%);
+  color: #f8fafc;
+}
+
+.report-hero__kicker {
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.72);
+  margin-bottom: 10px;
+}
+
+.report-hero__title {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: 10px;
+}
+
+.report-hero__subtitle {
+  max-width: 760px;
+  color: rgba(226, 232, 240, 0.82);
+  line-height: 1.7;
+}
+
+.report-hero__stat {
+  border-radius: 18px;
+}
+
 .summary-card {
   border-radius: 16px;
 }
@@ -1048,6 +1111,7 @@ onMounted(() => {
 }
 
 @media (max-width: 960px) {
+  .report-hero,
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1077,6 +1141,10 @@ onMounted(() => {
     border-radius: 12px;
     padding: 14px 16px;
     box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+  }
+
+  .report-hero__main {
+    grid-column: 1 / -1;
   }
 
   .mobile-card-title {

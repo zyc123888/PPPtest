@@ -972,6 +972,27 @@ onMounted(() => {
   gap: 6px;
 }
 
+.summary-bar {
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(99, 102, 241, 0.12);
+  background:
+    radial-gradient(circle at top left, rgba(99, 102, 241, 0.08), transparent 18%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(247, 249, 255, 0.96));
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.05);
+}
+
+.summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.summary-bar :deep(.el-tag) {
+  border-radius: 999px;
+}
+
 .pending-review-board {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -979,7 +1000,10 @@ onMounted(() => {
 }
 
 .pending-card {
-  border-radius: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(99, 102, 241, 0.10);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(247, 249, 255, 0.96));
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.04);
 }
 
 .pending-stats,
@@ -1034,12 +1058,12 @@ onMounted(() => {
     gap: var(--space-12);
   }
 
-  .mobile-card {
-    background: #ffffff;
-    border: 1px solid var(--el-border-color);
-    border-radius: 12px;
+.mobile-card {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.97), rgba(248, 250, 255, 0.97));
+    border: 1px solid rgba(99, 102, 241, 0.10);
+    border-radius: 16px;
     padding: 14px 16px;
-    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.07);
   }
 
   .mobile-card-title {

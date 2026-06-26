@@ -6,6 +6,28 @@
       </template>
     </PageHeader>
 
+    <div class="project-hero section-gap">
+      <el-card class="page-card project-hero__main" shadow="never">
+        <div class="project-hero__kicker">Portfolio Layer</div>
+        <div class="project-hero__title">项目是执行与环境的归属中心</div>
+        <div class="project-hero__subtitle">统一管理基础地址、空间归属和说明信息，保证后续用例、环境和报告能自然串起来。</div>
+      </el-card>
+      <el-card class="page-card project-hero__stat" shadow="never">
+        <el-statistic title="项目数量" :value="filteredList.length" />
+      </el-card>
+      <el-card class="page-card project-hero__stat" shadow="never">
+        <el-statistic title="工作空间数" :value="workspaceCount" />
+      </el-card>
+      <el-card class="page-card project-hero__stat" shadow="never">
+        <el-statistic title="基础地址覆盖" :value="baseUrlCoverage">
+          <template #suffix>%</template>
+        </el-statistic>
+      </el-card>
+      <el-card class="page-card project-hero__stat" shadow="never">
+        <el-statistic title="当前筛选" :value="filters.keyword ? '已筛选' : '全部'" />
+      </el-card>
+    </div>
+
     <el-card class="page-card section-gap" shadow="never">
       <el-form :inline="true" class="query-form" label-position="top" :model="filters">
         <el-form-item label="工作空间">
@@ -185,6 +207,13 @@ const pagedList = computed(() => {
   return filteredList.value.slice(start, start + pageSize.value)
 })
 
+const workspaceCount = computed(() => new Set(list.value.map((item) => item.workspace_id)).size)
+const baseUrlCoverage = computed(() => {
+  if (!list.value.length) return 0
+  const readyCount = list.value.filter((item) => String(item.base_url || '').trim()).length
+  return Math.round((readyCount / list.value.length) * 100)
+})
+
 const handleCreate = () => {
   temp.workspace_id = workspaces.value.length > 0 ? workspaces.value[0].id : undefined
   temp.name = ''
@@ -243,11 +272,58 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.project-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr));
+  gap: var(--space-12);
+}
+
+.project-hero__main {
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.88)),
+    radial-gradient(circle at top right, rgba(99, 102, 241, 0.26), transparent 35%);
+  color: #f8fafc;
+}
+
+.project-hero__kicker {
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.72);
+  margin-bottom: 10px;
+}
+
+.project-hero__title {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: 10px;
+}
+
+.project-hero__subtitle {
+  max-width: 760px;
+  color: rgba(226, 232, 240, 0.82);
+  line-height: 1.7;
+}
+
+.project-hero__stat {
+  border-radius: 18px;
+}
+
 .mobile-cards {
   display: none;
 }
 
 @media (max-width: 960px) {
+  .project-hero {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .project-hero__main {
+    grid-column: 1 / -1;
+  }
+
   .el-table {
     display: none;
   }

@@ -3,7 +3,7 @@
     <div class="login-shell">
       <section class="login-hero">
         <div class="brand-badge">QA Platform</div>
-        <h1>自动化测试平台</h1>
+        <h1 class="cyber-title">OmniTest</h1>
         <p>统一管理测试资产、计划、执行与报告，支撑团队的交付效率。</p>
         <ul class="hero-points">
           <li>用例与计划一体化管理</li>
@@ -93,8 +93,9 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: radial-gradient(circle at 10% 20%, rgba(15, 118, 110, 0.18), transparent 45%),
-    radial-gradient(circle at 85% 0%, rgba(37, 99, 235, 0.2), transparent 50%),
+  background:
+    radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.18), transparent 45%),
+    radial-gradient(circle at 85% 0%, rgba(168, 85, 247, 0.2), transparent 50%),
     linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
   padding: 48px 24px;
   position: relative;
@@ -149,8 +150,8 @@ onMounted(() => {
   justify-content: center;
   padding: 6px 12px;
   border-radius: 999px;
-  background: rgba(15, 118, 110, 0.12);
-  color: #0f766e;
+  background: rgba(99, 102, 241, 0.12);
+  color: #4f46e5;
   font-weight: 600;
   font-size: 12px;
   letter-spacing: 0.08em;
@@ -158,11 +159,14 @@ onMounted(() => {
   width: fit-content;
 }
 
-.login-hero h1 {
-  margin: 0;
-  font-size: 36px;
-  line-height: 1.2;
-  letter-spacing: -0.02em;
+.cyber-title {
+  font-size: 48px;
+  font-weight: 800;
+  background: linear-gradient(135deg, #4f46e5 0%, #a855f7 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-bottom: 16px;
+  letter-spacing: -1px;
 }
 
 .login-hero p {

@@ -1,0 +1,28 @@
+- [x] FunctionPoints 模板新增 `business_context` 顶层字段，包含 system_description、user_roles、core_processes、key_constraints
+- [x] FunctionPoints 模板每个功能点新增 `related_fps` 和 `user_journey_step` 可选字段
+- [x] FunctionPoints 模板新增 `e2e_scenarios` 顶层字段
+- [x] TestcasePackage 模板每条用例新增 `scenario_type`（standalone / e2e / cross_fp）字段
+- [x] TestcasePackage 模板每条用例新增 `cross_fp_dependencies` 和 `user_persona` 字段
+- [x] TestcasePackage 模板 `generation_metadata` 新增 `generation_phase` 字段
+- [x] requirement-analyzer SKILL.md 新增"Phase 0: 业务上下文摘要"阶段
+- [x] requirement-analyzer 在功能点拆分前输出 BusinessContext 结构
+- [x] requirement-analyzer 要求每个功能点标注 related_fps 和 user_journey_step
+- [x] testcase-designer SKILL.md 重构生成顺序为"场景优先"策略
+- [x] testcase-designer 新增"具体数据代入"强制规则和空泛词汇禁止清单
+- [x] testcase-designer 新增"跨功能点关联分析"章节
+- [x] testcase-designer 新增"分层生成"章节（第一阶段核心 / 第二阶段展开）
+- [x] testcase-designer 新增"用户角色画像"要求
+- [x] quality-reviewer SKILL.md 新增"场景深度"审查维度
+- [x] quality-reviewer SKILL.md 新增"数据具体性"审查维度
+- [x] quality-reviewer SKILL.md 新增"关联覆盖"审查维度
+- [x] quality-reviewer SKILL.md 新增"用户路径完整性"审查维度
+- [x] quality-reviewer 修复判定规则更新：空泛数据用例不允许通过
+- [x] case_generation.py 适配 BusinessContext 的提取和传递
+- [x] case_generation.py 适配分层生成的 prompt 差异
+- [x] case_generation.py 适配新 TestcasePackage 字段到数据库存储
+- [x] Python 语法验证通过
+- [ ] 端到端验证：BusinessContext 正确生成（需实际运行系统）
+- [ ] 端到端验证：用例包含具体测试数据（需实际运行系统）
+- [ ] 端到端验证：端到端场景用例和跨 FP 关联用例被正确生成（需实际运行系统）
+- [ ] 端到端验证：quality-reviewer 能识别并拒绝空泛用例（需实际运行系统）
+- [ ] 端到端验证：XMind 导出在新字段下正常工作（需实际运行系统）

@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>用例生成</title>
+    <style id="theme-vars">
+/*
+ * Pinguo design tokens
+ * Brand: Pinguo
+ * Domain: Consumer imaging product
+ * Style: Restrained, elegant, Apple-inspired
+ * Theme mode: light-dark
+ * Source language: zh
+ * Output language: en
+ *
+ * Color architecture (two layers):
+ *   1. Primitive palette - six categories. brand / background / text / icon
+ *      are each a 10-step scale (50 lightest to 900 darkest). state-success and
+ *      state-error are functional colors anchored on Apple system colors.
+ *      Anchors follow Apple Human Interface Guidelines system colors
+ *      (System Blue #007AFF, System Green #34C759, System Red #FF3B30,
+ *      system grays / label / background colors).
+ *   2. Semantic tokens - :root (light) and .dark map roles onto primitives.
+ *      Components and UI kits must only consume the semantic tokens below.
+ */
+
+/* @group-priority: brand, background, text, icon, state-success, state-error */
+
+:root {
+  /* ===== PRIMITIVE PALETTE ===== */
+
+  /* brand (Indigo — 原项目主色) */
+  --brand-50: #eef2ff;
+  --brand-100: #e0e7ff;
+  --brand-200: #c7d2fe;
+  --brand-300: #a5b4fc;
+  --brand-400: #818cf8;
+  --brand-500: #6366f1; /* @primary */
+  --brand-600: #4f46e5;
+  --brand-700: #4338ca;
+  --brand-800: #3730a3;
+  --brand-900: #312e81;
+
+  /* background (原项目 Indigo 色调背景) */
+  --background-50: #ffffff;
+  --background-100: #f8fafc;
+  --background-200: #eef2ff;
+  --background-300: #e0e7ff;
+  --background-400: #c7d2fe;
+  --background-500: #a5b4fc;
+  --background-600: #64748b;
+  --background-700: #334155;
+  --background-800: #1e293b;
+  --background-900: #0f172a;
+
+  /* text (原项目 Slate 色调文字) */
+  --text-50: #f8fafc;
+  --text-100: #f1f5f9;
+  --text-200: #e2e8f0;
+  --text-300: #cbd5e1;
+  --text-400: #94a3b8;
+  --text-500: #64748b;
+  --text-600: #475569;
+  --text-700: #334155;
+  --text-800: #1e293b;
+  --text-900: #0f172a;
+
+  /* icon (与 text 对齐) */
+  --icon-50: #f8fafc;
+  --icon-100: #f1f5f9;
+  --icon-200: #e2e8f0;
+  --icon-300: #cbd5e1;
+  --icon-400: #94a3b8;
+  --icon-500: #64748b;
+  --icon-600: #475569;
+  --icon-700: #334155;
+  --icon-800: #1e293b;
+  --icon-900: #0f172a;
+
+  /* state-success (原项目 Emerald) */
+  --state-success: #10b981; /* @primary */
+  --state-success-dark: #059669;
+  --state-success-surface: #ecfdf5;
+  --state-success-foreground: #ffffff;
+
+  /* state-error (原项目 Red) */
+  --state-error: #ef4444; /* @primary */
+  --state-error-dark: #dc2626;
+  --state-error-surface: #fef2f2;
+  --state-error-foreground: #ffffff;
+
+  /* ===== SEMANTIC ROLES ===== */
+
+  /* semantic */
+  --background: var(--background-50);
+  --foreground: var(--text-800);
+  --card: var(--background-50);
+  --card-foreground: var(--text-800);
+  --popover: var(--background-50);
+  --popover-foreground: var(--text-900);
+
+  --primary: var(--brand-500);
+  --primary-foreground: var(--background-50);
+  --secondary: var(--background-200);
+  --secondary-foreground: var(--text-800);
+  --muted: var(--background-200);
+  --muted-foreground: var(--text-400);
+  --accent: var(--background-100);
+  --accent-foreground: var(--text-800);
+  --destructive: var(--state-error);
+  --destructive-foreground: var(--state-error-foreground);
+  --success: var(--state-success);
+  --success-foreground: var(--state-success-foreground);
+  --border: var(--background-300);
+  --input: var(--background-400);
+  --ring: var(--brand-500);
+
+  --icon: var(--icon-900);
+  --icon-muted: var(--icon-500);
+
+  /* chart (原项目配色) */
+  --chart-1: var(--state-success);
+  --chart-2: var(--brand-500);
+  --chart-3: #f59e0b;
+  --chart-4: #a855f7;
+  --chart-5: #0ea5e9;
+
+  /* sidebar */
+  --sidebar: var(--background-200);
+  --sidebar-foreground: var(--text-800);
+  --sidebar-primary: var(--brand-500);
+  --sidebar-primary-foreground: var(--background-50);
+  --sidebar-accent: var(--background-300);
+  --sidebar-accent-foreground: var(--text-800);
+  --sidebar-border: var(--background-300);
+  --sidebar-ring: var(--brand-500);
+
+  /* TYPOGRAPHY */
+  --font-sans: DM Sans, ui-sans-serif, sans-serif, system-ui;
+  --font-serif: DM Sans, ui-sans-serif, sans-serif, system-ui;
+  --font-mono: JetBrains Mono, monospace;
+  --tracking-normal: 0em;
+
+  /* RADIUS */
+  --radius: 1.2rem;
+
+  /* SHADOWS (原项目 Indigo 色调阴影) */
+  --shadow-2xs: 0 1px 2px -1px rgba(79, 70, 229, 0.04); /* Hairline */
+  --shadow-xs: 0 1px 2px 0 rgba(79, 70, 229, 0.04); /* Subtle */
+  --shadow-sm: 0 1px 2px 0 rgba(79, 70, 229, 0.05), 0 1px 3px -1px rgba(79, 70, 229, 0.05); /* Card */
+  --shadow: 0 2px 4px -1px rgba(79, 70, 229, 0.06), 0 1px 2px -1px rgba(15, 23, 42, 0.05); /* Raised */
+  --shadow-md: 0 4px 8px -2px rgba(79, 70, 229, 0.06), 0 2px 4px -2px rgba(15, 23, 42, 0.05); /* Card Hover */
+  --shadow-lg: 0 8px 24px -8px rgba(79, 70, 229, 0.08), 0 4px 8px -4px rgba(15, 23, 42, 0.05); /* Float */
+  --shadow-xl: 0 16px 40px -10px rgba(79, 70, 229, 0.10), 0 8px 16px -8px rgba(15, 23, 42, 0.06); /* Overlay */
+  --shadow-2xl: 0 24px 64px -12px rgba(79, 70, 229, 0.12); /* Modal */
+
+  /* SPACING */
+  --spacing: 0.24rem;
+}
+
+/* ===== SEMANTIC ROLES - dark (primitive palette inherited) ===== */
+.dark {
+  --background: var(--background-900);
+  --foreground: var(--text-50);
+  --card: var(--background-800);
+  --card-foreground: var(--text-50);
+  --popover: var(--background-700);
+  --popover-foreground: var(--text-50);
+
+  --primary: var(--brand-400);
+  --primary-foreground: var(--background-900);
+  --secondary: var(--background-800);
+  --secondary-foreground: var(--text-50);
+  --muted: var(--background-800);
+  --muted-foreground: var(--text-400);
+  --accent: var(--background-700);
+  --accent-foreground: var(--text-50);
+  --destructive: var(--state-error-dark);
+  --destructive-foreground: var(--state-error-foreground);
+  --success: var(--state-success-dark);
+  --success-foreground: var(--state-success-foreground);
+  --border: var(--background-700);
+  --input: var(--background-700);
+  --ring: var(--brand-400);
+
+  --icon: var(--icon-50);
+  --icon-muted: var(--icon-500);
+
+  --chart-1: var(--state-success-dark);
+  --chart-2: var(--brand-400);
+  --chart-3: #fbbf24;
+  --chart-4: #c084fc;
+  --chart-5: #38bdf8;
+
+  --sidebar: var(--background-800);
+  --sidebar-foreground: var(--text-50);
+  --sidebar-primary: var(--brand-400);
+  --sidebar-primary-foreground: var(--background-900);
+  --sidebar-accent: var(--background-700);
+  --sidebar-accent-foreground: var(--text-50);
+  --sidebar-border: var(--background-700);
+  --sidebar-ring: var(--brand-400);
+
+  --shadow-2xs: 0 1px 2px -1px rgba(0, 0, 0, 0.30);
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.30);
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.36), 0 1px 3px -1px rgba(0, 0, 0, 0.36);
+  --shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.40), 0 1px 2px -1px rgba(0, 0, 0, 0.36);
+  --shadow-md: 0 4px 8px -2px rgba(0, 0, 0, 0.44), 0 2px 4px -2px rgba(0, 0, 0, 0.36);
+  --shadow-lg: 0 8px 24px -8px rgba(0, 0, 0, 0.50), 0 4px 8px -4px rgba(0, 0, 0, 0.40);
+  --shadow-xl: 0 16px 40px -10px rgba(0, 0, 0, 0.55), 0 8px 16px -8px rgba(0, 0, 0, 0.44);
+  --shadow-2xl: 0 24px 64px -12px rgba(0, 0, 0, 0.60);
+}
+
+    </style>
+    <style id="component-vars">
+/*
+ * components.css - aggregated component CSS
+ * Auto-extracted from preview/component-*.html files.
+ * DO NOT EDIT. Regenerate with extract-components-css.mjs.
+ *
+ * Foundation tokens live in colors_and_type.css.
+ * This file consumes those tokens via var(--*) references.
+ */
+
+/* ============================================================
+ * Button
+ * source: preview/component-button.html
+ * rules: 10
+ */
+/* @anatomy
+   <div class="row"><span class="label">Primary 56</span><button class="btn btn-primary btn-lg">Buy now</button><button class="btn btn-primary btn-lg" disabled>Buy now</button></div>
+*/
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:calc(var(--spacing)*1.5);height:40px;padding:0 20px;border:none;border-radius:calc(var(--radius)*2);background:transparent;color:var(--foreground);font:600 14px/1 var(--font-sans);letter-spacing:var(--tracking-normal);white-space:nowrap;box-shadow:var(--shadow-sm);cursor:pointer;transition:background-color .18s ease,color .18s ease,opacity .18s ease,filter .18s ease}
+.btn:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.btn:disabled{opacity:.42;cursor:not-allowed}
+.btn-primary{background:var(--primary);color:var(--primary-foreground)}
+.btn-primary:hover{filter:brightness(.96)}
+.btn-secondary{height:48px;padding:0 24px;background:var(--secondary);color:var(--secondary-foreground)}
+.btn-secondary:hover{background:var(--muted)}
+.btn-text{height:48px;padding:0 4px;box-shadow:none}
+.btn-text:hover{color:var(--primary)}
+.btn-lg{height:56px;padding:0 28px;font-size:16px}
+
+/* ============================================================
+ * Card
+ * source: preview/component-card.html
+ * rules: 12
+ */
+/* @anatomy
+   <div class="row">
+   <span class="label">Info</span>
+   <article class="card">
+   <div><div class="eyebrow">Pinguo Apple</div>
+*/
+.card{width:188px;min-height:148px;padding:calc(var(--spacing)*5);display:flex;flex-direction:column;justify-content:space-between;background:var(--card);color:var(--card-foreground);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-md);transition:transform .18s ease,box-shadow .18s ease}
+.card:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg)}
+.card.disabled,.card.disabled:hover{opacity:.5;transform:none;box-shadow:var(--shadow-md)}
+.eyebrow,.meta{color:var(--muted-foreground);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.title{margin:6px 0 8px;font-size:18px;line-height:1.15}
+.body-copy{margin:0;color:var(--muted-foreground);font-size:13px}
+.cta{display:inline-flex;align-items:center;justify-content:center;width:max-content;margin-top:12px;padding:calc(var(--spacing)*2) calc(var(--spacing)*3.5);border-radius:999px;background:var(--primary);color:var(--primary-foreground);font-size:12px;font-weight:700;text-decoration:none}
+.media{aspect-ratio:4/3;border-radius:calc(var(--radius) - 4px);background:linear-gradient(135deg,var(--secondary),var(--accent));border:1px solid var(--border)}
+.media-card{min-height:212px;padding:calc(var(--spacing)*4)}
+.media-card .title{font-size:16px;margin:10px 0 6px}
+.price{font-size:12px;color:var(--muted-foreground)}
+.dark{background:var(--card);color:var(--card-foreground)}
+
+/* ============================================================
+ * Comparison Table
+ * source: preview/component-comparison-table.html
+ * rules: 13
+ */
+/* @anatomy
+   <div class="row"><span class="label">Default</span><div class="t"><div class="c m">Compare models</div>
+*/
+.t{display:grid;grid-template-columns:96px repeat(3,1fr);overflow:hidden;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--card-foreground);box-shadow:var(--shadow-sm)}
+.q{grid-template-columns:82px repeat(4,1fr)}
+.c{padding:10px;border-right:1px solid var(--border);border-bottom:1px solid var(--border)}
+.t>.c:nth-child(4n),.q>.c:nth-child(5n){border-right:0}
+.t>.c:nth-last-child(-n+4),.q>.c:nth-last-child(-n+5){border-bottom:0}
+.m{background:var(--background);color:var(--muted-foreground);font:700 10px/1 var(--font-mono);letter-spacing:.12em;text-transform:uppercase}
+.h{background:var(--background);font-weight:700}
+.k{display:block;font-size:14px;line-height:1.1}
+.s{display:block;margin-top:4px;color:var(--chart-2);font-size:11px;font-weight:700}
+.b .k{color:var(--chart-2)}
+.v{font-weight:600}
+.n{color:var(--muted-foreground);font-size:12px}
+.x{opacity:.45}
+
+/* ============================================================
+ * Input
+ * source: preview/component-input.html
+ * rules: 10
+ */
+/* @anatomy
+   <div class="row">
+   <span class="label">Search 44</span>
+   <div class="field">
+   <span class="icon">⌕</span>
+   <input class="control" aria-label="Search products" placeholder="Search products">
+   <button class="clear" type="button" aria-label="Clear search">×</button>
+   </div>
+*/
+.surface{display:flex;gap:calc(var(--spacing)*2);padding:calc(var(--spacing)*3);border:1px solid var(--border);border-radius:var(--radius);background:var(--card);box-shadow:var(--shadow-sm)}
+.dark{background:var(--background);color:var(--foreground)}
+.field{display:flex;align-items:center;gap:calc(var(--spacing)*2);min-width:240px;height:44px;padding:0 calc(var(--spacing)*3);border:1px solid var(--input);border-radius:var(--radius);background:var(--background);color:var(--foreground);box-shadow:var(--shadow-xs)}
+.field.small{height:40px}
+.field:focus-within{border-color:var(--ring);box-shadow:0 0 0 1px var(--ring)}
+.field.disabled{opacity:.55}
+.icon,.clear{padding:0;border:0;background:transparent;color:var(--icon-muted);font:inherit}
+.icon{font-size:13px}
+.control{flex:1;border:0;outline:0;background:transparent;color:inherit;font:inherit}
+.control::placeholder{color:var(--muted-foreground)}
+
+/* ============================================================
+ * Navigation
+ * source: preview/component-navigation.html
+ * rules: 16
+ */
+/* @anatomy
+   <div class="row"><span class="label">Global 44</span><nav class="webbar dark" aria-label="Pinguo Apple global navigation"><span class="brand">Pinguo Apple</span><div class="rail"><a class="link" href="#">Store</a><a class="link" href="#">Explore</a><a class="link" href="#">Community</a><a class="link" href="#">Support</a></div>
+*/
+.webbar,.mobile{border:1px solid var(--border);box-shadow:var(--shadow-sm)}
+.webbar{display:flex;align-items:center;gap:calc(var(--spacing)*2);min-width:320px;height:44px;padding:0 calc(var(--spacing)*3);border-radius:var(--radius);background:var(--sidebar)}
+.brand{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap}
+.link,.tab{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;color:inherit;text-decoration:none;white-space:nowrap;transition:background-color .18s ease,color .18s ease,opacity .18s ease}
+.link{height:32px;padding:0 calc(var(--spacing)*2.5)}
+.link:hover,.tab:hover{background:var(--secondary)}
+.link:focus-visible,.tab:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.dark{background:var(--sidebar);color:var(--foreground)}
+.disabled{opacity:.48}
+.disabled .link,.disabled .tab{pointer-events:none}
+.mobile{padding:calc(var(--spacing)*2);border-radius:calc(var(--radius)*1.1);background:var(--card)}
+.screen{display:flex;align-items:flex-end;justify-content:center;width:188px;height:164px;padding:calc(var(--spacing)*3);border-radius:calc(var(--radius)*.9);background:linear-gradient(180deg,var(--background),var(--secondary))}
+.tabbar{display:flex;gap:calc(var(--spacing)*1.5);padding:calc(var(--spacing)*1.5);border:1px solid var(--border);border-radius:999px;background:var(--card);box-shadow:var(--shadow-md)}
+.tab{flex-direction:column;gap:2px;min-width:56px;height:56px;padding:0 calc(var(--spacing)*1.5);font-size:11px;text-align:center}
+.dot{width:18px;height:18px;border-radius:999px;background:var(--secondary);box-shadow:inset 0 0 0 1px var(--border)}
+.tab:hover .dot{background:var(--primary)}
+
+/* ============================================================
+ * Product Grid
+ * source: preview/component-product-grid.html
+ * rules: 12
+ */
+/* @anatomy
+   <div class="row">
+   <span class="label">4-up</span>
+   <div class="grid grid-4">
+   <article class="card"><div class="media"></div>
+*/
+.grid{display:grid;gap:8px;flex:1}
+.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.card{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--card-foreground);box-shadow:var(--shadow-xs);transition:border-color .2s ease,transform .2s ease}
+.card:hover{border-color:var(--primary);transform:translateY(-1px)}
+.media{aspect-ratio:1;border-radius:calc(var(--radius) - 4px);background:linear-gradient(135deg,var(--secondary),var(--background));border:1px solid var(--border)}
+.eyebrow{color:var(--muted-foreground);font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+.title{font-size:15px;line-height:1.25}
+.price{font-variant-numeric:tabular-nums}
+.cta{display:inline-flex;align-self:flex-start;padding:7px 10px;border-radius:999px;background:var(--primary);color:var(--primary-foreground);font-size:12px;text-decoration:none}
+.muted{color:var(--muted-foreground)}
+.is-disabled{opacity:.55}
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+    <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
+    <style type="text/tailwindcss">
+  
+  @layer base {
+    body { background: var(--apple-background); color: var(--apple-foreground); }
+    td, th { @apply break-words; word-break: break-all; word-break: auto-phrase; }
+    th { @apply whitespace-nowrap; }
+  }
+    </style>
+    <style>
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+      .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      [data-icon] {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-position: center;
+        mask-position: center;
+        background-color: currentColor;
+      }
+    </style>
+</head>
+<body class="min-h-screen antialiased" style="font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'PingFang SC', 'Helvetica Neue', sans-serif; background: var(--background-100); color: var(--text-800);">
+
+    <!-- Page Shell: Sidebar + Main -->
+    <div class="flex min-h-screen">
+
+      <!-- ========== Left Sidebar Navigation ========== -->
+      <aside class="flex flex-col shrink-0" style="width: 220px; background: var(--background-50); border-right: 1px solid var(--background-300);">
+        <!-- Brand Area -->
+        <div class="flex items-center gap-2 px-5" style="height: 56px; border-bottom: 1px solid var(--background-200);">
+          <i data-lucide="shield-check" class="w-5 h-5" style="color: var(--brand-500);"></i>
+          <span class="text-base font-semibold tracking-tight" style="color: var(--text-800);">TestPilot</span>
+        </div>
+
+        <!-- Navigation Items -->
+        <nav class="flex-1 py-3 px-3" aria-label="主导航">
+          <ul class="flex flex-col gap-0.5">
+            <li>
+              <a href="#" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors duration-150" style="color: var(--text-600);">
+                <i data-lucide="layout-grid" class="w-4 h-4" style="color: var(--text-400);"></i>
+                <span>工作台</span>
+              </a>
+            </li>
+            <li>
+              <a href="#" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors duration-150" style="color: var(--text-600);">
+                <i data-lucide="folder-kanban" class="w-4 h-4" style="color: var(--text-400);"></i>
+                <span>项目管理</span>
+              </a>
+            </li>
+            <li>
+              <!-- Active parent: 用例生成 -->
+              <div class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium" style="background: var(--brand-50); color: var(--brand-500); position: relative;">
+                <span style="position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; background: var(--brand-500);"></span>
+                <i data-lucide="file-text" class="w-4 h-4" style="color: var(--brand-500);"></i>
+                <span>用例生成</span>
+                <i data-lucide="chevron-down" class="w-3.5 h-3.5 ml-auto" style="color: var(--brand-400);"></i>
+              </div>
+              <!-- Sub-items -->
+              <ul class="mt-0.5 ml-4 flex flex-col gap-0.5">
+                <li>
+                  <a href="#" class="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium" style="background: var(--brand-50); color: var(--brand-500);">
+                    <span class="w-1 h-1 rounded-full" style="background: var(--brand-500);"></span>
+                    <span>用例生成</span>
+                  </a>
+                </li>
+                <li>
+                  <a href="#" class="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm transition-colors duration-150" style="color: var(--text-500);">
+                    <span class="w-1 h-1 rounded-full" style="background: var(--background-300);"></span>
+                    <span>生成记录</span>
+                  </a>
+                </li>
+              </ul>
+            </li>
+            <li>
+              <a href="#" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors duration-150" style="color: var(--text-600);">
+                <i data-lucide="play-circle" class="w-4 h-4" style="color: var(--text-400);"></i>
+                <span>测试执行</span>
+              </a>
+            </li>
+            <li>
+              <a href="#" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors duration-150" style="color: var(--text-600);">
+                <i data-lucide="bar-chart-3" class="w-4 h-4" style="color: var(--text-400);"></i>
+                <span>测试报告</span>
+              </a>
+            </li>
+            <li>
+              <a href="#" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors duration-150" style="color: var(--text-600);">
+                <i data-lucide="bug" class="w-4 h-4" style="color: var(--text-400);"></i>
+                <span>缺陷管理</span>
+              </a>
+            </li>
+            <li>
+              <a href="#" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors duration-150" style="color: var(--text-600);">
+                <i data-lucide="settings" class="w-4 h-4" style="color: var(--text-400);"></i>
+                <span>系统设置</span>
+              </a>
+            </li>
+          </ul>
+        </nav>
+      </aside>
+
+      <!-- ========== Main Content Area ========== -->
+      <main class="flex-1 min-w-0 flex flex-col overflow-hidden">
+        <!-- Page Header -->
+        <div class="px-6 pt-5 pb-4 shrink-0 flex items-center justify-between" style="background: var(--background-50); border-bottom: 1px solid var(--background-200);">
+          <div>
+            <h1 class="text-lg font-semibold tracking-tight" style="color: var(--text-800);">用例生成</h1>
+            <p class="text-xs mt-1" style="color: var(--text-500);">把需求 Markdown 收口为证据链、功能点、测试包和 XMind 初稿</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button type="button" class="inline-flex items-center justify-center rounded-lg text-xs font-medium transition-colors duration-150" style="height: 32px; padding: 0 14px; background: var(--background-200); color: var(--text-700);">
+              刷新
+            </button>
+            <button type="button" class="inline-flex items-center justify-center rounded-lg text-xs font-medium transition-colors duration-150" style="height: 32px; padding: 0 14px; background: var(--brand-500); color: var(--background-50);">
+              <i data-lucide="sparkles" class="w-3.5 h-3.5 mr-1"></i>
+              开始生成
+            </button>
+          </div>
+        </div>
+
+        <!-- Three-Column Grid (matching original: 2fr 2fr 3fr) -->
+        <div class="flex-1 min-h-0 overflow-hidden p-4" style="display: grid; grid-template-columns: minmax(280px, 2fr) minmax(280px, 2fr) minmax(360px, 3fr); gap: 16px;">
+
+          <!-- ===== Column 1: 生成输入 ===== -->
+          <div class="min-h-0 overflow-auto rounded-xl flex flex-col" style="background: var(--background-50); border: 1px solid var(--background-200); box-shadow: var(--shadow-xs);">
+            <!-- Panel Head -->
+            <div class="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style="border-bottom: 1px solid var(--background-200);">
+              <h2 class="text-base font-bold" style="color: var(--text-800);">生成输入</h2>
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium" style="background: var(--state-success-surface); color: var(--state-success); font-size: 11px;">XMind</span>
+            </div>
+
+            <!-- Form -->
+            <div class="flex-1 min-h-0 overflow-auto px-5 py-4 flex flex-col gap-4">
+              <!-- 所属项目 -->
+              <div class="flex flex-col gap-1.5">
+                <label class="text-xs font-medium" style="color: var(--text-600);">所属项目 <span style="color: var(--state-error);">*</span></label>
+                <div class="flex items-center justify-between px-3 rounded-lg cursor-pointer transition-colors duration-150" style="height: 36px; border: 1px solid var(--background-300); background: var(--background-50);">
+                  <span class="text-sm" style="color: var(--text-400);">请选择项目</span>
+                  <i data-lucide="chevron-down" class="w-4 h-4" style="color: var(--text-400);"></i>
+                </div>
+              </div>
+
+              <!-- 任务名称 -->
+              <div class="flex flex-col gap-1.5">
+                <label class="text-xs font-medium" style="color: var(--text-600);">任务名称 <span style="color: var(--state-error);">*</span></label>
+                <input type="text" placeholder="例如：支付中心 PRD 初版用例生成" class="w-full px-3 rounded-lg text-sm transition-colors duration-150" style="height: 36px; border: 1px solid var(--background-300); background: var(--background-50); color: var(--text-800); outline: none;" onfocus="this.style.borderColor='var(--brand-500)'; this.style.boxShadow='0 0 0 3px var(--brand-100)'" onblur="this.style.borderColor='var(--background-300)'; this.style.boxShadow='none'">
+              </div>
+
+              <!-- 模型配置 -->
+              <div class="flex flex-col gap-1.5">
+                <label class="text-xs font-medium" style="color: var(--text-600);">模型配置</label>
+                <div class="flex flex-col gap-2">
+                  <input type="text" placeholder="配置名称，例如：默认 GPT 配置" class="w-full px-3 rounded-lg text-sm" style="height: 36px; border: 1px solid var(--background-300); background: var(--background-50); color: var(--text-800); outline: none;">
+                  <input type="password" placeholder="工作空间级 API Key，保存后供新建和重跑任务复用" class="w-full px-3 rounded-lg text-sm" style="height: 36px; border: 1px solid var(--background-300); background: var(--background-50); color: var(--text-800); outline: none;">
+                </div>
+              </div>
+
+              <!-- 模型 -->
+              <div class="flex flex-col gap-1.5">
+                <label class="text-xs font-medium" style="color: var(--text-600);">模型</label>
+                <div class="flex items-center justify-between px-3 rounded-lg cursor-pointer" style="height: 36px; border: 1px solid var(--background-300); background: var(--background-50);">
+                  <div class="flex items-center gap-2">
+                    <span class="inline-flex items-center justify-center rounded px-1.5 py-0.5 text-xs font-medium" style="background: var(--brand-50); color: var(--brand-500); font-size: 11px;">AI</span>
+                    <span class="text-sm font-medium" style="color: var(--text-800);">Qwen3-Max</span>
+                  </div>
+                  <i data-lucide="chevron-down" class="w-4 h-4" style="color: var(--text-400);"></i>
+                </div>
+                <input type="text" placeholder="可选：自定义 OpenAI 兼容 base_url；不填则使用预设" class="w-full px-3 rounded-lg text-sm" style="height: 36px; border: 1px solid var(--background-300); background: var(--background-50); color: var(--text-800); outline: none;">
+                <div class="flex gap-2">
+                  <button type="button" class="inline-flex items-center justify-center rounded-lg text-xs font-medium transition-colors duration-150" style="height: 28px; padding: 0 12px; background: var(--background-200); color: var(--text-700);">读取已保存配置</button>
+                  <button type="button" class="inline-flex items-center justify-center rounded-lg text-xs font-medium transition-colors duration-150" style="height: 28px; padding: 0 12px; background: var(--brand-500); color: var(--background-50);">保存模型配置</button>
+                </div>
+              </div>
+
+              <!-- 需求来源 -->
+              <div class="flex flex-col gap-1.5">
+                <label class="text-xs font-medium" style="color: var(--text-600);">需求来源</label>
+                <div class="flex w-full" style="border: 1px solid var(--background-300); border-radius: 8px; overflow: hidden;">
+                  <button type="button" class="flex-1 text-xs font-medium py-2 transition-colors duration-150" style="background: var(--brand-500); color: var(--background-50); border-right: 1px solid var(--brand-600);">粘贴文本</button>
+                  <button type="button" class="flex-1 text-xs font-medium py-2 transition-colors duration-150" style="background: var(--background-50); color: var(--text-600); border-right: 1px solid var(--background-300);">上传文档</button>
+                  <button type="button" class="flex-1 text-xs font-medium py-2 transition-colors duration-150" style="background: var(--background-50); color: var(--text-600);">需求链接</button>
+                </div>
+              </div>
+
+              <!-- 需求 Markdown -->
+              <div class="flex flex-col gap-1.5">
+                <label class="text-xs font-medium" style="color: var(--text-600);">需求 Markdown <span style="color: var(--state-error);">*</span></label>
+                <textarea placeholder="# 登录模块&#10;- 支持用户名密码登录&#10;- 首次登录需要验证码&#10;&#10;# 权限管理&#10;- 不同角色显示不同菜单" class="w-full px-3 py-2.5 rounded-lg text-sm resize-none transition-colors duration-150" style="min-height: 138px; border: 1px solid var(--background-300); background: var(--background-50); color: var(--text-800); line-height: 1.6; outline: none; font-family: 'SF Pro Text', 'PingFang SC', sans-serif;" onfocus="this.style.borderColor='var(--brand-500)'; this.style.boxShadow='0 0 0 3px var(--brand-100)'" onblur="this.style.borderColor='var(--background-300)'; this.style.boxShadow='none'"></textarea>
+              </div>
+
+              <!-- Form Footer -->
+              <div class="flex items-center justify-between pt-1">
+                <div class="flex items-center gap-2">
+                  <div class="flex items-center gap-1.5">
+                    <div class="w-3.5 h-3.5 rounded" style="border: 1.5px solid var(--brand-500); background: var(--brand-500); display: flex; align-items: center; justify-content: center;">
+                      <i data-lucide="check" class="w-2.5 h-2.5" style="color: var(--background-50);"></i>
+                    </div>
+                    <span class="text-xs" style="color: var(--text-600);">同时导出 XMind</span>
+                  </div>
+                  <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs" style="background: var(--background-200); color: var(--text-500); font-size: 11px;">默认开启</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ===== Column 2: 最近任务 ===== -->
+          <div class="min-h-0 overflow-auto rounded-xl flex flex-col" style="background: var(--background-50); border: 1px solid var(--background-200); box-shadow: var(--shadow-xs);">
+            <!-- Panel Head -->
+            <div class="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style="border-bottom: 1px solid var(--background-200);">
+              <h2 class="text-base font-bold" style="color: var(--text-800);">最近任务</h2>
+            </div>
+
+            <!-- Job List -->
+            <div class="flex-1 min-h-0 overflow-auto px-4 py-4 flex flex-col gap-3">
+              <!-- Pinned: Running Job -->
+              <div>
+                <div class="text-xs font-bold tracking-wide mb-2" style="color: var(--brand-500); letter-spacing: 0.04em; text-transform: uppercase; font-size: 11px;">进行中</div>
+                <div class="rounded-xl p-3 cursor-pointer transition-all duration-150" style="border: 1px solid rgba(79, 70, 229, 0.26); background: rgba(246, 248, 255, 0.92); min-height: 80px;">
+                  <div class="text-sm font-bold" style="color: var(--text-800);">支付中心 PRD 初版用例生成</div>
+                  <div class="flex items-center justify-between mt-2">
+                    <span class="text-xs" style="color: var(--text-500);">#1024</span>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium" style="background: var(--brand-50); color: var(--brand-500); font-size: 11px;">
+                      <span class="w-1.5 h-1.5 rounded-full mr-1" style="background: var(--brand-500); animation: pulse-dot 1.5s ease-in-out infinite;"></span>
+                      RUNNING
+                    </span>
+                  </div>
+                  <div class="text-xs mt-2" style="color: var(--text-500); line-height: 1.5;">正在解析登录模块与权限管理的测试场景...</div>
+                </div>
+              </div>
+
+              <!-- Job 2 -->
+              <div class="rounded-xl p-3 cursor-pointer transition-all duration-150" style="border: 1px solid rgba(99, 102, 241, 0.12); background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(246,248,255,0.96)); min-height: 80px;">
+                <div class="text-sm font-bold" style="color: var(--text-800);">订单管理测试用例</div>
+                <div class="flex items-center justify-between mt-2">
+                  <span class="text-xs" style="color: var(--text-500);">#1023</span>
+                  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium" style="background: var(--state-success-surface); color: var(--state-success); font-size: 11px;">SUCCESS</span>
+                </div>
+                <div class="text-xs mt-2" style="color: var(--text-500); line-height: 1.5;">已生成 128 条用例，覆盖 12 个业务场景</div>
+              </div>
+
+              <!-- Job 3 -->
+              <div class="rounded-xl p-3 cursor-pointer transition-all duration-150" style="border: 1px solid rgba(99, 102, 241, 0.12); background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(246,248,255,0.96)); min-height: 80px;">
+                <div class="text-sm font-bold" style="color: var(--text-800);">支付流程回归用例</div>
+                <div class="flex items-center justify-between mt-2">
+                  <span class="text-xs" style="color: var(--text-500);">#1022</span>
+                  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium" style="background: var(--state-success-surface); color: var(--state-success); font-size: 11px;">SUCCESS</span>
+                </div>
+                <div class="text-xs mt-2" style="color: var(--text-500); line-height: 1.5;">已生成 86 条用例，覆盖 8 个支付场景</div>
+              </div>
+
+              <!-- Job 4 -->
+              <div class="rounded-xl p-3 cursor-pointer transition-all duration-150" style="border: 1px solid rgba(99, 102, 241, 0.12); background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(246,248,255,0.96)); min-height: 80px;">
+                <div class="text-sm font-bold" style="color: var(--text-800);">用户权限模块用例</div>
+                <div class="flex items-center justify-between mt-2">
+                  <span class="text-xs" style="color: var(--text-500);">#1021</span>
+                  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium" style="background: var(--state-error-surface); color: var(--state-error); font-size: 11px;">FAILED</span>
+                </div>
+                <div class="text-xs mt-2" style="color: var(--text-500); line-height: 1.5;">模型返回超时，请检查 API Key 配置</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ===== Column 3: 结果详情 ===== -->
+          <div class="min-h-0 overflow-auto rounded-xl flex flex-col" style="background: var(--background-50); border: 1px solid var(--background-200); box-shadow: var(--shadow-xs);">
+            <!-- Panel Head -->
+            <div class="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style="border-bottom: 1px solid var(--background-200);">
+              <h2 class="text-base font-bold" style="color: var(--text-800);">结果详情</h2>
+              <div class="flex items-center gap-1.5">
+                <button type="button" class="inline-flex items-center justify-center rounded-lg text-xs font-medium transition-colors duration-150" style="height: 28px; padding: 0 10px; background: var(--background-200); color: var(--text-700);">重跑</button>
+                <button type="button" class="inline-flex items-center justify-center rounded-lg text-xs font-medium transition-colors duration-150" style="height: 28px; padding: 0 10px; background: var(--background-200); color: var(--text-700);">刷新详情</button>
+              </div>
+            </div>
+
+            <!-- Detail Content -->
+            <div class="flex-1 min-h-0 overflow-auto px-5 py-4 flex flex-col gap-4">
+              <!-- Summary -->
+              <div class="rounded-xl p-3.5 flex flex-col gap-2.5" style="background: rgba(248, 250, 255, 0.88);">
+                <div class="flex items-center gap-2.5">
+                  <span class="text-xs shrink-0" style="color: var(--text-500); width: 36px;">状态</span>
+                  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium" style="background: var(--brand-50); color: var(--brand-500); font-size: 11px;">
+                    <span class="w-1.5 h-1.5 rounded-full mr-1" style="background: var(--brand-500); animation: pulse-dot 1.5s ease-in-out infinite;"></span>
+                    RUNNING
+                  </span>
+                </div>
+                <div class="flex items-center gap-2.5">
+                  <span class="text-xs shrink-0" style="color: var(--text-500); width: 36px;">摘要</span>
+                  <strong class="text-sm" style="color: var(--text-800);">正在解析登录模块与权限管理的测试场景</strong>
+                </div>
+                <div class="flex items-center gap-2.5">
+                  <span class="text-xs shrink-0" style="color: var(--text-500); width: 36px;">来源</span>
+                  <span class="text-sm" style="color: var(--text-700);">支付中心 PRD v2.1.md</span>
+                </div>
+              </div>
+
+              <!-- Progress Card -->
+              <div class="rounded-xl p-4 flex flex-col gap-3.5" style="border: 1px solid rgba(99, 102, 241, 0.14); background: radial-gradient(circle at 8% 0%, rgba(79, 70, 229, 0.1), transparent 32%), linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(246, 248, 255, 0.9)); box-shadow: 0 18px 44px rgba(79, 70, 229, 0.08);">
+                <!-- Progress Head -->
+                <div class="flex items-start justify-between gap-4">
+                  <div>
+                    <div class="text-sm font-bold" style="color: var(--text-800);">执行进度</div>
+                    <div class="text-xs mt-1" style="color: var(--text-500);">当前阶段：设计</div>
+                  </div>
+                  <div class="text-sm font-extrabold px-2.5 py-1 rounded-full" style="color: var(--brand-700); background: var(--brand-50); border: 1px solid rgba(99, 102, 241, 0.16);">65%</div>
+                </div>
+
+                <!-- Progress Track -->
+                <div class="w-full rounded-full" style="height: 10px; background: rgba(226, 232, 240, 0.9);">
+                  <div class="h-full rounded-full transition-all duration-300" style="width: 65%; background: linear-gradient(90deg, #2563eb, #4f46e5 52%, #14b8a6); box-shadow: 0 0 18px rgba(79, 70, 229, 0.28);"></div>
+                </div>
+
+                <!-- Stage Rail (6 stages) -->
+                <div class="flex gap-2" style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));">
+                  <!-- Stage 1: 收集 (success) -->
+                  <div class="flex flex-col items-center gap-1.5">
+                    <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-extrabold" style="border: 1px solid rgba(20, 184, 166, 0.22); color: #0f766e; background: linear-gradient(135deg, rgba(204, 251, 241, 0.96), rgba(240, 253, 250, 0.96));">1</div>
+                    <span class="text-xs font-bold truncate max-w-full" style="color: var(--text-600);">收集</span>
+                    <span class="text-xs" style="color: var(--text-400); font-size: 11px;">8s</span>
+                  </div>
+                  <!-- Stage 2: 识图 (success) -->
+                  <div class="flex flex-col items-center gap-1.5">
+                    <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-extrabold" style="border: 1px solid rgba(20, 184, 166, 0.22); color: #0f766e; background: linear-gradient(135deg, rgba(204, 251, 241, 0.96), rgba(240, 253, 250, 0.96));">2</div>
+                    <span class="text-xs font-bold truncate max-w-full" style="color: var(--text-600);">识图</span>
+                    <span class="text-xs" style="color: var(--text-400); font-size: 11px;">3s</span>
+                  </div>
+                  <!-- Stage 3: 分析 (success) -->
+                  <div class="flex flex-col items-center gap-1.5">
+                    <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-extrabold" style="border: 1px solid rgba(20, 184, 166, 0.22); color: #0f766e; background: linear-gradient(135deg, rgba(204, 251, 241, 0.96), rgba(240, 253, 250, 0.96));">3</div>
+                    <span class="text-xs font-bold truncate max-w-full" style="color: var(--text-600);">分析</span>
+                    <span class="text-xs" style="color: var(--text-400); font-size: 11px;">12s</span>
+                  </div>
+                  <!-- Stage 4: 设计 (running) -->
+                  <div class="flex flex-col items-center gap-1.5">
+                    <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-extrabold" style="border: 1px solid rgba(79, 70, 229, 0.34); color: #ffffff; background: linear-gradient(135deg, #2563eb, #4f46e5); box-shadow: 0 10px 22px rgba(79, 70, 229, 0.28);">4</div>
+                    <span class="text-xs font-bold truncate max-w-full" style="color: var(--brand-500);">设计</span>
+                  </div>
+                  <!-- Stage 5: 评审 (pending) -->
+                  <div class="flex flex-col items-center gap-1.5">
+                    <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-extrabold" style="border: 1px solid rgba(148, 163, 184, 0.3); background: rgba(255, 255, 255, 0.88); color: var(--text-400);">5</div>
+                    <span class="text-xs font-bold truncate max-w-full" style="color: var(--text-400);">评审</span>
+                  </div>
+                  <!-- Stage 6: 导出 (pending) -->
+                  <div class="flex flex-col items-center gap-1.5">
+                    <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-extrabold" style="border: 1px solid rgba(148, 163, 184, 0.3); background: rgba(255, 255, 255, 0.88); color: var(--text-400);">6</div>
+                    <span class="text-xs font-bold truncate max-w-full" style="color: var(--text-400);">导出</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Stage Summaries -->
+              <div class="flex flex-col gap-2.5">
+                <!-- Stage: 收集 -->
+                <div class="rounded-xl p-3" style="border: 1px solid rgba(20, 184, 166, 0.2); background: rgba(255, 255, 255, 0.78);">
+                  <div class="flex items-center justify-between mb-1.5">
+                    <span class="text-xs font-semibold" style="color: var(--text-800);">收集</span>
+                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs" style="background: var(--state-success-surface); color: var(--state-success); font-size: 11px;">success</span>
+                  </div>
+                  <div class="text-xs" style="color: var(--text-500); line-height: 1.5;">已收集需求文档内容，共 2,847 字</div>
+                </div>
+                <!-- Stage: 识图 -->
+                <div class="rounded-xl p-3" style="border: 1px solid rgba(20, 184, 166, 0.2); background: rgba(255, 255, 255, 0.78);">
+                  <div class="flex items-center justify-between mb-1.5">
+                    <span class="text-xs font-semibold" style="color: var(--text-800);">识图</span>
+                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs" style="background: var(--state-success-surface); color: var(--state-success); font-size: 11px;">success</span>
+                  </div>
+                  <div class="text-xs" style="color: var(--text-500); line-height: 1.5;">无图片内容，跳过识图阶段</div>
+                </div>
+                <!-- Stage: 分析 -->
+                <div class="rounded-xl p-3" style="border: 1px solid rgba(20, 184, 166, 0.2); background: rgba(255, 255, 255, 0.78);">
+                  <div class="flex items-center justify-between mb-1.5">
+                    <span class="text-xs font-semibold" style="color: var(--text-800);">分析</span>
+                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs" style="background: var(--state-success-surface); color: var(--state-success); font-size: 11px;">success</span>
+                  </div>
+                  <div class="text-xs" style="color: var(--text-500); line-height: 1.5;">识别出 3 个功能模块、12 个功能点、5 个业务规则</div>
+                </div>
+                <!-- Stage: 设计 (running) -->
+                <div class="rounded-xl p-3" style="border: 1px solid rgba(79, 70, 229, 0.24); background: linear-gradient(135deg, rgba(238, 242, 255, 0.92), rgba(255, 255, 255, 0.82));">
+                  <div class="flex items-center justify-between mb-1.5">
+                    <span class="text-xs font-semibold" style="color: var(--brand-500);">设计</span>
+                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs" style="background: var(--brand-warning-bg, #fffbeb); color: var(--brand-warning, #f59e0b); font-size: 11px;">running</span>
+                  </div>
+                  <div class="text-xs" style="color: var(--text-500); line-height: 1.5;">正在生成登录模块和权限管理的测试用例...</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </main>
+    </div>
+
+    <!-- Animations -->
+    <style>
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      @keyframes pulse-dot {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+      /* Hover states for nav items */
+      aside nav a:hover {
+        background: var(--background-100);
+        color: var(--text-800);
+      }
+      /* Hover for source type cards (unselected) */
+      button[type="button"]:hover {
+        filter: brightness(0.98);
+      }
+      /* Primary button hover */
+      button[style*="brand-500"]:hover {
+        filter: brightness(0.94);
+      }
+      /* Secondary button hover */
+      button[style*="background-200"]:hover {
+        background: var(--background-300) !important;
+      }
+      /* Focus visible for interactive elements */
+      button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible {
+        outline: 2px solid var(--brand-500);
+        outline-offset: 2px;
+      }
+    </style>
+
+    <script>lucide.createIcons();</script>
+</body>
+</html>

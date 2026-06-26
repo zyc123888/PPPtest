@@ -6,6 +6,28 @@
       </template>
     </PageHeader>
 
+    <div class="execution-hero section-gap">
+      <el-card class="page-card execution-hero__main" shadow="never">
+        <div class="execution-hero__kicker">Run Monitor</div>
+        <div class="execution-hero__title">执行流转与产物留痕统一视图</div>
+        <div class="execution-hero__subtitle">
+          聚合当前执行态、失败风险、超时与重跑信息，让排查入口更靠前。
+        </div>
+      </el-card>
+      <el-card class="page-card execution-hero__stat" shadow="never">
+        <el-statistic title="当前可见执行" :value="filteredList.length" />
+      </el-card>
+      <el-card class="page-card execution-hero__stat" shadow="never">
+        <el-statistic title="运行中" :value="runningCount" />
+      </el-card>
+      <el-card class="page-card execution-hero__stat" shadow="never">
+        <el-statistic title="失败/异常" :value="failedCount" />
+      </el-card>
+      <el-card class="page-card execution-hero__stat" shadow="never">
+        <el-statistic title="可重跑" :value="retryableCount" />
+      </el-card>
+    </div>
+
     <el-card class="page-card section-gap" shadow="never">
       <el-form :inline="true" class="query-form" label-position="top" :model="filters">
         <el-form-item label="类型">
@@ -341,6 +363,10 @@ const pagedList = computed(() => {
   return filteredList.value.slice(start, start + pageSize.value)
 })
 
+const runningCount = computed(() => list.value.filter((item) => item.status === 'RUNNING').length)
+const failedCount = computed(() => list.value.filter((item) => ['FAILED', 'ERROR', 'TIMEOUT'].includes(item.status)).length)
+const retryableCount = computed(() => list.value.filter((item) => item.status !== 'SUCCESS').length)
+
 const handleSearch = () => {
   page.value = 1
 }
@@ -456,6 +482,45 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.execution-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr));
+  gap: var(--space-12);
+}
+
+.execution-hero__main {
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.88)),
+    radial-gradient(circle at top right, rgba(99, 102, 241, 0.35), transparent 35%);
+  color: #f8fafc;
+}
+
+.execution-hero__kicker {
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.72);
+  margin-bottom: 10px;
+}
+
+.execution-hero__title {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: 10px;
+}
+
+.execution-hero__subtitle {
+  max-width: 760px;
+  color: rgba(226, 232, 240, 0.82);
+  line-height: 1.7;
+}
+
+.execution-hero__stat {
+  border-radius: 18px;
+}
+
 .mobile-cards {
   display: none;
 }
@@ -571,6 +636,14 @@ onBeforeUnmount(() => {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-8);
+  }
+
+  .execution-hero {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .execution-hero__main {
+    grid-column: 1 / -1;
   }
 }
 </style>

@@ -6,6 +6,26 @@
       </template>
     </PageHeader>
 
+    <div class="ui-hero section-gap">
+      <el-card class="page-card ui-hero__main" shadow="never">
+        <div class="ui-hero__kicker">Visual Checks</div>
+        <div class="ui-hero__title">UI 巡检用例</div>
+        <div class="ui-hero__subtitle">聚焦目标地址、期望文本和步骤定义，让页面巡检与执行预检保持同一套产品化体验。</div>
+      </el-card>
+      <el-card class="page-card ui-hero__stat" shadow="never">
+        <el-statistic title="UI 用例" :value="filteredList.length" />
+      </el-card>
+      <el-card class="page-card ui-hero__stat" shadow="never">
+        <el-statistic title="项目数" :value="projectCount" />
+      </el-card>
+      <el-card class="page-card ui-hero__stat" shadow="never">
+        <el-statistic title="标签数" :value="tagOptions.length" />
+      </el-card>
+      <el-card class="page-card ui-hero__stat" shadow="never">
+        <el-statistic title="当前筛选" :value="filters.keyword ? '已筛选' : '全部'" />
+      </el-card>
+    </div>
+
     <el-card class="page-card section-gap" shadow="never">
       <el-form :inline="true" class="query-form" label-position="top" :model="filters">
         <el-form-item label="所属项目">
@@ -300,6 +320,8 @@ const pagedList = computed(() => {
   return filteredList.value.slice(start, start + pageSize.value)
 })
 
+const projectCount = computed(() => new Set(list.value.map((item) => item.project_id)).size)
+
 const getList = async () => {
   listLoading.value = true
   try {
@@ -471,6 +493,45 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.ui-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr));
+  gap: var(--space-12);
+}
+
+.ui-hero__main {
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.88)),
+    radial-gradient(circle at top right, rgba(99, 102, 241, 0.26), transparent 35%);
+  color: #f8fafc;
+}
+
+.ui-hero__kicker {
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.72);
+  margin-bottom: 10px;
+}
+
+.ui-hero__title {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: 10px;
+}
+
+.ui-hero__subtitle {
+  max-width: 760px;
+  color: rgba(226, 232, 240, 0.82);
+  line-height: 1.7;
+}
+
+.ui-hero__stat {
+  border-radius: 18px;
+}
+
 .mobile-cards {
   display: none;
 }
@@ -505,6 +566,14 @@ onMounted(() => {
 }
 
 @media (max-width: 960px) {
+  .ui-hero {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ui-hero__main {
+    grid-column: 1 / -1;
+  }
+
   .el-table {
     display: none;
   }
