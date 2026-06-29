@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     case_gen_requirement_section_text_limit: int = 1200
     case_gen_requirement_total_text_limit: int = 36000
     case_gen_requirement_batch_text_limit: int = 700
+    case_gen_requirement_max_tokens: int = 8000
     case_gen_pending_confirmation_limit: int = 12
     case_gen_pending_confirmation_text_limit: int = 220
     case_gen_function_point_text_limit: int = 320

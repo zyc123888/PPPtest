@@ -49,6 +49,7 @@ _IMAGE_ANALYSIS_BATCH_SIZE = settings.case_gen_image_analysis_batch_size
 _REQUIREMENT_SECTION_TEXT_LIMIT = settings.case_gen_requirement_section_text_limit
 _REQUIREMENT_TOTAL_TEXT_LIMIT = settings.case_gen_requirement_total_text_limit
 _REQUIREMENT_BATCH_TEXT_LIMIT = settings.case_gen_requirement_batch_text_limit
+_REQUIREMENT_MAX_TOKENS = settings.case_gen_requirement_max_tokens
 _PENDING_CONFIRMATION_LIMIT = settings.case_gen_pending_confirmation_limit
 _PENDING_CONFIRMATION_TEXT_LIMIT = settings.case_gen_pending_confirmation_text_limit
 _FUNCTION_POINT_TEXT_LIMIT = settings.case_gen_function_point_text_limit
@@ -145,23 +146,6 @@ def _is_incomplete_json_error(error: Exception | str) -> bool:
         "未闭合",
     )
     return any(marker in text for marker in markers)
-_GENERIC_EXPECTATION_REPLACEMENTS = {
-    "系统正常": "页面状态、接口返回和数据记录均可被复核",
-    "结果正确": "关键字段、状态值和数据记录与规则一致",
-    "功能正常": "相关入口、状态流转和数据记录均可被复核",
-    "符合预期": "页面状态、接口返回字段或数据记录可被复核",
-    "操作成功": "操作后状态、提示文案和数据记录完成更新",
-    "结果符合需求": "结果中的字段、状态和业务记录与需求规则一致",
-    "符合需求": "字段、状态和业务记录与需求规则一致",
-    "满足需求": "字段、状态和业务记录与需求规则一致",
-    "按预期": "页面状态、接口返回字段或数据记录可被复核",
-    "正确显示": "展示指定字段、排序位置、选中状态或提示文案",
-    "正常显示": "展示指定字段、排序位置、选中状态或提示文案",
-    "校验通过": "校验结果展示为可复核的状态、提示或记录",
-    "验证通过": "验证结果展示为可复核的状态、提示或记录",
-    "观察页面、接口和数据结果": "核对页面状态、接口返回和数据记录",
-    "观察结果": "核对页面状态、接口返回和数据记录",
-}
 
 
 def _compact_case_text(value) -> str:
@@ -179,21 +163,8 @@ def _compact_case_text(value) -> str:
     return str(value or "").strip()
 
 
-def _sanitize_expected_phrase(value: str) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    for pattern, replacement in _GENERIC_EXPECTATION_REPLACEMENTS.items():
-        text = text.replace(pattern, replacement)
-    return text.strip(" ；;，,")
 
 
-def _expected_results_are_generic(expected_results) -> bool:
-    if isinstance(expected_results, str):
-        expected_text = expected_results
-    elif isinstance(expected_results, list):
-        expected_text = " ".join(str(item) for item in expected_results)
-    else:
-        expected_text = ""
-    return _text_contains_any(expected_text, _GENERIC_EXPECTATION_PATTERNS)
 
 
 def _expected_has_observable_anchor(expected_results) -> bool:
@@ -206,19 +177,6 @@ def _expected_has_observable_anchor(expected_results) -> bool:
     return _text_contains_any(expected_text, _EXPECTED_OBSERVABLE_ANCHORS)
 
 
-def _normalize_expected_results_list(expected_results) -> list[str]:
-    if isinstance(expected_results, str):
-        items = [expected_results]
-    elif isinstance(expected_results, list):
-        items = expected_results
-    else:
-        items = []
-    normalized: list[str] = []
-    for item in items:
-        text = _sanitize_expected_phrase(str(item))
-        if text:
-            normalized.append(text)
-    return normalized
 
 
 _CATEGORY_LABELS = {
@@ -343,6 +301,26 @@ def _category_label(category: str | None) -> str:
     return _CATEGORY_LABELS.get(_normalize_category(category), "功能")
 
 
+# 总纲展示层中文化：测试方法名（generation_basis.method / method_coverage 键）
+_METHOD_LABELS = {
+    "equivalence": "等价类",
+    "boundary": "边界值",
+    "decision_table": "决策表",
+    "state_transition": "状态转换",
+    "role_matrix": "角色权限",
+    "entry_consistency": "多入口一致性",
+    "default_or_empty": "空值默认",
+    "error_tolerance": "异常容错",
+    "time_or_sequence": "时间时序",
+    "ui_interaction": "UI交互",
+}
+
+
+def _method_label(method: str | None) -> str:
+    key = str(method or "").strip().lower()
+    return _METHOD_LABELS.get(key, str(method or "").strip() or "其他")
+
+
 def _short_text(value, limit: int = 120) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -377,308 +355,14 @@ def _assign_requirement_groups(function_points: dict) -> None:
         fp["requirement_group_title"] = group_title
 
 
-def _build_specific_expected_results(case: dict, fp: dict) -> list[str]:
-    title = str(case.get("title") or fp.get("title") or case.get("fp_id") or "").strip()
-    module = str(case.get("module") or fp.get("module") or "需求模块").strip()
-    scene = str(case.get("scene") or fp.get("scene") or "需求场景").strip()
-    description = _compact_case_text(fp.get("description"))
-    rules = _compact_case_text(fp.get("rules"))
-    hints = fp.get("test_hints") or {}
-    positive = _compact_case_text(hints.get("positive"))
-    boundary = _compact_case_text(hints.get("boundary"))
-    negative = _compact_case_text(hints.get("negative"))
-    action_preview = ""
-    steps = case.get("steps") or []
-    if isinstance(steps, list) and steps:
-        first_step = steps[0]
-        if isinstance(first_step, dict):
-            action_preview = str(first_step.get("action") or first_step.get("expected") or "").strip()
-        else:
-            action_preview = str(first_step).strip()
-
-    summary_parts = [part for part in [title, module, scene, description[:80], rules[:80]] if part]
-    base = "；".join(summary_parts[:3]) if summary_parts else (title or module or scene)
-    if action_preview:
-        base = f"{base}；执行{action_preview[:40]}后"
-    if positive:
-        primary = f"{base}，页面展示、接口返回或数据记录应体现：{positive[:120]}"
-    else:
-        primary = f"{base}，应产生可观察的页面状态、接口字段或后台记录变化，并可通过日志/列表/详情页复核"
-
-    secondary_bits = [item for item in [boundary, negative] if item]
-    if secondary_bits:
-        secondary = f"边界/异常场景下，提示文案、状态流转、拦截结果或数据记录应体现：{'；'.join(secondary_bits)[:180]}"
-    else:
-        secondary = f"{scene} 相关关键字段、状态值、筛选结果或操作记录应可在页面/接口/数据库侧复核"
-
-    return [_sanitize_expected_phrase(primary), _sanitize_expected_phrase(secondary)]
 
 
-def _ensure_specific_expected_results(case: dict, fp: dict) -> list[str]:
-    expected_results = _normalize_expected_results_list(case.get("expected_results"))
-    expected_text = " ".join(expected_results)
-    needs_rebuild = (
-        not expected_results
-        or len(expected_text) < 40
-        or _expected_results_are_generic(expected_results)
-        or not _expected_has_observable_anchor(expected_results)
-    )
-    if needs_rebuild:
-        expected_results = _normalize_expected_results_list(_build_specific_expected_results(case, fp))
-
-    if len(expected_results) < 2:
-        fallback = _build_specific_expected_results(case, fp)
-        for item in fallback:
-            text = _sanitize_expected_phrase(item)
-            if text and text not in expected_results:
-                expected_results.append(text)
-            if len(expected_results) >= 2:
-                break
-
-    expected_text = " ".join(expected_results)
-    if _expected_results_are_generic(expected_results):
-        expected_results = [_sanitize_expected_phrase(item) for item in expected_results]
-    if not _expected_has_observable_anchor(expected_results):
-        expected_results.append(
-            "核对页面状态、接口返回字段、后台数据记录或任务日志，确保实际结果可复核并能追溯到对应需求规则"
-        )
-    if len(" ".join(expected_results)) < 40:
-        expected_results.append(
-            "关键业务对象的字段值、状态流转、提示文案和持久化记录应与功能点规则一致"
-        )
-    return [item for item in expected_results if item]
 
 
-def _build_specific_steps(case: dict, fp: dict) -> list[dict]:
-    title = str(case.get("title") or fp.get("title") or case.get("fp_id") or "当前功能点").strip()
-    module = str(case.get("module") or fp.get("module") or "需求模块").strip()
-    scene = str(case.get("scene") or fp.get("scene") or "需求场景").strip()
-    description = _compact_case_text(fp.get("description")) or title
-    rules = _compact_case_text(fp.get("rules"))
-    hints = fp.get("test_hints") or {}
-    positive = _compact_case_text(hints.get("positive")) or description
-    boundary = _compact_case_text(hints.get("boundary"))
-    test_data = case.get("test_data") or []
-    if isinstance(test_data, list):
-        data_text = "；".join(str(item) for item in test_data[:3] if str(item).strip())
-    else:
-        data_text = str(test_data or "").strip()
-    if not data_text:
-        data_text = rules[:120] or positive[:120] or description[:120]
-
-    return [
-        {
-            "step_no": 1,
-            "action": f"打开 {module} 中的 {scene} 功能入口，定位到与「{title}」相关的配置、列表或操作区域",
-            "expected": f"页面或接口入口可用，能看到与「{module}/{scene}」相关的业务对象或操作控件",
-        },
-        {
-            "step_no": 2,
-            "action": f"准备并录入测试条件：{data_text}",
-            "expected": "测试数据可被页面、接口或后台任务识别，未出现前置校验异常",
-        },
-        {
-            "step_no": 3,
-            "action": f"按需求执行「{description[:140]}」对应的核心操作或触发流程",
-            "expected": f"系统按「{positive[:160]}」处理，并产生可观察的页面状态、接口返回或数据变更",
-        },
-        {
-            "step_no": 4,
-            "action": f"核验结果并补充检查边界/异常条件：{(boundary or rules or description)[:140]}",
-            "expected": f"结果与功能点 {fp.get('fp_id') or case.get('fp_id') or ''} 的规则一致，关键状态、记录、提示信息可复核",
-        },
-    ]
 
 
-def _build_variant_steps(case: dict, fp: dict, variant: dict) -> list[dict]:
-    title = str(fp.get("title") or case.get("title") or "当前功能点").strip()
-    module = str(case.get("module") or fp.get("module") or "需求模块").strip()
-    scene = str(case.get("scene") or fp.get("scene") or "需求场景").strip()
-    focus = str(variant.get("focus") or _compact_case_text(fp.get("description")) or title).strip()
-    key = str(variant.get("key") or "").strip()
-    step_map = {
-        "default_state": [
-            f"进入 {module} 的 {scene} 页面，刷新后不做任何筛选或编辑操作",
-            "检查默认可见字段、按钮、标签、占位文案和初始选中状态",
-            "对照需求或截图核对默认态下隐藏/展示的字段边界",
-        ],
-        "expand_collapse": [
-            f"进入 {module} 的 {scene} 页面，定位到展开/收起或二级菜单入口",
-            "点击展开入口，检查新增区域的位置、动画、字段顺序和按钮状态",
-            "再次点击收起入口，检查隐藏字段、箭头方向和已输入条件是否按规则保留",
-        ],
-        "field_order": [
-            f"进入 {module} 的 {scene} 页面，打开涉及字段展示的区域",
-            "逐项核对字段名称、字段顺序、改名结果和数据来源",
-            "执行一次查询、保存或选择操作，检查字段值是否参与后续逻辑",
-        ],
-        "invalid_filter": [
-            f"进入 {module} 的 {scene} 页面，准备空值、特殊字符、超长文本和不存在的数据",
-            "分别提交异常输入，观察提示、按钮状态和结果列表",
-            "清空异常条件后重新提交有效条件，确认页面恢复正常",
-        ],
-        "responsive_layout": [
-            f"进入 {module} 的 {scene} 页面，分别切换宽屏、窄屏和浏览器缩放比例",
-            "执行展开、收起、输入、清空等连续操作",
-            "检查字段换行、按钮位置、弹层边界和内容遮挡情况",
-        ],
-        "pagination": [
-            f"进入 {module} 的 {scene} 列表，准备多页数据",
-            "切换页码、每页条数和上一页/下一页按钮",
-            "核对总数、当前页范围、接口参数和列表记录是否同步变化",
-        ],
-        "empty_data": [
-            f"进入 {module} 的 {scene} 页面，构造无数据或末页无记录条件",
-            "执行查询、翻页或筛选操作",
-            "检查空态文案、分页按钮禁用状态和历史数据是否被清空",
-        ],
-        "table_overflow": [
-            f"进入 {module} 的 {scene} 表格，准备长文本、长 ID 或多列数据",
-            "观察列宽、截断、省略号、tooltip 和横向滚动表现",
-            "点击或悬停长文本字段，核对完整内容是否可查看",
-        ],
-        "large_data": [
-            f"进入 {module} 的 {scene} 页面，准备大批量列表或候选项数据",
-            "执行加载、翻页、搜索或展开操作",
-            "记录响应时间、加载状态、按钮可用性和失败提示",
-        ],
-        "keyword_search": [
-            f"进入 {module} 的 {scene} 搜索入口，准备完整 ID、部分 ID、名称和混合关键词",
-            "分别输入关键词并触发搜索",
-            "核对匹配规则、返回记录、展示格式和选中回填结果",
-        ],
-        "no_match": [
-            f"进入 {module} 的 {scene} 搜索入口，输入不存在的关键词或非法格式",
-            "触发搜索后观察无结果提示和下拉列表状态",
-            "清空关键词再次搜索，确认历史无结果状态不会残留",
-        ],
-        "multi_select": [
-            f"进入 {module} 的 {scene} 多选控件，打开候选项列表",
-            "连续选择多个候选项，再删除其中一个标签",
-            "切换全选、反选或清空操作，检查标签展示和提交值",
-        ],
-        "option_source": [
-            f"进入 {module} 的 {scene} 候选项控件，打开选项列表",
-            "核对候选项名称、ID、顺序、搜索结果和业务来源",
-            "选择候选项并提交，检查请求参数或保存结果是否使用正确来源值",
-        ],
-        "status_display": [
-            f"进入 {module} 的 {scene} 状态展示区域，准备不同状态的数据",
-            "分别查看图标、按钮、颜色、文案和 Preview/操作可用性",
-            "切换或刷新状态，检查视觉状态与后台数据是否一致",
-        ],
-        "state_transition": [
-            f"进入 {module} 的 {scene} 页面，准备可触发状态变化的数据",
-            "触发上传、保存、启停、刷新或其他状态变化动作",
-            "核对状态流转顺序、最终状态、日志记录和接口返回",
-        ],
-        "conflict_rule": [
-            f"进入 {module} 的 {scene} 页面，准备需求存在冲突或待确认的数据",
-            "触发冲突场景对应的操作",
-            "检查系统是否给出明确提示、禁用风险操作或保留待确认记录",
-        ],
-        "permission_guard": [
-            f"使用无权限或受限角色进入 {module} 的 {scene} 页面",
-            "尝试执行查看、编辑、保存或搜索操作",
-            "检查权限提示、按钮禁用状态、接口状态码和数据未变更",
-        ],
-        "data_integrity": [
-            f"进入 {module} 的 {scene} 页面，准备包含已存在字段值的数据",
-            "只修改目标字段并提交保存",
-            "对比保存前后页面、接口返回和数据记录，确认未修改字段未被覆盖",
-        ],
-    }
-    actions = step_map.get(key) or [
-        f"进入 {module} 的 {scene} 页面，定位「{title}」相关入口",
-        f"按测试关注点执行：{focus[:120]}",
-        "核对页面状态、接口返回、数据记录和提示文案",
-    ]
-    return [{"step_no": index, "action": action} for index, action in enumerate(actions, start=1)]
 
 
-def _build_variant_expected_results(case: dict, fp: dict, variant: dict) -> list[str]:
-    title = str(fp.get("title") or case.get("title") or "当前功能点").strip()
-    focus = str(variant.get("focus") or _compact_case_text(fp.get("description")) or title).strip()
-    key = str(variant.get("key") or "").strip()
-    expected_map = {
-        "default_state": [
-            f"默认态展示内容与「{title}」规则一致，核心字段、按钮和占位文案可直接核对。",
-            "隐藏字段不会占用可见布局，默认选中值和空态提示不会影响后续操作。",
-        ],
-        "expand_collapse": [
-            "展开后新增字段位于预期区域，箭头方向、动画和按钮状态同步变化。",
-            "收起后高级字段隐藏，已输入条件按需求保留或清空，Search/Clear 等操作入口仍可用。",
-        ],
-        "field_order": [
-            f"字段名称、展示顺序、改名结果和数据来源均与「{title}」规则一致。",
-            "执行查询或保存后，相关字段值会进入接口参数、列表展示或数据记录，且无错位。",
-        ],
-        "invalid_filter": [
-            "空值、非法字符、超长文本和无匹配数据均有明确提示或稳定空态。",
-            "异常输入不会触发前端报错、接口 500 或旧结果残留，恢复有效输入后结果正常刷新。",
-        ],
-        "responsive_layout": [
-            "不同宽度下字段、按钮、弹层和标签不会重叠、截断关键内容或超出容器。",
-            "连续操作后最终状态稳定，展开/收起方向、选中状态和已输入内容保持一致。",
-        ],
-        "pagination": [
-            "页码、每页条数、总数、当前页范围和接口参数同步变化。",
-            "切换分页后列表记录正确刷新，不出现重复、遗漏、空白或旧数据残留。",
-        ],
-        "empty_data": [
-            "无数据场景展示明确空态文案，列表记录被清空，分页按钮进入正确禁用状态。",
-            "从空态恢复到有数据条件后，列表、总数和分页状态能重新同步。",
-        ],
-        "table_overflow": [
-            "长文本按规则截断或换行，tooltip/详情入口可查看完整内容。",
-            "多列或长字段不会破坏表格对齐、操作列可见性和横向滚动体验。",
-        ],
-        "large_data": [
-            "大数据量下加载状态明确，列表、搜索或分页在可接受时间内完成反馈。",
-            "加载失败或超时会给出可见提示，不会造成按钮卡死或数据错乱。",
-        ],
-        "keyword_search": [
-            "完整 ID、部分 ID、名称和混合关键词返回符合匹配规则的结果。",
-            "展示格式、排序、高亮和选中回填内容与接口返回字段一致。",
-        ],
-        "no_match": [
-            "无匹配关键词展示明确无结果状态，下拉列表或结果区不会残留历史数据。",
-            "清空关键词后可恢复默认列表或重新搜索，接口参数同步清空。",
-        ],
-        "multi_select": [
-            "多选标签新增、删除、全选和清空后，页面标签与提交值保持一致。",
-            "标签过多时展示不重叠、不遮挡关键按钮，候选项选中状态准确回显。",
-        ],
-        "option_source": [
-            "候选项名称、ID、排序和搜索结果来自正确业务来源。",
-            "提交后接口参数或保存记录使用选中项真实值，不出现展示值与提交值不一致。",
-        ],
-        "status_display": [
-            "不同状态的图标、颜色、按钮、文案和 Preview 可用性清晰区分。",
-            "刷新或状态变化后，页面状态与接口返回、后台记录保持一致。",
-        ],
-        "state_transition": [
-            "状态按需求顺序流转，最终状态、提示文案和操作按钮同步更新。",
-            "异常或失败状态会保留可追踪日志/记录，不会误展示为成功。",
-        ],
-        "conflict_rule": [
-            "冲突或待确认场景有明确提示，风险操作被拦截或进入待确认状态。",
-            "系统不会静默按错误规则继续处理，证据冲突点可在记录中追溯。",
-        ],
-        "permission_guard": [
-            "无权限用户看到禁用按钮、权限提示或接口拒绝状态，不能完成受限操作。",
-            "权限拦截后业务数据保持不变，页面、接口和日志均可复核。",
-        ],
-        "data_integrity": [
-            "只修改目标字段时，未修改字段在页面、接口返回和数据记录中保持原值。",
-            "保存成功后存在可追踪记录，失败时不会产生部分覆盖或脏数据。",
-        ],
-    }
-    expected = expected_map.get(key) or [
-        f"{focus[:100]} 的页面状态、接口返回或数据记录可被直接核对。",
-        "异常或边界条件下有明确提示，关键业务数据保持一致。",
-    ]
-    return [_sanitize_expected_phrase(item) for item in expected]
 
 
 def _step_to_text(step) -> str:
@@ -691,50 +375,8 @@ def _step_to_text(step) -> str:
     return str(step or "").strip()
 
 
-def _build_specific_case_title(case: dict, fp: dict) -> str:
-    fp_title = str(fp.get("title") or "").strip()
-    module = str(case.get("module") or fp.get("module") or "").strip()
-    scene = str(case.get("scene") or fp.get("scene") or "").strip()
-    category = _normalize_category(case.get("category"))
-    description = _compact_case_text(fp.get("description"))
-
-    subject_parts = []
-    for item in (module, scene, fp_title, description[:32]):
-        if item and item not in subject_parts:
-            subject_parts.append(item)
-    subject = " / ".join(subject_parts[:3]) or str(case.get("fp_id") or "功能点")
-
-    category_prefix = {
-        "negative": "异常场景",
-        "boundary": "边界场景",
-        "security": "安全场景",
-        "compatibility": "兼容场景",
-        "performance": "性能场景",
-    }.get(category, "主流程")
-    return f"{subject} - {category_prefix}校验"
 
 
-def _naturalize_case_title(case: dict, fp: dict) -> str:
-    title = re.sub(r"\s+", " ", str(case.get("title") or "")).strip()
-    if not title:
-        return _build_specific_case_title(case, fp)
-    module = str(case.get("module") or fp.get("module") or "").strip()
-    scene = str(case.get("scene") or fp.get("scene") or "").strip()
-    fp_title = str(fp.get("title") or "").strip()
-    for prefix in (
-        f"{module} / {scene} / {fp_title} - ",
-        f"{module}/{scene}/{fp_title} - ",
-        f"{module} / {scene} / ",
-        f"{module}/{scene}/",
-    ):
-        if prefix.strip() and title.startswith(prefix):
-            title = title[len(prefix):].strip()
-            break
-    if fp_title and title in {"主流程校验", "边界条件校验", "异常处理校验", "功能校验"}:
-        title = f"{fp_title} - {title}"
-    if len(title) > 90:
-        title = _short_text(title, 90)
-    return title or _build_specific_case_title(case, fp)
 
 
 @dataclass
@@ -909,6 +551,94 @@ def _persist_stage_artifact(output_dir: str, file_name: str, payload: dict | lis
         _write_json_file(output_dir, file_name, payload)
     except Exception:
         pass
+
+
+# --- Phase 3：schema 字段形态强转（以 claw_5skill_final 模板为准，兼容旧字符串形态） ---
+
+def _coerce_test_data(value) -> list[dict]:
+    """test_data 统一为 [{name, value}] 对象数组（兼容旧字符串数组）。"""
+    if not value:
+        return []
+    items: list[dict] = []
+    for entry in (value if isinstance(value, list) else [value]):
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or entry.get("field") or "数据").strip()
+            raw_val = entry.get("value")
+            val = "" if raw_val is None else (raw_val if isinstance(raw_val, str) else json.dumps(raw_val, ensure_ascii=False))
+            items.append({"name": name or "数据", "value": val})
+        else:
+            text = str(entry)
+            sep = "：" if "：" in text else (":" if ":" in text else "")
+            if sep:
+                name, _, val = text.partition(sep)
+                items.append({"name": name.strip() or "数据", "value": val.strip()})
+            else:
+                items.append({"name": "数据", "value": text})
+    return items
+
+
+def _coerce_source_refs(value) -> list[dict]:
+    """source_refs 统一为 [{source_type, doc, section, quote}]（兼容旧字符串数组）。"""
+    if not value:
+        return []
+    items: list[dict] = []
+    for entry in (value if isinstance(value, list) else [value]):
+        if isinstance(entry, dict):
+            serialized = json.dumps(entry, ensure_ascii=False)
+            items.append({
+                "source_type": str(entry.get("source_type") or ("image" if "IMG-" in serialized else "text")),
+                "doc": str(entry.get("doc") or ""),
+                "section": str(entry.get("section") or ""),
+                "quote": str(entry.get("quote") or entry.get("text") or ""),
+            })
+        else:
+            text = str(entry)
+            is_img = "IMG-" in text
+            items.append({
+                "source_type": "image" if is_img else "text",
+                "doc": text if is_img else "",
+                "section": "",
+                "quote": "" if is_img else text,
+            })
+    return items
+
+
+def _coerce_atomicity_check(value) -> dict:
+    """atomicity_check 统一为 {passed, issues}（兼容旧字符串）。"""
+    if isinstance(value, dict):
+        passed = value.get("passed")
+        issues = value.get("issues") or []
+        if not isinstance(issues, list):
+            issues = [str(issues)]
+        return {"passed": True if passed is None else bool(passed), "issues": [str(i) for i in issues]}
+    return {"passed": True, "issues": []}
+
+
+def _coerce_review_flags(value) -> dict:
+    """review_flags 统一为 {executable_risk, ambiguity_risk}，取值 low/medium/high。"""
+    allowed = {"low", "medium", "high"}
+    out = {"executable_risk": "low", "ambiguity_risk": "low"}
+    if isinstance(value, dict):
+        for key in out:
+            candidate = str(value.get(key) or "").strip().lower()
+            if candidate in allowed:
+                out[key] = candidate
+    return out
+
+
+def _sources_from_refs(source_refs) -> list[str]:
+    """从 source_refs 派生 traceability.sources 字符串数组。"""
+    out: list[str] = []
+    for ref in source_refs or []:
+        if isinstance(ref, dict):
+            source_type = ref.get("source_type")
+            if source_type and source_type not in out:
+                out.append(source_type)
+        elif ref:
+            source_type = "image" if "IMG-" in str(ref) else "text"
+            if source_type not in out:
+                out.append(source_type)
+    return out or ["text"]
 
 
 def _sanitize_file_stem(value: str | None, fallback: str = "testcases") -> str:
@@ -1469,8 +1199,8 @@ def _compact_pending_confirmations_for_ai(items: list | None, *, limit: int = _P
             continue
         compacted.append(
             {
-                "item": _truncate_text(str(item.get("item") or item.get("focus") or item.get("reason") or ""), _PENDING_CONFIRMATION_TEXT_LIMIT),
-                "reason": _truncate_text(str(item.get("reason") or ""), _PENDING_CONFIRMATION_TEXT_LIMIT),
+                "item": _truncate_text(str(item.get("item") or item.get("focus") or item.get("message") or item.get("reason") or ""), _PENDING_CONFIRMATION_TEXT_LIMIT),
+                "reason": _truncate_text(str(item.get("reason") or item.get("message") or ""), _PENDING_CONFIRMATION_TEXT_LIMIT),
                 "status": item.get("status") or "pending",
                 "source": item.get("source") or "",
             }
@@ -2178,7 +1908,7 @@ def _build_requirement_analysis(
             _gate(dist_val in valid_dist_values, f"功能点 {fp.get('fp_id')} source_distribution 必须为 text_only/text_and_image/image_or_inferred 之一")
             if "image" in str(dist_val):
                 refs = fp.get("source_refs") or []
-                has_img_ref = any("IMG-" in str(r) for r in refs)
+                has_img_ref = "IMG-" in json.dumps(refs, ensure_ascii=False)
                 _gate(has_img_ref, f"功能点 {fp.get('fp_id')} 标记了图片来源但 source_refs 未引用 IMG-XXX")
             hints = fp.get("test_hints") or {}
             _gate(all(hints.get(key) for key in ("positive", "boundary", "negative")), f"功能点 {fp.get('fp_id')} test_hints 不完整")
@@ -2254,15 +1984,17 @@ def _build_requirement_analysis(
                 fp.setdefault("title", fp.get("description") or fp.get("scene") or "未命名功能点")
                 fp.setdefault("type", "functional")
                 fp.setdefault("description", fp.get("title") or "从需求章节提取的功能点")
-                fp.setdefault("source_refs", [])
+                fp["source_refs"] = _coerce_source_refs(fp.get("source_refs"))
                 fp.setdefault("rules", [])
                 fp.setdefault("priority_hint", "P1")
                 fp["priority_hint"] = _normalize_priority(fp.get("priority_hint"), fp=fp)
                 fp.setdefault("requirement_group_id", "")
                 fp.setdefault("requirement_group_title", "")
-                fp.setdefault("atomicity_check", "已按当前批次需求拆分为可验证功能点")
+                fp["atomicity_check"] = _coerce_atomicity_check(fp.get("atomicity_check"))
                 fp.setdefault("source_distribution", {})
                 fp.setdefault("source_order", index)
+                for _list_field in ("actors", "entries", "preconditions", "outputs", "exceptions", "dependencies", "inputs", "states"):
+                    fp.setdefault(_list_field, [])
                 hints = fp.get("test_hints")
                 if not isinstance(hints, dict):
                     hints = {}
@@ -2327,13 +2059,13 @@ def _build_requirement_analysis(
                     skill_name="requirement-analyzer",
                     task_payload=prompt,
                     output_contract=(
-                        '{"evidence_trace": {"image_summary": "string", "images": [{"image_id": "string", "summary": "string", "source_url": "string"}], "pending_confirmations": [{"item": "string", "reason": "string", "status": "pending"}]}, '
-                        '"function_points": {"function_points": [{"fp_id": "string", "module": "string", "scene": "string", "requirement_group_id": "string", "requirement_group_title": "string", "title": "string", "type": "string", "description": "string", "source_refs": ["string"], "rules": ["string"], "test_hints": {"positive": ["string"], "boundary": ["string"], "negative": ["string"]}, "priority_hint": "string", "atomicity_check": "string", "source_distribution": "string", "source_order": 1}]}}'
+                        '{"evidence_trace": {"image_summary": {"image_link_count": 0, "download_success_count": 0, "download_failed_count": 0, "image_observation_count": 0, "pending_confirmation_count": 0}, "images": [{"image_id": "string", "image_url": "string", "local_path": "string", "download_status": "success|failed", "source_type": "image", "observed_elements": ["string"], "mapped_function_points": ["string"], "notes": ["string"]}], "pending_confirmations": [{"pending_id": "string", "source": "string", "ref_id": "string", "message": "string", "status": "pending"}]}, '
+                        '"function_points": {"function_points": [{"fp_id": "string", "module": "string", "scene": "string", "requirement_group_id": "string", "requirement_group_title": "string", "title": "string", "type": "string", "description": "string", "source_refs": [{"source_type": "text|image", "doc": "string", "section": "string", "quote": "string"}], "actors": ["string"], "entries": ["string"], "preconditions": ["string"], "inputs": [{"name": "string", "type": "string", "required": true, "constraints": ["string"]}], "outputs": ["string"], "rules": ["string"], "states": [{"from": "string", "event": "string", "to": "string"}], "exceptions": ["string"], "dependencies": ["string"], "test_hints": {"positive": ["string"], "boundary": ["string"], "negative": ["string"]}, "priority_hint": "string", "source_distribution": "text_only|text_and_image|image_or_inferred", "atomicity_check": {"passed": true, "issues": ["string"]}, "source_order": 1}]}}'
                     ),
                     validator=batch_validator,
-                    max_tokens=4000,
+                    max_tokens=_REQUIREMENT_MAX_TOKENS,
                     timeout_seconds=_LONG_CHAT_TIMEOUT_SECONDS,
-                    max_attempts=1,
+                    max_attempts=2,
                     audit_log=audit_log,
                 )
                 result = normalize_batch_result(result, expected_images)
@@ -2449,17 +2181,107 @@ def _build_requirement_analysis(
         item["priority_hint"] = _normalize_priority(item.get("priority_hint"), fp=item)
         item["fp_id"] = f"FP-{index:03d}"
     _gate(function_points, "需求分析完成但未提取到任何功能点，请确认需求正文包含明确的功能变更或验收规则")
+
+    # 证据链权威化：以实际下载+识图结果为准，修复分批时“无图批次”污染 image_summary 的幻觉
+    successful_images = [item for item in downloaded_images if item.get("download_status") == "success"]
+    failed_images = [item for item in downloaded_images if item.get("download_status") == "failed"]
+    if successful_images:
+        hint_bits = []
+        for item in image_analysis[:8]:
+            summary_text = str(item.get("summary") or "").strip()
+            if summary_text:
+                hint_bits.append(f"{item.get('image_id')}：{summary_text[:60]}")
+        image_summary = f"共发现 {len(downloaded_images)} 张图片，成功下载并完成多模态识图 {len(successful_images)} 张"
+        if failed_images:
+            image_summary += f"，下载失败 {len(failed_images)} 张"
+        if hint_bits:
+            image_summary += "；识图要点：" + "；".join(hint_bits)
+        # 剔除与事实冲突的“无图片/缺少图片证据”类待确认项（真实下载失败项保留）
+        absence_markers = ("未提供图片", "无图片", "缺少图片", "没有图片", "缺失图片", "未包含图片", "无图片证据", "未提供图片链接")
+
+        def _is_false_image_absence(entry) -> bool:
+            text = entry if isinstance(entry, str) else json.dumps(entry, ensure_ascii=False)
+            return any(marker in text for marker in absence_markers) and "下载失败" not in text
+
+        evidence_pending = [p for p in evidence_pending if not _is_false_image_absence(p)]
+        pending_confirmations = [p for p in pending_confirmations if not _is_false_image_absence(p)]
+    else:
+        image_summary = "\n".join(image_summary_parts) or "无图片证据"
+
+    analysis_by_id = {item.get("image_id"): item for item in image_analysis if isinstance(item, dict) and item.get("image_id")}
+
+    def _mapped_fps_for_image(image_id: str) -> list[str]:
+        if not image_id:
+            return []
+        mapped: list[str] = []
+        for fp in function_points:
+            if image_id in json.dumps(fp.get("source_refs") or [], ensure_ascii=False):
+                mapped.append(fp.get("fp_id"))
+        return mapped
+
+    canonical_images: list[dict] = []
+    for item in downloaded_images:
+        image_id = item.get("image_id")
+        analysis = analysis_by_id.get(image_id) or {}
+        canonical_images.append({
+            "image_id": image_id,
+            "image_url": item.get("url") or "",
+            "local_path": item.get("file_path"),
+            "download_status": item.get("download_status") or "success",
+            "source_type": "image",
+            "observed_elements": list(analysis.get("ui_elements") or analysis.get("requirement_hints") or []),
+            "mapped_function_points": _mapped_fps_for_image(image_id),
+            "notes": list(analysis.get("risk_or_unclear") or []),
+        })
+    if not canonical_images:
+        canonical_images = [img for img in evidence_images if isinstance(img, dict)]
+
+    def _canonical_pending(entries) -> list[dict]:
+        out: list[dict] = []
+        for idx, entry in enumerate(entries or [], start=1):
+            if isinstance(entry, dict):
+                serialized = json.dumps(entry, ensure_ascii=False)
+                out.append({
+                    "pending_id": entry.get("pending_id") or f"PENDING-{idx:03d}",
+                    "source": entry.get("source") or ("image" if "IMG-" in serialized else "text"),
+                    "ref_id": entry.get("ref_id") or entry.get("item") or "",
+                    "message": entry.get("message") or entry.get("reason") or "",
+                    "status": entry.get("status") or "pending",
+                })
+            elif entry:
+                out.append({"pending_id": f"PENDING-{idx:03d}", "source": "text", "ref_id": "", "message": str(entry), "status": "pending"})
+        return out
+
+    canonical_pending = _canonical_pending(pending_confirmations or evidence_pending)
+    _project_name = _sanitize_file_stem(job.source_document_name or job.name)
+    _today_iso = utc_now_naive().date().isoformat()
+
     evidence_trace = {
-        "image_summary": "\n".join(image_summary_parts) or "无图片证据",
-        "images": evidence_images,
-        "pending_confirmations": evidence_pending,
+        "project": _project_name,
+        "generated_at": _today_iso,
+        "source_document": job.source_document_name or job.name or "",
+        "image_summary": {
+            "image_link_count": len(downloaded_images),
+            "download_success_count": len(successful_images),
+            "download_failed_count": len(failed_images),
+            "image_observation_count": len(image_analysis),
+            "pending_confirmation_count": len(canonical_pending),
+        },
+        "images": canonical_images,
+        "pending_confirmations": canonical_pending,
     }
-    function_points_payload = {"function_points": sorted(function_points, key=lambda item: item.get("source_order", 0))}
+    function_points_payload = {
+        "version": "3.2-skill-only",
+        "project": _project_name,
+        "analyzed_at": _today_iso,
+        "source_documents": [job.source_document_name or job.name or ""],
+        "function_points": sorted(function_points, key=lambda item: item.get("source_order", 0)),
+    }
     _assign_requirement_groups(function_points_payload)
     return {
         "evidence_trace": evidence_trace,
         "function_points": function_points_payload,
-        "pending_confirmations": pending_confirmations or evidence_pending,
+        "pending_confirmations": canonical_pending,
     }
 
 
@@ -2484,30 +2306,29 @@ def _build_testcase_package(
         case.setdefault("module", fp.get("module") or "需求模块")
         case.setdefault("scene", fp.get("scene") or "需求场景")
         case.setdefault("source_order", fp.get("source_order") or index)
-        case.setdefault("title", f"{fp.get('title') or fp_id}验证")
+        case.setdefault("title", f"{fp.get('title') or fp_id}")
         case.setdefault("category", "functional")
         case["category"] = _normalize_category(case.get("category"))
-        case["title"] = _naturalize_case_title(case, fp)
-        if _text_contains_any(str(case.get("title") or ""), _GENERIC_CASE_TITLE_PATTERNS) or len(str(case.get("title") or "").strip()) < 8:
-            case["title"] = _build_specific_case_title(case, fp)
-        
+
         fp_priority = _normalize_priority(fp.get("priority_hint"), fp=fp, case=case, category=case["category"])
         raw_case_priority = str(case.get("priority") or "").strip()
         priority_source = fp_priority if raw_case_priority in {"", "P1", "p1", "1"} and fp_priority != "P1" else raw_case_priority
         case["priority"] = _normalize_priority(priority_source or fp_priority, fp=fp, case=case, category=case["category"])
-        
+
         case.setdefault("tags", ["AI-GEN"])
         case.setdefault("preconditions", [])
-        case.setdefault("test_data", [])
+        case["test_data"] = _coerce_test_data(case.get("test_data"))
         case.setdefault("steps", [])
         case.setdefault("expected_results", [])
-        case.setdefault("traceability", {"function_points": [fp_id], "sources": fp.get("source_refs") or ["text"]})
+        derived_sources = _sources_from_refs(fp.get("source_refs"))
+        case.setdefault("traceability", {"function_points": [fp_id], "sources": derived_sources})
         if isinstance(case.get("traceability"), dict):
             case["traceability"].setdefault("function_points", [fp_id])
-            case["traceability"].setdefault("sources", fp.get("source_refs") or ["text"])
+            case["traceability"].setdefault("sources", derived_sources)
         case.setdefault("generation_basis", {"method": "functional", "rationale": "基于功能点生成"})
         case.setdefault("scenario_dimensions", [case["category"]])
         case.setdefault("baseline_candidate", case.get("category") == "functional")
+        case["review_flags"] = _coerce_review_flags(case.get("review_flags"))
         if isinstance(case.get("steps"), list):
             normalized_steps = []
             for step_index, step in enumerate(case["steps"], start=1):
@@ -2519,161 +2340,13 @@ def _build_testcase_package(
             case["steps"] = normalized_steps
         else:
             case["steps"] = []
-        steps_text_before = " ".join(_step_to_text(item) for item in case.get("steps") or [])
-        if (
-            len(case.get("steps") or []) < 3
-            or len(steps_text_before) < 60
-            or _text_contains_any(steps_text_before, _GENERIC_STEP_PATTERNS)
-        ):
-            case["steps"] = _build_specific_steps(case, fp)
-        case["expected_results"] = _ensure_specific_expected_results(case, fp)
-        if fp_id not in allowed_fp_ids:
-            case["fp_id"] = fp_id
+        if not isinstance(case.get("expected_results"), list):
+            case["expected_results"] = [str(case["expected_results"])] if case.get("expected_results") else []
         return case
 
-    def target_case_count_for_fp(fp: dict) -> int:
-        text = _compact_case_text(fp).lower()
-        high_variation_terms = (
-            "筛选",
-            "filter",
-            "搜索",
-            "search",
-            "分页",
-            "page",
-            "上传",
-            "upload",
-            "tooltip",
-            "悬停",
-            "hover",
-            "状态",
-            "status",
-            "兼容",
-            "responsive",
-            "响应式",
-            "主题",
-            "排序",
-            "多选",
-            "标签",
-            "dropdown",
-            "下拉",
-        )
-        return 5 if any(term in text for term in high_variation_terms) else _MIN_CASES_PER_FUNCTION_POINT
 
-    def supplemental_variants_for_fp(fp: dict) -> list[dict]:
-        text = _compact_case_text(fp).lower()
-        variants: list[dict] = []
 
-        def add(key: str, label: str, category: str, focus: str, priority: str | None = None) -> None:
-            if key in {item["key"] for item in variants}:
-                return
-            variants.append(
-                {
-                    "key": key,
-                    "label": label,
-                    "category": _normalize_category(category),
-                    "focus": focus,
-                    "priority": priority,
-                }
-            )
 
-        if any(term in text for term in ("筛选", "filter", "more filters", "字段", "field")):
-            add("default_state", "默认展示", "ui", "验证默认态字段展示、字段顺序、核心筛选项和按钮状态")
-            add("expand_collapse", "展开折叠", "ui", "验证展开/折叠、箭头方向、二级菜单位置和布局稳定性")
-            add("field_order", "字段顺序", "functional", "验证新增、改名或排序后的字段位置、可见性和数据来源")
-            add("invalid_filter", "异常输入", "negative", "验证空值、非法值、无匹配数据时的提示和结果列表")
-            add("responsive_layout", "响应式布局", "compatibility", "验证窄屏、缩放、快速点击下筛选栏布局不重叠")
-        if any(term in text for term in ("分页", "page", "每页", "列表", "表格", "table")):
-            add("pagination", "分页切换", "functional", "验证页码、每页条数、总数和列表数据范围")
-            add("empty_data", "空数据", "boundary", "验证无数据、末页、超出页码时的空态和分页控件状态")
-            add("table_overflow", "列宽截断", "ui", "验证长文本截断、tooltip、列宽和表格横向布局")
-            add("large_data", "大数据量", "performance", "验证大数据量下列表加载、分页切换和交互响应")
-        if any(term in text for term in ("搜索", "search", "模糊", "匹配")):
-            add("keyword_search", "关键词搜索", "functional", "验证关键词、前缀/包含匹配、大小写和结果格式")
-            add("no_match", "无匹配结果", "negative", "验证无匹配数据、特殊字符和清空搜索后的结果恢复")
-        if any(term in text for term in ("多选", "标签", "下拉", "dropdown", "select", "country", "location")):
-            add("multi_select", "多选标签", "functional", "验证多选、标签展示、删除标签和搜索候选项")
-            add("option_source", "选项来源", "functional", "验证候选项来源、Included/Excluded 规则和数据一致性")
-        if any(term in text for term in ("上传", "upload", "素材", "preview", "icon", "状态")):
-            add("status_display", "状态展示", "ui", "验证上传状态、图标样式、Preview 可用性和操作按钮状态")
-            add("state_transition", "状态流转", "functional", "验证未上传、上传中、上传成功、失败状态的流转和数据记录")
-            add("conflict_rule", "冲突规则", "negative", "验证证据冲突或未明确状态下的拦截、提示和待确认项")
-        if any(term in text for term in ("保存", "更新", "覆盖", "删除", "权限", "预算", "状态变更", "任务")):
-            add("permission_guard", "权限拦截", "security", "验证无权限、缺少参数、非法状态下的提示和数据不变")
-            add("data_integrity", "数据完整性", "negative", "验证保存或更新时未修改字段不被覆盖，变更记录可追溯")
-
-        fallback_hints = fp.get("test_hints") or {}
-        add("main_flow", "主路径", "functional", _compact_case_text(fallback_hints.get("positive")) or _compact_case_text(fp.get("description")) or "验证核心业务流程")
-        add("boundary_rule", "边界条件", "boundary", _compact_case_text(fallback_hints.get("boundary")) or "验证边界值、空态和组合条件")
-        add("exception_rule", "异常处理", "negative", _compact_case_text(fallback_hints.get("negative")) or "验证缺失、非法或冲突条件下的处理")
-        add("compatibility", "兼容回归", "compatibility", "验证刷新、历史状态、不同数据量或关联模块下表现一致")
-        return variants
-
-    def build_supplemental_case(fp: dict, variant: dict, index: int) -> dict:
-        fp_id = fp.get("fp_id")
-        title = fp.get("title") or fp.get("description") or fp.get("scene") or fp_id
-        module = fp.get("module") or "需求模块"
-        scene = fp.get("scene") or module
-        rules_text = _compact_case_text(fp.get("rules")) or _compact_case_text(fp.get("description")) or str(title)
-        label = variant.get("label") or "补充场景"
-        category = _normalize_category(variant.get("category"))
-        focus = variant.get("focus") or rules_text
-        priority = _normalize_priority(variant.get("priority") or fp.get("priority_hint"), fp=fp, category=category)
-        short_title = f"{title} - {label}校验"
-        case = {
-            "case_id": f"TC-TEMP-{index:03d}",
-            "fp_id": fp_id,
-            "module": module,
-            "scene": scene,
-            "source_order": fp.get("source_order") or index,
-            "title": short_title,
-            "category": category,
-            "priority": priority,
-            "tags": ["AI-GEN", "SUPPLEMENTAL", label],
-            "preconditions": [
-                f"已登录测试环境并进入 {module} - {scene} 相关页面或接口入口",
-                f"已准备可触发「{title}」规则的数据或配置",
-            ],
-            "test_data": [focus[:180], rules_text[:180]],
-            "steps": [],
-            "expected_results": [],
-            "traceability": {"function_points": [fp_id], "sources": fp.get("source_refs") or []},
-            "generation_basis": {"method": variant.get("key") or "supplemental", "rationale": f"后端按功能点内容补齐{label}用例"},
-            "scenario_dimensions": [variant.get("key") or category, category],
-            "baseline_candidate": category == "functional",
-        }
-        case["steps"] = _build_variant_steps(case, fp, variant)
-        case["expected_results"] = _build_variant_expected_results(case, fp, variant)
-        return case
-
-    def supplement_case_density(cases: list[dict]) -> list[dict]:
-        supplemented = list(cases)
-        existing_titles_by_fp: dict[str, set[str]] = {}
-        counts_by_fp = Counter()
-        for case in supplemented:
-            fp_id = case.get("fp_id")
-            if not fp_id:
-                continue
-            counts_by_fp[fp_id] += 1
-            existing_titles_by_fp.setdefault(fp_id, set()).add(re.sub(r"\s+", "", str(case.get("title") or "")))
-        supplemental_index = len(supplemented) + 1
-        for fp in fps:
-            fp_id = fp.get("fp_id")
-            if not fp_id:
-                continue
-            target_count = target_case_count_for_fp(fp)
-            for variant in supplemental_variants_for_fp(fp):
-                if counts_by_fp[fp_id] >= target_count:
-                    break
-                candidate = build_supplemental_case(fp, variant, supplemental_index)
-                title_key = re.sub(r"\s+", "", str(candidate.get("title") or ""))
-                if title_key in existing_titles_by_fp.setdefault(fp_id, set()):
-                    continue
-                normalize_case(candidate, supplemental_index, {fp_id})
-                supplemented.append(candidate)
-                existing_titles_by_fp[fp_id].add(title_key)
-                counts_by_fp[fp_id] += 1
-                supplemental_index += 1
-        return supplemented
 
     def validate(result: dict, allowed_fp_ids: set[str], require_all_allowed: bool = True) -> None:
         cases = result.get("testcases") or []
@@ -2689,26 +2362,16 @@ def _build_testcase_package(
             _gate(case.get("fp_id") in allowed_fp_ids, f"用例 {case.get('case_id')} 关联了不在当前批次的 fp_id")
             fp = fp_by_id.get(case.get("fp_id")) or {}
             case["category"] = _normalize_category(case.get("category"))
-            case["expected_results"] = _ensure_specific_expected_results(case, fp)
-            
+
             fp_priority = _normalize_priority(fp.get("priority_hint"), fp=fp, case=case, category=case.get("category"))
             raw_case_priority = str(case.get("priority") or "").strip()
             priority_source = fp_priority if raw_case_priority in {"", "P1", "p1", "1"} and fp_priority != "P1" else raw_case_priority
             priority = _normalize_priority(priority_source or fp_priority, fp=fp, case=case, category=case.get("category"))
             case["priority"] = priority
             _gate(priority in {"P0", "P1", "P2", "P3"}, f"用例 {case.get('case_id')} 优先级非法")
-            
+
             _gate(isinstance(case.get("steps"), list) and len(case["steps"]) >= 2, f"用例 {case.get('case_id')} 步骤不足")
             _gate(isinstance(case.get("expected_results"), list) and case["expected_results"], f"用例 {case.get('case_id')} 缺少可验证预期")
-            title = str(case.get("title") or "")
-            steps_text = " ".join(_step_to_text(item) for item in case.get("steps") or [])
-            expected_text = " ".join(str(item) for item in case.get("expected_results") or [])
-            _gate(not _text_contains_any(title, _GENERIC_CASE_TITLE_PATTERNS), f"用例 {case.get('case_id')} 标题过于模板化")
-            _gate(not _text_contains_any(steps_text, _GENERIC_STEP_PATTERNS), f"用例 {case.get('case_id')} 步骤过于模板化")
-            _gate(len(title) >= 8, f"用例 {case.get('case_id')} 标题过短，疑似未结合需求")
-            _gate(len(steps_text) >= 60, f"用例 {case.get('case_id')} 步骤过短，疑似未结合需求")
-            _gate(len(expected_text) >= 40, f"用例 {case.get('case_id')} 预期过短，疑似未结合需求")
-            _gate(_expected_has_observable_anchor(case.get("expected_results")), f"用例 {case.get('case_id')} 预期缺少可观察核验点")
 
     async def generate_for_fps_async(batch_fps: list[dict], batch_label: str, require_all_allowed: bool = True) -> list[dict]:
         allowed_fp_ids = {item.get("fp_id") for item in batch_fps}
@@ -2720,14 +2383,16 @@ def _build_testcase_package(
             "pending_confirmations": compact_pending_confirmations,
             "constraints": [
                 "只能覆盖本批 function_points 中的 fp_id，不要生成其他 fp_id。",
-                "每个 fp_id 至少生成 1 条主流程用例，并根据 test_hints 补充边界、异常、状态流转用例。",
+                "每个 fp_id 至少生成 1 条主流程用例；再按测试设计方法库（等价类/边界值/决策表/状态转换/角色权限矩阵/多入口一致性/空值默认值/异常容错/时间时序）选择适用方法补充用例。",
+                "按场景价值决定用例数量：不堆数量、不为追求覆盖制造大量同质用例，也不要机械凑数。",
                 "category 只能使用 functional/ui/boundary/negative/regression/compatibility/performance/security。",
-                "priority 只能使用 P0/P1/P2/P3，并参考 function_points.priority_hint。",
+                "priority 只能使用 P0/P1/P2/P3，并参考 function_points.priority_hint；无明确业务优先级时不要过度使用 P0。",
                 "标题必须包含具体业务对象、场景或规则，不得使用正常流程验证/主流程验证/边界验证/异常验证等模板标题。",
-                "用例必须包含可执行的步骤和预期结果，预期结果必须写成可观察、可判定、可复核的业务结论，不能只写系统正常/结果正确/符合预期等空话。",
-                "steps 至少 4 步，必须包含：入口/前置数据、具体操作对象、触发动作、页面或接口或数据层核验；禁止写“进入对应页面/执行正常流程验证/观察结果”。",
-                "expected_results 至少 2 条，必须说明可观察结果，例如状态变化、记录落库、接口字段、提示文案、预算或任务状态等。",
+                "steps 必须让新人可照着执行：包含入口/前置数据、具体操作对象、触发动作、页面或接口或数据层核验；禁止写“进入对应页面/执行正常流程验证/观察结果”等空泛步骤。",
+                "expected_results 必须可观察、可判定、可复核（状态变化、记录落库、接口字段、提示文案、预算或任务状态等），不能只写系统正常/结果正确/符合预期。",
+                "generation_basis 必须写明 method（取自方法库，如 equivalence/boundary/decision_table/state_transition/role_matrix/entry_consistency）与 rationale（这条用例为何需要存在）。",
                 "traceability 必须准确引用 fp_id 和 source_refs。",
+                "test_data 必须是对象数组，每项 {name, value}；review_flags 给出 executable_risk 与 ambiguity_risk（low/medium/high）。",
                 "不要回读原始需求文档，不要自由发明业务规则。",
             ],
         }
@@ -2745,7 +2410,7 @@ def _build_testcase_package(
             skill_name="testcase-designer",
             task_payload=prompt,
             output_contract=(
-                '{"testcases": [{"case_id": "string", "fp_id": "string", "title": "string", "category": "functional|ui|boundary|negative|regression|compatibility|performance|security", "priority": "P0|P1|P2|P3", "preconditions": ["string"], "test_data": ["string"], "steps": [{"step_no": 1, "action": "string"}], "expected_results": ["string"], "traceability": {}, "generation_basis": {}, "scenario_dimensions": ["string"], "baseline_candidate": true}]}'
+                '{"testcases": [{"case_id": "string", "fp_id": "string", "title": "string", "category": "functional|ui|boundary|negative|regression|compatibility|performance|security", "priority": "P0|P1|P2|P3", "preconditions": ["string"], "test_data": [{"name": "string", "value": "string"}], "steps": [{"step_no": 1, "action": "string"}], "expected_results": ["string"], "traceability": {"function_points": ["string"], "sources": ["string"]}, "generation_basis": {"method": "string", "rationale": "string"}, "scenario_dimensions": ["string"], "baseline_candidate": true, "review_flags": {"executable_risk": "low|medium|high", "ambiguity_risk": "low|medium|high"}}]}'
             ),
             validator=batch_validator,
             max_tokens=8000,
@@ -2832,19 +2497,12 @@ def _build_testcase_package(
         for repair_result in repair_batch_results:
             all_cases.extend(repair_result)
 
-    all_cases = supplement_case_density(dedupe_cases(all_cases))
     all_cases = renumber_cases(dedupe_cases(all_cases))
     for index, case in enumerate(all_cases, start=1):
         if isinstance(case, dict):
             normalize_case(case, index, fp_ids)
     missing_ids = sorted(fp_id for fp_id in fp_ids if fp_id not in covered_fp_ids(all_cases))
-    _gate(not missing_ids, f"补齐后仍有功能点未被用例覆盖：{', '.join(missing_ids)}")
-    insufficient = {
-        fp_id: count
-        for fp_id, count in Counter(case.get("fp_id") for case in all_cases).items()
-        if fp_id in fp_by_id and count < target_case_count_for_fp(fp_by_id[fp_id])
-    }
-    _gate(not insufficient, f"以下功能点用例密度不足：{insufficient}")
+    _gate(not missing_ids, f"仍有功能点未被用例覆盖：{', '.join(missing_ids)}")
     validate({"testcases": all_cases}, fp_ids, require_all_allowed=True)
     if audit_log is not None:
         audit_log.append(
@@ -2854,7 +2512,6 @@ def _build_testcase_package(
                 "status": "passed",
                 "testcase_count": len(all_cases),
                 "covered_fp_count": len(covered_fp_ids(all_cases)),
-                "min_cases_per_fp": _MIN_CASES_PER_FUNCTION_POINT,
             }
         )
     return {"testcases": all_cases}
@@ -2877,7 +2534,19 @@ def _build_review_report(
         "evidence_trace": evidence_trace,
         "testcase_package": testcase_package,
         "pending_confirmations": pending_confirmations,
-        "output_contract": "ReviewReport.yaml 等价 JSON，必须包含 summary.release_readiness、coverage、method_coverage、dimension_matrix、evidence_trace、execution_proof、findings",
+        "constraints": [
+            "覆盖率检查：每个 FunctionPoint 至少被 1 条用例覆盖；列出未覆盖 fp_id，存在未覆盖时结论不得为 pass。",
+            "维度完整性：核对 functional/entry/role/data/time/environment/consistency 七个维度是否被覆盖，缺失维度在 dimension_matrix 标 missing。",
+            "方法覆盖：核对等价类/边界值/决策表/状态转换/角色权限/多入口一致性/空值默认/异常容错/时间时序/UI 交互十类方法；方法名出现过 ≠ 真正覆盖，需看用例是否真的体现该方法。",
+            "去重：识别重复或高度同质用例并计入 summary.duplicate_count；数量多 ≠ 覆盖好。",
+            "可执行性：步骤是否新人可照做，含入口/前置/操作对象/触发动作/核验点；空泛步骤计入 ambiguous_step_count。",
+            "可验证性：预期是否可观察可判定（状态/记录/接口字段/提示文案）；不可验证预期计入 unverifiable_expectation_count。",
+            "优先级合理性：P0 是否被滥用、是否与业务风险匹配。",
+            "基线候选合理性：baseline_candidate 是否落在主流程成功/核心校验/关键状态流转等真正回归基线上。",
+            "需求顺序一致性：module 是否沿用原文章节、source_order 是否被继承；若被按优先级/方法/字母重排，结论不得为 pass。",
+            "结论为 fail 时必须给出 repair_tasks（fp_ids/reason/focus），且为可执行修复指令而非泛泛建议。",
+        ],
+        "output_contract": "ReviewReport.yaml 等价 JSON，必须包含 summary（含 testcase_count/duplicate_count/uncovered_fp_count/ambiguous_step_count/unverifiable_expectation_count/overall_score/release_readiness）、coverage、method_coverage、dimension_matrix、evidence_trace、execution_proof、findings；当 release_readiness 为 fail 时必须同时提供 repair_tasks 数组，每项包含 fp_ids、reason、focus",
     }
 
     def validate(result: dict) -> None:
@@ -2887,6 +2556,10 @@ def _build_review_report(
             _gate(key in result, f"ReviewReport 缺少 {key}")
         if result.get("coverage", {}).get("uncovered_fp_ids"):
             _gate(summary.get("release_readiness") != "pass", "存在未覆盖功能点时审查结论不能为 pass")
+        if summary.get("release_readiness") == "fail":
+            has_repair_tasks = bool(result.get("repair_tasks"))
+            has_findings = bool(result.get("findings"))
+            _gate(has_repair_tasks or has_findings, "审查结论为 fail 时必须提供 repair_tasks 或 findings")
 
     ai_review = asyncio.run(_call_skill_with_gate_async(
         api_key=api_key,
@@ -2895,7 +2568,14 @@ def _build_review_report(
         skill_name="quality-reviewer",
         task_payload=prompt,
         output_contract=(
-            '{"summary": {"release_readiness": "pass|conditional_pass|fail"}, "coverage": {}, "method_coverage": {}, "dimension_matrix": {}, "evidence_trace": {}, "execution_proof": {}, "findings": [], "repair_tasks": []}'
+            '{"summary": {"testcase_count": 0, "duplicate_count": 0, "uncovered_fp_count": 0, "ambiguous_step_count": 0, "unverifiable_expectation_count": 0, "overall_score": 0, "release_readiness": "pass|conditional_pass|fail"}, '
+            '"coverage": {"fp_covered": 0, "fp_total": 0, "uncovered_fp_ids": []}, '
+            '"method_coverage": {"equivalence": "covered|partial|missing", "boundary": "covered|partial|missing", "decision_table": "covered|partial|missing", "state_transition": "covered|partial|missing", "role_matrix": "covered|partial|missing", "entry_consistency": "covered|partial|missing", "default_or_empty": "covered|partial|missing", "error_tolerance": "covered|partial|missing", "time_or_sequence": "covered|partial|missing", "ui_interaction": "covered|partial|missing"}, '
+            '"dimension_matrix": {"functional": "covered|partial|missing", "entry": "covered|partial|missing", "role": "covered|partial|missing", "data": "covered|partial|missing", "time": "covered|partial|missing", "environment": "covered|partial|missing", "consistency": "covered|partial|missing"}, '
+            '"evidence_trace": {"image_link_count": 0, "download_success_count": 0, "download_failed_count": 0, "pending_confirmation_count": 0, "status": "complete|incomplete"}, '
+            '"execution_proof": {"text_fp_count": 0, "text_and_image_fp_count": 0, "image_or_inferred_fp_count": 0, "image_observation_count": 0, "summary_lines": ["string"]}, '
+            '"findings": [{"finding_id": "string", "severity": "low|medium|high|critical", "type": "string", "case_id": "string", "fp_id": "string", "message": "string", "suggestion": "string"}], '
+            '"repair_tasks": [{"fp_ids": ["string"], "reason": "string", "focus": "string"}]}'
         ),
         validator=validate,
         max_tokens=10000,
@@ -2908,6 +2588,16 @@ def _build_review_report(
     downloaded_images = evidence_trace.get("downloaded_images") or []
     failed_images = [item for item in downloaded_images if item.get("download_status") == "failed"]
     readiness = ai_review.get("summary", {}).get("release_readiness") or "conditional_pass"
+    review_summary = ai_review.get("summary") or {}
+    uncovered_ids = (ai_review.get("coverage") or {}).get("uncovered_fp_ids") or []
+    review_summary.setdefault("release_readiness", readiness)
+    review_summary.setdefault("testcase_count", len(cases))
+    review_summary.setdefault("duplicate_count", 0)
+    review_summary.setdefault("uncovered_fp_count", len(uncovered_ids))
+    review_summary.setdefault("ambiguous_step_count", 0)
+    review_summary.setdefault("unverifiable_expectation_count", 0)
+    review_summary.setdefault("overall_score", 0)
+    ai_review["summary"] = review_summary
     conclusion_map = {"pass": "通过", "conditional_pass": "有条件通过", "fail": "不通过"}
     ai_review.update({
         "review_conclusion": conclusion_map.get(readiness, "有条件通过"),
@@ -2924,73 +2614,8 @@ def _build_review_report(
     return ai_review
 
 
-def _extract_repair_tasks(review_report: dict, function_points: dict) -> list[dict]:
-    fp_by_id = {item.get("fp_id"): item for item in function_points.get("function_points", []) if isinstance(item, dict)}
-    tasks: list[dict] = []
-    for item in review_report.get("repair_tasks") or []:
-        if not isinstance(item, dict):
-            continue
-        fp_ids = [fp_id for fp_id in item.get("fp_ids", []) if fp_id in fp_by_id]
-        if fp_ids:
-            tasks.append(
-                {
-                    "reason": item.get("reason") or item.get("finding") or "quality-reviewer 要求补齐",
-                    "fp_ids": fp_ids,
-                    "focus": item.get("focus") or item.get("suggestion") or "补充缺失或薄弱场景",
-                }
-            )
-    coverage_missing = (review_report.get("coverage") or {}).get("uncovered_fp_ids") or []
-    missing = [fp_id for fp_id in coverage_missing if fp_id in fp_by_id]
-    if missing and not any(set(missing).issubset(set(task["fp_ids"])) for task in tasks):
-        tasks.append({"reason": "coverage.uncovered_fp_ids", "fp_ids": missing, "focus": "每个未覆盖功能点至少补充一条主流程用例"})
-    return tasks
 
 
-def _repair_testcase_package_with_review(
-    *,
-    testcase_package: dict,
-    review_report: dict,
-    function_points: dict,
-    pending_confirmations: list,
-    api_key: str,
-    model: str,
-    base_url: str | None = None,
-    audit_log: list[dict] | None = None,
-    progress_callback=None,
-) -> dict:
-    repair_tasks = _extract_repair_tasks(review_report, function_points)
-    if not repair_tasks:
-        return testcase_package
-
-    fp_by_id = {item.get("fp_id"): item for item in function_points.get("function_points", []) if isinstance(item, dict)}
-    repaired_cases = list(testcase_package.get("testcases") or [])
-
-    for task_index, repair_task in enumerate(repair_tasks, start=1):
-        if progress_callback:
-            progress_callback(f"正在按质量审查建议补齐用例（第 {task_index}/{len(repair_tasks)} 项）")
-        repair_fps = [fp_by_id[fp_id] for fp_id in repair_task["fp_ids"] if fp_id in fp_by_id]
-        if not repair_fps:
-            continue
-        repair_package = _build_testcase_package(
-            {"function_points": repair_fps},
-            pending_confirmations + [{"source": "quality-reviewer", **repair_task}],
-            api_key,
-            model,
-            base_url,
-            audit_log,
-            progress_callback=progress_callback,
-        )
-        repaired_cases.extend(repair_package.get("testcases") or [])
-
-    seen: set[tuple[str, str]] = set()
-    unique_cases: list[dict] = []
-    for case in repaired_cases:
-        key = (case.get("fp_id") or "", re.sub(r"\s+", "", str(case.get("title") or "")))
-        if key in seen:
-            continue
-        seen.add(key)
-        unique_cases.append(case)
-    return {"testcases": unique_cases}
 
 
 def _clean_node_text(value) -> str:
@@ -3021,6 +2646,53 @@ def _validate_xmindmark(text: str) -> None:
             raise ValueError(f"XMindMark 第 {index} 行不能使用 Markdown 标题")
 
 
+def _build_delivery_summary(
+    job: CaseGenerationJob,
+    function_points: dict,
+    testcase_package: dict,
+    review_report: dict,
+) -> str:
+    """Phase 3：按 claw_5skill_final delivery_summary 模板生成交付摘要（内部产物）。"""
+    project = _sanitize_file_stem(job.source_document_name or job.name)
+    stem = project
+    fp_count = len(function_points.get("function_points", []))
+    case_count = len(testcase_package.get("testcases", []))
+    conclusion = review_report.get("review_conclusion") or "有条件通过"
+    findings = review_report.get("findings") or []
+    pending = review_report.get("pending_confirmations") or []
+    risk_lines: list[str] = []
+    for finding in findings[:10]:
+        if isinstance(finding, dict):
+            msg = str(finding.get("message") or finding.get("suggestion") or "").strip()
+            if msg:
+                risk_lines.append(f"- {finding.get('severity') or 'medium'}：{_short_text(msg, 120)}")
+    if not risk_lines and pending:
+        risk_lines.append(f"- 存在 {len(pending)} 项待确认事项，需人工复核")
+    if not risk_lines:
+        risk_lines.append("- 无")
+    lines = [
+        "# 交付摘要",
+        "",
+        f"- 项目：{project}",
+        f"- 功能点数：{fp_count}",
+        f"- 用例数：{case_count}",
+        f"- 审查结论：{conclusion}",
+        "",
+        "## 内部文件",
+        "",
+        "- FunctionPoints.yaml",
+        "- TestcasePackage.yaml",
+        "- ReviewReport.yaml",
+        f"- {stem}.xmind",
+        "",
+        "## 风险提示",
+        "",
+        *risk_lines,
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _build_xmindmark(
     job: CaseGenerationJob,
     function_points: dict,
@@ -3030,7 +2702,6 @@ def _build_xmindmark(
     root = f"{_sanitize_file_stem(job.source_document_name or job.name)}测试用例"
     lines = [root]
     cases = [case for case in testcase_package.get("testcases", []) if isinstance(case, dict)]
-    _assign_requirement_groups(function_points)
     priority_counts = Counter(case.get("priority") or "P1" for case in cases)
     category_counts = Counter(_normalize_category(case.get("category")) for case in cases)
     review_counts = review_report.get("priority_counts") or {}
@@ -3047,6 +2718,13 @@ def _build_xmindmark(
     _append_node(lines, 1, f"待确认项数量：{len(review_report.get('pending_confirmations') or [])}")
     if category_counts:
         _append_node(lines, 1, "类型分布：" + " / ".join(f"{_category_label(key)} {value}" for key, value in category_counts.items()))
+    method_counts = Counter(
+        _method_label((case.get("generation_basis") or {}).get("method"))
+        for case in cases
+        if isinstance(case.get("generation_basis"), dict) and (case.get("generation_basis") or {}).get("method")
+    )
+    if method_counts:
+        _append_node(lines, 1, "方法分布：" + " / ".join(f"{name} {value}" for name, value in method_counts.items()))
     quality_summary = review_report.get("quality_summary") or {}
     if quality_summary:
         _append_node(lines, 1, f"证据覆盖率：{quality_summary.get('evidence_coverage_rate', 0):.0%}")
@@ -3057,26 +2735,23 @@ def _build_xmindmark(
     for case in cases:
         cases_by_fp.setdefault(case.get("fp_id") or "UNMAPPED", []).append(case)
 
-    groups: dict[tuple[str, str], list[dict]] = {}
-    for fp in sorted(function_points.get("function_points", []), key=lambda item: item.get("source_order", 0)):
-        group_key = (
-            str(fp.get("requirement_group_id") or "REQ-00"),
-            str(fp.get("requirement_group_title") or fp.get("module") or "需求分组"),
-        )
-        groups.setdefault(group_key, []).append(fp)
+    # 总纲固定结构：根 → 模块 → 场景 → 功能点 → CaseID-标题 → 字段节点 → 步骤
+    # 按 source_order 保原文顺序，在原文顺序内按 module、再按 scene 分组（不跳过 scene 层）
+    ordered_fps = sorted(function_points.get("function_points", []), key=lambda item: item.get("source_order", 0))
+    modules: dict[str, dict[str, list[dict]]] = {}
+    for fp in ordered_fps:
+        module = fp.get("module") or "默认模块"
+        scene = fp.get("scene") or module
+        modules.setdefault(module, {}).setdefault(scene, []).append(fp)
 
-    for (_group_id, group_title), fps in groups.items():
-        _append_node(lines, 0, group_title)
-        modules: dict[str, list[dict]] = {}
-        for fp in fps:
-            modules.setdefault(fp.get("module") or "默认模块", []).append(fp)
-        for module, module_fps in modules.items():
-            _append_node(lines, 1, f"模块：{module}")
-            for fp in module_fps:
+    for module, scenes in modules.items():
+        _append_node(lines, 0, f"模块：{module}")
+        for scene, scene_fps in scenes.items():
+            _append_node(lines, 1, f"场景：{scene}")
+            for fp in scene_fps:
                 fp_id = fp.get("fp_id") or "FP-000"
-                scene = fp.get("scene") or module
                 fp_title = fp.get("title") or fp.get("name") or fp.get("description") or "功能点"
-                _append_node(lines, 2, f"{fp_id}：{scene} / {fp_title}")
+                _append_node(lines, 2, f"{fp_id}：{fp_title}")
                 if fp.get("description"):
                     _append_node(lines, 3, f"说明：{_short_text(fp.get('description'), 120)}")
                 rules = fp.get("rules") or []
@@ -3086,18 +2761,19 @@ def _build_xmindmark(
                     case_id = case.get("case_id") or "TC-000"
                     category = _normalize_category(case.get("category"))
                     title = _short_text(case.get("title") or "测试用例", 90)
-                    _append_node(lines, 3, f"{case_id}｜{case.get('priority') or 'P1'}｜{_category_label(category)}｜{title}")
+                    _append_node(lines, 3, f"{case_id}-{title}")
+                    _append_node(lines, 4, f"优先级：{case.get('priority') or 'P1'}｜类型：{_category_label(category)}")
+                    expected = case.get("expected_results") or []
+                    expected_items = expected if isinstance(expected, list) else [expected]
+                    if expected_items:
+                        _append_node(lines, 4, f"预期摘要：{_short_text('；'.join(str(item) for item in expected_items[:2]), 160)}")
                     steps = case.get("steps") or []
                     if not isinstance(steps, list):
                         steps = [str(steps)]
                     if steps:
                         _append_node(lines, 4, "操作步骤")
-                        for step_index, step in enumerate(steps[:3], start=1):
-                            _append_node(lines, 5, f"{step_index}. {_short_text(_step_to_text(step), 120)}")
-                    expected = case.get("expected_results") or []
-                    expected_items = expected if isinstance(expected, list) else [expected]
-                    if expected_items:
-                        _append_node(lines, 4, f"预期：{_short_text('；'.join(str(item) for item in expected_items[:2]), 160)}")
+                        for step_index, step in enumerate(steps[:6], start=1):
+                            _append_node(lines, 5, f"步骤{step_index}：{_short_text(_step_to_text(step), 120)}")
                     refs = _case_evidence_refs(case, fp)
                     if refs:
                         _append_node(lines, 4, "图片/证据：" + "，".join(refs))
@@ -3109,7 +2785,7 @@ def _build_xmindmark(
         _append_node(lines, 2, "FP-UNMAPPED：未映射功能点")
         for case in unmapped_cases:
             _append_node(lines, 3, f"{case.get('case_id')}-{case.get('title')}")
-            _append_node(lines, 4, f"优先级：{case.get('priority') or 'P1'}｜类型：{case.get('category') or '功能'}")
+            _append_node(lines, 4, f"优先级：{case.get('priority') or 'P1'}｜类型：{_category_label(_normalize_category(case.get('category')))}")
 
     text = "\n".join(lines) + "\n"
     _validate_xmindmark(text)
@@ -3241,6 +2917,42 @@ def _build_case_generation_quality_summary(function_points: dict, testcase_packa
         "evidence_case_count": evidence_case_count,
         "evidence_coverage_rate": (evidence_case_count / len(cases)) if cases else 0,
     }
+
+
+def _dedupe_cases_global(cases: list[dict]) -> list[dict]:
+    """跨补齐轮次的全局去重：按 (fp_id, 规整化标题) 唯一。"""
+    seen: set[tuple[str, str]] = set()
+    unique: list[dict] = []
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        key = (case.get("fp_id") or "", re.sub(r"\s+", "", str(case.get("title") or "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(case)
+    return unique
+
+
+def _renumber_cases_global(cases: list[dict], function_points: dict) -> list[dict]:
+    """补齐合并后全局重排并重写 case_id，消除重复/跳跃的编号。"""
+    fp_by_id = {item.get("fp_id"): item for item in function_points.get("function_points", []) if isinstance(item, dict)}
+    sorted_cases = sorted(
+        cases,
+        key=lambda item: (
+            str(fp_by_id.get(item.get("fp_id"), {}).get("source_order", "")),
+            item.get("fp_id") or "",
+            item.get("category") or "",
+            item.get("title") or "",
+        ),
+    )
+    fp_case_counts: dict[str, int] = {}
+    for global_index, case in enumerate(sorted_cases, start=1):
+        fp_id = case.get("fp_id") or f"FP-{global_index:03d}"
+        fp_number = re.sub(r"\D", "", fp_id)[-3:] or f"{global_index:03d}"
+        fp_case_counts[fp_id] = fp_case_counts.get(fp_id, 0) + 1
+        case["case_id"] = f"TC-{fp_number}-{fp_case_counts[fp_id]:03d}"
+    return sorted_cases
 
 
 @celery_app.task(name="app.tasks.case_generation.run_case_generation_job")
@@ -3393,62 +3105,40 @@ def run_case_generation_job(job_id: int) -> None:
         _raise_if_job_cancelled(db, job.id)
         review_report["quality_summary"] = _build_case_generation_quality_summary(function_points, testcase_package)
         _persist_stage_artifact(output_dir, "review_report.json", review_report)
-        for repair_round in range(1, _TESTCASE_REPAIR_MAX_ROUNDS + 1):
-            repair_tasks = _extract_repair_tasks(review_report, function_points)
-            readiness = (review_report.get("summary") or {}).get("release_readiness")
-            if readiness != "fail" and not repair_tasks:
-                break
-            if not repair_tasks:
-                _gate(readiness != "fail", "quality-reviewer 审查结论为 fail，且未返回可执行修复任务")
-                break
+        # 单次审查即定稿：审查只产出报告与结论，不再驱动返工循环（对齐 claw_5skill_final）
+        testcase_package = {
+            "testcases": _renumber_cases_global(
+                _dedupe_cases_global(testcase_package.get("testcases") or []),
+                function_points,
+            )
+        }
+        _persist_stage_artifact(output_dir, "testcase_package.json", testcase_package)
+        review_report["case_count"] = len(testcase_package.get("testcases") or [])
+
+        final_readiness = (review_report.get("summary") or {}).get("release_readiness")
+        conditional_export = final_readiness == "fail"
+        attach_review_report = final_readiness in {"conditional_pass", "fail"}
+        review_findings = review_report.get("findings") or []
+        if final_readiness == "fail":
             _update_stage(
                 job,
                 db,
-                "repair",
-                "用例补齐",
-                "running",
-                f"第 {repair_round}/{_TESTCASE_REPAIR_MAX_ROUNDS} 轮质量修复，待处理 {len(repair_tasks)} 项",
+                "review",
+                "质量审查",
+                "success",
+                f"审查未通过（有条件导出），保留 {len(review_findings)} 项待人工复核问题",
             )
-
-            def update_repair_progress(summary: str, current_round: int = repair_round) -> None:
-                _update_stage(job, db, "repair", "用例补齐", "running", f"第 {current_round} 轮质量修复：{summary}")
-                _raise_if_job_cancelled(db, job.id)
-
-            testcase_package = _repair_testcase_package_with_review(
-                testcase_package=testcase_package,
-                review_report=review_report,
-                function_points=function_points,
-                pending_confirmations=pending_confirmations,
-                api_key=api_key,
-                model=model,
-                base_url=base_url,
-                audit_log=audit_log,
-                progress_callback=update_repair_progress,
+        elif final_readiness == "conditional_pass":
+            _update_stage(
+                job,
+                db,
+                "review",
+                "质量审查",
+                "success",
+                f"审查有条件通过，保留 {len(review_findings)} 项改进建议",
             )
-            _raise_if_job_cancelled(db, job.id)
-            _persist_stage_artifact(output_dir, "testcase_package.json", testcase_package)
-            _update_stage(job, db, "repair", "用例补齐", "success", f"第 {repair_round} 轮修复后共 {len(testcase_package.get('testcases', []))} 条用例")
-            _update_stage(job, db, "review", "质量复审", "running", f"正在进行第 {repair_round} 轮质量复审")
-            review_report = _build_review_report(
-                evidence_trace,
-                function_points,
-                testcase_package,
-                pending_confirmations,
-                api_key,
-                model,
-                base_url,
-                audit_log,
-                block_on_fail=False,
-            )
-            _raise_if_job_cancelled(db, job.id)
-            review_report["quality_summary"] = _build_case_generation_quality_summary(function_points, testcase_package)
-            _persist_stage_artifact(output_dir, "review_report.json", review_report)
-        final_readiness = (review_report.get("summary") or {}).get("release_readiness")
-        _gate(final_readiness != "fail", "quality-reviewer 复审结论为 fail，禁止导出 XMind")
-        if _extract_repair_tasks(review_report, function_points):
-            _update_stage(job, db, "review", "质量复审", "success", "复审通过，仍保留后续优化建议")
         else:
-            _update_stage(job, db, "review", "质量复审", "success", "复审通过")
+            _update_stage(job, db, "review", "质量审查", "success", "审查通过")
         execution_proof = _build_execution_proof(
             audit_log=audit_log,
             image_links=image_links,
@@ -3484,6 +3174,11 @@ def run_case_generation_job(job_id: int) -> None:
             )
         xmindmark_text = _build_xmindmark(job, function_points, testcase_package, review_report)
 
+        try:
+            _write_text_file(output_dir, "delivery_summary.md", _build_delivery_summary(job, function_points, testcase_package, review_report))
+        except Exception:
+            pass
+
         xmindmark_file_name = f"{output_stem}.xmindmark"
         xmindmark_file_path = _write_text_file(output_dir, xmindmark_file_name, xmindmark_text)
 
@@ -3512,10 +3207,26 @@ def run_case_generation_job(job_id: int) -> None:
         _raise_if_job_cancelled(db, job.id)
         _remove_file_if_exists(xmindmark_file_path)
         _update_stage(job, db, "export", "导出 XMind", "success", "已完成 XMind 导出")
+        review_report_path = None
+        if attach_review_report:
+            review_report_path = _write_json_file(output_dir, "review_report.json", review_report)
+            _upsert_artifact(
+                db,
+                job_id=job.id,
+                artifact_type="review_report",
+                file_name="review_report.json",
+                file_path=review_report_path,
+                content_json=review_report,
+            )
         job.input_payload_json = sanitize_case_generation_payload(payload, cleanup_secret=True)
         job.status = "SUCCESS"
         job.task_id = None
-        job.summary = f"已生成 {review_report['case_count']} 条用例，并导出 XMind"
+        if final_readiness == "fail":
+            job.summary = f"已导出 XMind（质量审查未通过，{len(review_findings)} 项问题待人工复核），共 {review_report['case_count']} 条用例"
+        elif final_readiness == "conditional_pass":
+            job.summary = f"已生成 {review_report['case_count']} 条用例并导出 XMind（有条件通过，{len(review_findings)} 项改进建议）"
+        else:
+            job.summary = f"已生成 {review_report['case_count']} 条用例，并导出 XMind"
         job.error_message = None
         job.finished_at = utc_now_naive()
         db.commit()
@@ -3524,6 +3235,8 @@ def run_case_generation_job(job_id: int) -> None:
         _cleanup_expired_success_xmind(db, retention_days=3)
         db.commit()
         keep_paths = _collect_final_artifact_paths(db, job.id)
+        if review_report_path:
+            keep_paths.add(review_report_path)
         _cleanup_case_generation_output_dir(output_dir, keep_paths=keep_paths)
     except Exception as exc:
         job = db.get(CaseGenerationJob, job_id)

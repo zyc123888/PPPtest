@@ -55,6 +55,10 @@ services:
       FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
       CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
       CASE_GENERATION_RULES_DIR: claw_5skill_final
+      CASE_GEN_MAX_CONCURRENCY: "8"
+      CASE_GEN_REQUIREMENT_MAX_TOKENS: "8000"
+      CASE_GEN_TESTCASE_REPAIR_MAX_ROUNDS: "1"
+      CASE_GEN_MIN_CASES_PER_FUNCTION_POINT: "3"
     depends_on:
       mysql:
         condition: service_healthy
@@ -100,6 +104,10 @@ services:
       BACKEND_PUBLIC_URL: http://127.0.0.1:8000
       FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
       CASE_GENERATION_RULES_DIR: claw_5skill_final
+      CASE_GEN_MAX_CONCURRENCY: "8"
+      CASE_GEN_REQUIREMENT_MAX_TOKENS: "8000"
+      CASE_GEN_TESTCASE_REPAIR_MAX_ROUNDS: "1"
+      CASE_GEN_MIN_CASES_PER_FUNCTION_POINT: "3"
     depends_on:
       mysql:
         condition: service_healthy

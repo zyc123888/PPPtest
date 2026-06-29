@@ -261,11 +261,13 @@ def test_case_generation_retries_incomplete_json_before_repair(monkeypatch) -> N
     assert seen_max_tokens == [100, 150]
 
 
-def test_case_generation_testcase_gate_normalizes_template_steps_before_reject(monkeypatch) -> None:
+def test_case_generation_passes_through_ai_steps_without_python_strengthening(monkeypatch) -> None:
+    # Phase 1 起移除 Python 代笔强化（_build_specific_steps 等）：步骤/标题由 AI 原样输出，
+    # 质量交由 prompt 约束 + quality-reviewer 把关，后端只做结构规整与字段形态对齐（Phase 3）。
     from app.tasks import case_generation
 
     async def fake_skill_with_gate_async(**kwargs):
-        return {
+        result = {
             "testcases": [
                 {
                     "case_id": "TC-TEMP-001",
@@ -274,7 +276,7 @@ def test_case_generation_testcase_gate_normalizes_template_steps_before_reject(m
                     "category": "functional",
                     "priority": "P1",
                     "preconditions": [],
-                    "test_data": [],
+                    "test_data": ["开始日期: 2026-04-01"],
                     "steps": [
                         {"step_no": 1, "action": "进入对应页面"},
                         {"step_no": 2, "action": "执行 正常流程验证"},
@@ -287,6 +289,8 @@ def test_case_generation_testcase_gate_normalizes_template_steps_before_reject(m
                 }
             ]
         }
+        kwargs["validator"](result)
+        return result
 
     monkeypatch.setattr(case_generation, "_call_skill_with_gate_async", fake_skill_with_gate_async)
 
@@ -318,9 +322,13 @@ def test_case_generation_testcase_gate_normalizes_template_steps_before_reject(m
 
     case = result["testcases"][0]
     steps_text = " ".join(case_generation._step_to_text(item) for item in case["steps"])
-    assert case["title"] != "正常流程验证"
-    assert "进入对应页面" not in steps_text
-    assert "执行 正常流程验证" not in steps_text
+    # 不再做 Python 强化/改写：标题与步骤按 AI 原样保留
+    assert case["title"] == "正常流程验证"
+    assert "进入对应页面" in steps_text
+    # Phase 3 字段形态：test_data 为 [{name, value}] 对象数组，review_flags 补全
+    assert case["test_data"] == [{"name": "开始日期", "value": "2026-04-01"}]
+    assert case["review_flags"]["executable_risk"] in {"low", "medium", "high"}
+    assert case["review_flags"]["ambiguity_risk"] in {"low", "medium", "high"}
 
 
 def test_case_generation_requirement_allows_empty_intermediate_batches(monkeypatch) -> None:
@@ -503,7 +511,9 @@ def test_case_generation_review_fail_blocks_export(monkeypatch) -> None:
         raise AssertionError("review fail should block export")
 
 
-def test_case_generation_rejects_generic_case_titles(monkeypatch) -> None:
+def test_case_generation_no_hard_gate_on_generic_titles(monkeypatch) -> None:
+    # Phase 1 起移除「模板标题硬门禁」：generic 标题不再由 Python 抛错拦截，
+    # 改由 prompt 约束 + quality-reviewer 评判。后端只做结构校验与字段形态对齐。
     from app.tasks import case_generation
 
     async def fake_skill_with_gate_async(**kwargs):
@@ -530,28 +540,30 @@ def test_case_generation_rejects_generic_case_titles(monkeypatch) -> None:
         return result
 
     monkeypatch.setattr(case_generation, "_call_skill_with_gate_async", fake_skill_with_gate_async)
-    try:
-        case_generation._build_testcase_package(
-            {
-                "function_points": [
-                    {
-                        "fp_id": "FP-001",
-                        "module": "登录模块",
-                        "scene": "账号登录",
-                        "title": "支持账号密码登录",
-                        "description": "用户输入账号密码后完成登录",
-                        "rules": ["密码错误时提示错误原因"],
-                    }
-                ]
-            },
-            [],
-            "sk-test",
-            "gpt-4.1",
-        )
-    except ValueError as exc:
-        assert "标题过于模板化" in str(exc)
-    else:
-        raise AssertionError("generic case title should fail")
+    result = case_generation._build_testcase_package(
+        {
+            "function_points": [
+                {
+                    "fp_id": "FP-001",
+                    "module": "登录模块",
+                    "scene": "账号登录",
+                    "title": "支持账号密码登录",
+                    "description": "用户输入账号密码后完成登录",
+                    "rules": ["密码错误时提示错误原因"],
+                }
+            ]
+        },
+        [],
+        "sk-test",
+        "gpt-4.1",
+    )
+
+    case = result["testcases"][0]
+    # 不再硬门禁：generic 标题原样透传
+    assert case["title"] == "正常流程验证"
+    # Phase 3 字段形态：review_flags 补全为对象、test_data 为列表
+    assert set(case["review_flags"]) == {"executable_risk", "ambiguity_risk"}
+    assert isinstance(case["test_data"], list)
 
 
 def test_case_generation_requires_skill_execution_proof() -> None:
