@@ -41,9 +41,14 @@ class Settings(BaseSettings):
     case_gen_qwen_compatible_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     case_gen_qwen_coding_intl_base_url: str = "https://coding-intl.dashscope.aliyuncs.com/v1"
     case_gen_image_analysis_batch_size: int = 8
-    case_gen_requirement_section_text_limit: int = 1200
-    case_gen_requirement_total_text_limit: int = 36000
-    case_gen_requirement_batch_text_limit: int = 700
+    # —— 输入侧上限：利用大上下文模型（~1M token），尽量保留章节完整正文 ——
+    # section/total 控制“喂给模型的输入文本量”，输入便宜故放宽；
+    # batch_text_limit + batch_max_sections 控制“每批规模”，真正保护的是 8K 输出不被截断。
+    case_gen_requirement_section_text_limit: int = 6000
+    case_gen_requirement_total_text_limit: int = 200000
+    case_gen_requirement_batch_text_limit: int = 6000
+    case_gen_requirement_batch_max_sections: int = 4
+    # 输出侧上限：模型单次输出硬限，分批就是为了让每批输出 JSON 能完整闭合，勿随意调大
     case_gen_requirement_max_tokens: int = 8000
     case_gen_pending_confirmation_limit: int = 12
     case_gen_pending_confirmation_text_limit: int = 220

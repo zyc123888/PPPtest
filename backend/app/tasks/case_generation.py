@@ -49,6 +49,7 @@ _IMAGE_ANALYSIS_BATCH_SIZE = settings.case_gen_image_analysis_batch_size
 _REQUIREMENT_SECTION_TEXT_LIMIT = settings.case_gen_requirement_section_text_limit
 _REQUIREMENT_TOTAL_TEXT_LIMIT = settings.case_gen_requirement_total_text_limit
 _REQUIREMENT_BATCH_TEXT_LIMIT = settings.case_gen_requirement_batch_text_limit
+_REQUIREMENT_BATCH_MAX_SECTIONS = settings.case_gen_requirement_batch_max_sections
 _REQUIREMENT_MAX_TOKENS = settings.case_gen_requirement_max_tokens
 _PENDING_CONFIRMATION_LIMIT = settings.case_gen_pending_confirmation_limit
 _PENDING_CONFIRMATION_TEXT_LIMIT = settings.case_gen_pending_confirmation_text_limit
@@ -903,6 +904,165 @@ def _extract_sections(markdown_text: str) -> list[dict]:
     return sections
 
 
+# —— 背景/概述类章节：明确不分析、不生成、不审查 ——
+# 这类章节只是需求文档的引言/环境说明/术语，本身不构成可测需求；
+# 强制为其生成用例会产生“环境URL可访问性”之类的虚高用例。这里在分析入口处
+# 直接剔除，使后续的功能点提取、用例设计、质量审查全程都看不到它们。
+_BACKGROUND_SECTION_TITLE_PATTERNS = (
+    "需求背景",
+    "背景",
+    "概述",
+    "前言",
+    "引言",
+    "修订记录",
+    "修改记录",
+    "版本记录",
+    "术语",
+    "名词解释",
+    "文档说明",
+    "需求概览",
+    "overview",
+    "background",
+    "introduction",
+    "revision history",
+)
+
+
+def _is_background_section(section: dict) -> bool:
+    title_key = _normalize_title_key(section.get("title"))
+    if not title_key:
+        return False
+    # 去掉中文序号前缀（如“一、需求背景”→“需求背景”）后再匹配，避免漏判
+    stripped = re.sub(r"^[一二三四五六七八九十0-9]+[、.．\s]*", "", title_key)
+    for pattern in _BACKGROUND_SECTION_TITLE_PATTERNS:
+        key = re.sub(r"\s+", "", pattern.lower())
+        if title_key == key or stripped == key:
+            return True
+    return False
+
+
+def _filter_out_background_sections(sections: list[dict]) -> tuple[list[dict], list[dict]]:
+    """剔除背景/概述类章节，返回 (保留章节, 被剔除章节)。
+
+    仅对“顶层背景章节”及其子章节生效：若一个被判定为背景的章节下还有子章节，
+    这些子章节也一并剔除（背景章节内部通常不含独立可测需求）。
+    """
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    skip_until_level: int | None = None
+    for section in sections:
+        level = section.get("level", 1)
+        if skip_until_level is not None:
+            if level > skip_until_level:
+                dropped.append(section)
+                continue
+            skip_until_level = None
+        if _is_background_section(section):
+            dropped.append(section)
+            skip_until_level = level
+            continue
+        kept.append(section)
+    return kept, dropped
+
+# claw_5skill_final/skills/requirement-analyzer/SKILL.md 规定 module/scene 必须
+# 继承需求文档原始章节标题，但 LLM 经常自创/翻译/归并模块名。这里在代码侧把
+# 功能点的 module/scene 确定性回填为真实章节标题，不再依赖模型自觉。
+_MODULE_LEVEL_THRESHOLD = 2  # level<=该阈值的最近祖先章节作为 module，更深章节作为 scene
+_HEADING_INLINE_TAG_PATTERN = re.compile(r"<[^>]+>")
+_HEADING_STATUS_PATTERN = re.compile(r"【[^】]*】")
+
+
+def _clean_heading_text(title) -> str:
+    """清洗章节标题：剥离内联 HTML/font 标签与【已完成】等状态标记。"""
+    text = _HEADING_INLINE_TAG_PATTERN.sub("", str(title or ""))
+    text = _HEADING_STATUS_PATTERN.sub("", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_title_key(value) -> str:
+    """标题归一化键，用于功能点与章节标题的鲁棒匹配。"""
+    return re.sub(r"\s+", "", _clean_heading_text(value)).lower()
+
+
+def _build_section_lineage(sections: list[dict]) -> dict[int, dict]:
+    """为每个章节 source_order 计算确定性的 (module, scene) 归属。
+
+    module = 该章节 level<=_MODULE_LEVEL_THRESHOLD 的最近祖先标题；
+    scene  = 章节自身标题。这样 L2 章节成为 module、其下 L3 章节成为 scene，
+    既符合 SKILL 规则（module 一级分组、scene 二级分组），又严格跟随原文。
+    """
+    lineage: dict[int, dict] = {}
+    ancestors: list[dict] = []  # 祖先栈：[{level, title}]
+    for sec in sections:
+        level = sec.get("level", 1)
+        title = _clean_heading_text(sec.get("title")) or str(sec.get("title") or "").strip()
+        while ancestors and ancestors[-1]["level"] >= level:
+            ancestors.pop()
+        chain = ancestors + [{"level": level, "title": title}]
+        module_candidates = [a["title"] for a in chain if a["level"] <= _MODULE_LEVEL_THRESHOLD and a["title"]]
+        module = module_candidates[-1] if module_candidates else (chain[0]["title"] or "默认模块")
+        lineage[sec.get("source_order")] = {
+            "module": module or "默认模块",
+            "scene": title or module or "默认场景",
+            "title": title,
+            "level": level,
+        }
+        ancestors.append({"level": level, "title": title})
+    return lineage
+
+
+def _realign_function_point_modules(
+    function_points: list[dict], lineage: dict[int, dict]
+) -> int:
+    """把功能点的 module/scene 确定性回填为真实章节标题。
+
+    锚定优先级：1) source_order 命中章节序号；2) source_refs 引用的章节标题；
+    3) 模型已填 module/scene/title 与章节标题匹配。无法锚定时保留原值，不破坏数据。
+    返回被修正的功能点数量。
+    """
+    if not lineage:
+        return 0
+    titles_norm: dict[str, dict] = {}
+    for info in lineage.values():
+        key = _normalize_title_key(info.get("title"))
+        if key:
+            titles_norm.setdefault(key, info)
+    realigned = 0
+    for fp in function_points:
+        if not isinstance(fp, dict):
+            continue
+        info = None
+        source_order = fp.get("source_order")
+        if isinstance(source_order, int) and source_order in lineage:
+            info = lineage[source_order]
+        if info is None:
+            for ref in fp.get("source_refs") or []:
+                if not isinstance(ref, dict):
+                    continue
+                for key in ("section", "doc", "quote"):
+                    candidate = _normalize_title_key(ref.get(key))
+                    if candidate and candidate in titles_norm:
+                        info = titles_norm[candidate]
+                        break
+                if info:
+                    break
+        if info is None:
+            for key in ("title", "module", "scene"):
+                candidate = _normalize_title_key(fp.get(key))
+                if candidate and candidate in titles_norm:
+                    info = titles_norm[candidate]
+                    break
+        if info is None:
+            continue
+        new_module = info["module"]
+        new_scene = info["scene"] or new_module
+        if fp.get("module") != new_module or fp.get("scene") != new_scene:
+            realigned += 1
+        fp["module"] = new_module
+        fp["scene"] = new_scene
+    return realigned
+
+
 def _strip_markdown_noise(text: str) -> str:
     value = _HTML_COMMENT_PATTERN.sub("", text or "")
     value = _MARKDOWN_IMAGE_PATTERN.sub("", value)
@@ -918,23 +1078,52 @@ def _truncate_text(value: str, limit: int) -> str:
     return f"{text[:limit]}..."
 
 
+def _truncate_keep_key_paragraphs(body: str, limit: int) -> str:
+    """在长度上限内尽量保留正文，超长时优先保留含测试价值关键词的段落。
+
+    与简单截断不同：先按段落切分，保证保留首段（通常是功能描述），
+    再优先纳入包含“规则/限制/必须/禁止/异常/边界/默认/校验/否则”等
+    关键词的段落，确保大章节里真正可测的规则不被截掉。
+    """
+    text = (body or "").strip()
+    if len(text) <= limit:
+        return text
+    paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+    if not paragraphs:
+        return _truncate_text(text, limit)
+    key_markers = ("规则", "限制", "必须", "禁止", "不允许", "异常", "边界", "默认", "校验", "否则", "当", "如果", "需", "支持", "约束")
+    selected: list[str] = []
+    used = 0
+    # 首段优先保留
+    first = paragraphs[0]
+    selected.append(first)
+    used += len(first)
+    # 其余段落：含关键词的优先
+    rest = paragraphs[1:]
+    key_paras = [p for p in rest if _text_contains_any(p, key_markers)]
+    other_paras = [p for p in rest if not _text_contains_any(p, key_markers)]
+    for para in key_paras + other_paras:
+        if used + len(para) + 2 > limit:
+            continue
+        selected.append(para)
+        used += len(para) + 2
+    result = "\n\n".join(selected)
+    return result if result else _truncate_text(text, limit)
+
+
 def _compact_sections_for_ai(sections: list[dict], *, per_section_limit: int = 2400, total_limit: int = 24000) -> list[dict]:
     compacted: list[dict] = []
     total = 0
-    
-    # 关键段落优先策略：L1/L2 标题及其首段必须保留
+
     for item in sections:
         level = item.get("level", 3)
         body = _strip_markdown_noise(item.get("body") or "")
-        
-        # L1/L2 章节保留更多文本（关键架构信息）
-        if level <= 2:
-            body = _truncate_text(body, per_section_limit)
-        else:
-            # L3+ 章节仅保留首段和关键规则（节省 Token）
-            first_para = body.split("\n\n")[0] if body else ""
-            body = _truncate_text(first_para, per_section_limit // 2)
-        
+
+        # 大上下文模型下尽量保留完整章节正文，避免丢失同章节的规则与上下文：
+        # 所有层级都保留完整正文，仅在超过 per_section_limit 时才按
+        # “关键段落优先”策略压缩，而不再像旧逻辑那样把 L3+ 章节砍到只剩第一段。
+        body = _truncate_keep_key_paragraphs(body, per_section_limit)
+
         payload = {
             "title": item["title"],
             "level": item["level"],
@@ -983,7 +1172,11 @@ def _build_requirement_section_batches(compact_sections: list[dict]) -> list[lis
                 current_size = 0
             batches.append([section])
             continue
-        if current_batch and current_size + section_size > _REQUIREMENT_BATCH_TEXT_LIMIT:
+        # 同时受「文本大小」与「章节数」双重上限约束：任一超出即开新批，
+        # 避免大量短章节挤进同一批后被「每批功能点上限」截断而丢失章节。
+        exceeds_text = current_batch and current_size + section_size > _REQUIREMENT_BATCH_TEXT_LIMIT
+        exceeds_count = current_batch and len(current_batch) >= _REQUIREMENT_BATCH_MAX_SECTIONS
+        if exceeds_text or exceeds_count:
             batches.append(current_batch)
             current_batch = []
             current_size = 0
@@ -1783,7 +1976,16 @@ async def _analyze_image_batch_async(
     model: str,
     base_url: str,
     batch: list[dict],
-) -> list[dict]:
+    max_attempts: int = 3,
+) -> dict:
+    """识别单批图片。
+
+    返回 {"images": [...], "failed_batch": [...]}：
+    - 成功时 failed_batch 为空；
+    - 空响应/异常时自动重试 max_attempts 次；
+    - 全部重试仍失败则降级：images 为空、failed_batch 记录该批图片与原因，
+      由上层写入 pending_confirmations，任务继续而非整体失败。
+    """
     content: list[dict] = [
         {
             "type": "text",
@@ -1799,25 +2001,54 @@ async def _analyze_image_batch_async(
     for item in batch:
         content.append({"type": "text", "text": f"图片 ID: {item['image_id']}，来源 URL: {item['url']}"})
         content.append({"type": "image_url", "image_url": {"url": _image_to_data_url(item["file_path"])}})
-    result = await _call_openai_json_async(
-        api_key=api_key,
-        model=model,
-        base_url=base_url,
-        system_prompt=(
-            "你正在执行 claw_5skill_final 的 requirement-analyzer 识图阶段。\n"
-            "必须输出合法 JSON，且每张成功下载的图片都要有识别结论；绝不能用链接或正文描述替代实际识图。"
-        ),
-        user_content=content,
-        max_tokens=4200,
-        timeout_seconds=_DEFAULT_CHAT_TIMEOUT_SECONDS,
-    )
-    return result.get("images") or []
+
+    last_error = ""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = await _call_openai_json_async(
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                system_prompt=(
+                    "你正在执行 claw_5skill_final 的 requirement-analyzer 识图阶段。\n"
+                    "必须输出合法 JSON，且每张成功下载的图片都要有识别结论；绝不能用链接或正文描述替代实际识图。"
+                ),
+                user_content=content,
+                max_tokens=4200,
+                timeout_seconds=_DEFAULT_CHAT_TIMEOUT_SECONDS,
+            )
+            images = result.get("images") or []
+            if images:
+                return {"images": images, "failed_batch": []}
+            # 模型返回了合法 JSON 但 images 为空 —— 视为空响应，触发重试
+            last_error = "模型未返回任何图片识别结果（images 为空）"
+        except Exception as exc:
+            last_error = str(exc)
+            # 不可重试错误（如鉴权失败、模型不存在）直接停止重试，进入降级
+            if _is_non_retryable_model_error(exc):
+                break
+        # 非最后一次尝试则继续重试
+    # 降级：跳过该批，记录失败信息
+    failed_batch = [
+        {
+            "image_id": item.get("image_id"),
+            "url": item.get("url"),
+            "reason": last_error or "图片识别返回空响应",
+        }
+        for item in batch
+    ]
+    return {"images": [], "failed_batch": failed_batch}
 
 
-async def _analyze_images_async(api_key: str, model: str, base_url: str, downloaded_images: list[dict]) -> list[dict]:
+async def _analyze_images_async(api_key: str, model: str, base_url: str, downloaded_images: list[dict]) -> dict:
+    """识别全部已下载图片，返回 {"images": [...], "skipped": [...]}。
+
+    单批失败不再使整个任务失败：失败批次被跳过并记入 skipped，供上层写入
+    pending_confirmations。仅当“所有”批次都失败时才判定识图阶段整体失败。
+    """
     successful = [item for item in downloaded_images if item.get("download_status") == "success" and item.get("file_path")]
     if not successful:
-        return []
+        return {"images": [], "skipped": []}
 
     batches = [
         successful[offset : offset + _IMAGE_ANALYSIS_BATCH_SIZE]
@@ -1829,15 +2060,33 @@ async def _analyze_images_async(api_key: str, model: str, base_url: str, downloa
             for batch in batches
         ]
     )
-    images = [image for batch_images in batch_results for image in batch_images]
+    images: list[dict] = []
+    skipped: list[dict] = []
+    for result in batch_results:
+        images.extend(result.get("images") or [])
+        skipped.extend(result.get("failed_batch") or [])
+
+    # 全部批次都失败才整体报错；否则部分成功即放行，缺失图片降级为待确认
+    if not images and skipped:
+        raise ValueError(f"图片识别全部失败：{skipped[0].get('reason') if skipped else '模型输出为空'}")
 
     observed_ids = {item.get("image_id") for item in images}
-    missing = [item["image_id"] for item in successful if item["image_id"] not in observed_ids]
-    _gate(not missing, f"图片识别结果缺少：{', '.join(missing)}")
-    return images
+    skipped_ids = {entry.get("image_id") for entry in skipped}
+    for item in successful:
+        image_id = item.get("image_id")
+        if image_id not in observed_ids and image_id not in skipped_ids:
+            # 模型既没识别、批次也没标记失败（理论上少见）—— 同样降级为待确认
+            skipped.append(
+                {
+                    "image_id": image_id,
+                    "url": item.get("url"),
+                    "reason": "图片识别结果缺失",
+                }
+            )
+    return {"images": images, "skipped": skipped}
 
 
-def _analyze_images(api_key: str, model: str, base_url: str, downloaded_images: list[dict]) -> list[dict]:
+def _analyze_images(api_key: str, model: str, base_url: str, downloaded_images: list[dict]) -> dict:
     return asyncio.run(_analyze_images_async(api_key, model, base_url, downloaded_images))
 
 
@@ -1848,12 +2097,24 @@ def _build_requirement_analysis(
     markdown_text: str,
     downloaded_images: list[dict],
     image_analysis: list[dict],
+    image_skip_notes: list[dict] | None = None,
     api_key: str,
     model: str,
     base_url: str | None = None,
     audit_log: list[dict] | None = None,
 ) -> dict:
     sections = _extract_sections(markdown_text)
+    # 背景/概述类章节明确不参与分析/生成/审查，在源头剔除
+    sections, dropped_background = _filter_out_background_sections(sections)
+    if dropped_background and audit_log is not None:
+        audit_log.append(
+            {
+                "skill": "requirement-analyzer",
+                "attempt": "background-filter",
+                "status": "passed",
+                "dropped_background_sections": [s.get("title") for s in dropped_background],
+            }
+        )
     failed_images = [item for item in downloaded_images if item.get("download_status") == "failed"]
     compact_sections = _compact_sections_for_ai(
         sections,
@@ -2025,6 +2286,13 @@ def _build_requirement_analysis(
                 f"正在生成证据链和功能点（第 {batch_index}/{batch_count} 批）",
             )
         include_images = batch_index == 1
+        # 本批有正文的章节数：用于约束“每个章节至少各产出 1 个功能点”，避免丢章节
+        batch_section_titles = [
+            (sec.get("title") or "").strip()
+            for sec in batch_sections
+            if (sec.get("body") or "").strip()
+        ]
+        batch_section_count = len(batch_section_titles) or len(batch_sections)
         prompt = {
             "task": "按 claw_5skill_final 的 requirement-analyzer 规则，执行【阶段 2：Text Parse】、【阶段 3：Cross-Source Alignment】和【阶段 4：Function Point Synthesis】。仅分析本批章节，生成 EvidenceTrace 与 FunctionPoints。",
             "batch": {"index": batch_index, "count": batch_count},
@@ -2037,7 +2305,11 @@ def _build_requirement_analysis(
                 "只输出本批章节能直接追溯到的功能点，不要为其他章节补内容。",
                 "source_refs 必须引用本批章节标题或图片 image_id (如 IMG-001)。",
                 "source_order 必须沿用章节 source_order。",
-                "每批最多输出 6 个功能点，优先保留高价值规则和交互。",
+                "module 必须逐字复制功能点所属章节的标题原文（如『筛选栏优化』『新建阶段字段优化』），严禁改写、翻译成英文、概括或把多个章节合并成一个自创模块名。",
+                "scene 必须使用功能点所属的更细一级章节标题；若该章节没有子章节，则 scene 复用 module 标题。",
+                "禁止依据你对业务/产品的理解自创模块名（例如不得把『筛选栏优化』改成『Ad Manager 筛选器』）；模块名只能来自需求文档真实出现的章节标题。",
+                f"本批共有 {batch_section_count} 个有正文的章节，必须为每一个章节至少提取 1 个功能点，禁止遗漏任何章节；同一章节可按需拆分多个功能点。",
+                f"本批功能点总数不得少于章节数（≥{batch_section_count} 个）；若某章节确实无可测内容，必须在 pending_confirmations 中说明原因，而不是直接跳过。",
                 "如果图片与正文冲突，以正文为主，并在 pending_confirmations 中记录冲突。",
             ],
         }
@@ -2182,6 +2454,20 @@ def _build_requirement_analysis(
         item["fp_id"] = f"FP-{index:03d}"
     _gate(function_points, "需求分析完成但未提取到任何功能点，请确认需求正文包含明确的功能变更或验收规则")
 
+    # —— 模块拆分确定性回填：把 module/scene 强制对齐到需求文档真实章节标题 ——
+    section_lineage = _build_section_lineage(sections)
+    realigned_count = _realign_function_point_modules(function_points, section_lineage)
+    if audit_log is not None:
+        audit_log.append(
+            {
+                "skill": "requirement-analyzer",
+                "attempt": "module-realign",
+                "status": "passed",
+                "realigned_function_points": realigned_count,
+                "total_function_points": len(function_points),
+            }
+        )
+
     # 证据链权威化：以实际下载+识图结果为准，修复分批时“无图批次”污染 image_summary 的幻觉
     successful_images = [item for item in downloaded_images if item.get("download_status") == "success"]
     failed_images = [item for item in downloaded_images if item.get("download_status") == "failed"]
@@ -2253,6 +2539,22 @@ def _build_requirement_analysis(
         return out
 
     canonical_pending = _canonical_pending(pending_confirmations or evidence_pending)
+    # 识图降级：把被跳过的图片批次记入待确认，确保信息不丢失且任务可继续
+    existing_pending_text = json.dumps(canonical_pending, ensure_ascii=False)
+    for note in image_skip_notes or []:
+        image_id = note.get("image_id") or ""
+        url = note.get("url") or ""
+        if (image_id and image_id in existing_pending_text) or (url and url in existing_pending_text):
+            continue
+        canonical_pending.append(
+            {
+                "pending_id": f"PENDING-IMG-{len(canonical_pending) + 1:03d}",
+                "source": "image",
+                "ref_id": image_id or url,
+                "message": f"图片识别降级跳过（{note.get('reason') or '模型返回空响应'}），未参与功能点提取，请人工复核：{url or image_id}",
+                "status": "pending",
+            }
+        )
     _project_name = _sanitize_file_stem(job.source_document_name or job.name)
     _today_iso = utc_now_naive().date().isoformat()
 
@@ -2384,6 +2686,7 @@ def _build_testcase_package(
             "constraints": [
                 "只能覆盖本批 function_points 中的 fp_id，不要生成其他 fp_id。",
                 "每个 fp_id 至少生成 1 条主流程用例；再按测试设计方法库（等价类/边界值/决策表/状态转换/角色权限矩阵/多入口一致性/空值默认值/异常容错/时间时序）选择适用方法补充用例。",
+                "若某功能点的 rules/description 中包含并列列举的多个独立子规则（例如三种占位图：图片出错/未上传/JS代码不支持预览；或多个字段改名映射：A→B、C→D；或多条互斥的保存逻辑分支），必须为每一个子规则各生成至少 1 条独立用例并在标题中点明该子项，禁止把多个并列子规则合并进同一条用例笼统验证。",
                 "按场景价值决定用例数量：不堆数量、不为追求覆盖制造大量同质用例，也不要机械凑数。",
                 "category 只能使用 functional/ui/boundary/negative/regression/compatibility/performance/security。",
                 "priority 只能使用 P0/P1/P2/P3，并参考 function_points.priority_hint；无明确业务优先级时不要过度使用 P0。",
@@ -3023,15 +3326,21 @@ def run_case_generation_job(job_id: int) -> None:
             f"已收集 {len(_extract_sections(markdown_text))} 个章节，发现 {len(image_links)} 张图片链接",
         )
         _update_stage(job, db, "image_analysis", "图片识别", "running", "正在进行图片优先识别")
-        image_analysis = _analyze_images(api_key, model, base_url, downloaded_images)
+        image_result = _analyze_images(api_key, model, base_url, downloaded_images)
+        image_analysis = image_result.get("images") or []
+        image_skip_notes = image_result.get("skipped") or []
         _raise_if_job_cancelled(db, job.id)
+        download_failed_count = sum(1 for item in downloaded_images if item.get("download_status") == "failed")
+        image_summary_text = f"已识别 {len(image_analysis)} 张图片，下载失败 {download_failed_count} 张"
+        if image_skip_notes:
+            image_summary_text += f"，识图降级跳过 {len(image_skip_notes)} 张（已记入待确认）"
         _update_stage(
             job,
             db,
             "image_analysis",
             "图片识别",
             "success",
-            f"已识别 {len(image_analysis)} 张图片，下载失败 {sum(1 for item in downloaded_images if item.get('download_status') == 'failed')} 张",
+            image_summary_text,
         )
 
         _update_stage(job, db, "requirement", "需求分析", "running", "正在生成证据链和功能点")
@@ -3041,6 +3350,7 @@ def run_case_generation_job(job_id: int) -> None:
             markdown_text=markdown_text,
             downloaded_images=downloaded_images,
             image_analysis=image_analysis,
+            image_skip_notes=image_skip_notes,
             api_key=api_key,
             model=model,
             base_url=base_url,
