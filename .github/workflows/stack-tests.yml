@@ -33,6 +33,7 @@ jobs:
           : > backend/reports/pytest-stack.log
           : > backend/reports/pytest-stack.xml
           : > e2e/reports/e2e-stack.log
+          chmod -R a+rwX backend/reports e2e/reports
 
       - name: Compose up
         run: docker compose up --build -d
