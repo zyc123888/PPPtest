@@ -67,9 +67,9 @@
 6. 从第二行开始，子节点必须使用标准 Markdown 列表语法。
 7. 根节点直属子节点顶格写 `- `，更深层统一增加 2 个空格缩进。
 8. 主树内部禁止空行、注释、说明文字和 `# / ## / ###` 标题语法。
-9. 最终 `.xmind` 必须通过本地可用的 `xmindmark` 转换器从 `.xmindmark` 生成。
-10. 如果 `xmindmark` 命令不可用，流程必须中止并报告缺少转换工具。
-11. 不允许退回到 Python、Node.js 或其他脚本手动拼装 `.xmind`。
+9. 最终 `.xmind` 必须通过项目共用的确定性 exporter 从 `.xmindmark` 生成。
+10. exporter 失败或实际文件无法解析时，流程必须中止并报告转换失败。
+11. 业务阶段不得绕过共用 exporter 自行拼装 `.xmind`。
 12. 模块、场景和最终 XMind 顺序必须遵循需求文档原始分类和章节顺序。
 13. `requirement-analyzer` 必须输出 `source_order`，后续 Skill 必须继承并按它排序。
 

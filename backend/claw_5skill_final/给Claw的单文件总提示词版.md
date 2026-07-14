@@ -97,7 +97,7 @@ claw_5skill_final/
 3. `testcase-designer` 不允许回头重读原始需求文档和原始图片。
 4. `quality-reviewer` 不允许省略。
 5. `artifact-exporter` 必须把展示层文案转成中文，不允许把内部英文枚举直接写进导图。
-6. **绝对禁止手动组装 `.xmind` 包。必须先生成 `.xmindmark` 文件，再使用本地可用的 `xmindmark` 转换器生成最终导图文件。若本地不存在 `xmindmark` 命令，则必须中止并报告缺少转换工具，禁止退回脚本拼装。**
+6. **必须先生成 `.xmindmark`，再使用项目共用的确定性 exporter 生成 `.xmind`；业务 Skill 禁止自行拼装，实际交付文件必须可解析且计数一致。**
 7. 若任何局部规则冲突，以“最终只交付同名 `.xmind`”为最高优先级。
 8. 未产出 `EvidenceTrace.yaml` 或 `FunctionPoints.yaml`，禁止进入 `testcase-designer`
 9. 未产出 `TestcasePackage.yaml`，禁止进入 `quality-reviewer`
@@ -175,13 +175,10 @@ testcase-orchestrator
 
 ## XMind 转换约束
 
-1. 最终 `.xmind` 不能通过脚本手动拼装压缩包得到
-2. 必须先生成 `.xmindmark`
-3. 再调用本地可用的 `xmindmark` 转换器生成 `.xmind`
-4. 推荐命令形式：
-   `xmindmark -f xmind "<需求文档同名>.xmindmark" -o "<输出目录>"`
-5. 如果 `xmindmark` 命令不可用，必须中止并报告缺少转换工具
-6. 不允许因为命令不可用而退回到 Python、Node.js 或其他脚本手动拼装 `.xmind`
+1. 必须先生成并校验 `.xmindmark`。
+2. 必须使用项目共用的确定性 exporter 生成 `.xmind`。
+3. exporter 失败或实际文件无法解析时必须中止交付。
+4. 业务 Skill 不得自行拼装或验证另一份临时 `.xmind`。
 
 ## 最终导图输出规范
 
@@ -259,9 +256,30 @@ testcase-orchestrator
 5. `state_transition` 显示为 `状态转换`
 6. `role_matrix` 显示为 `角色权限`
 7. `entry_consistency` 显示为 `多入口一致性`
-8. `pass` 显示为 `通过`
-9. `conditional_pass` 显示为 `有条件通过`
-10. `fail` 显示为 `不通过`
+8. `pairwise` 显示为 `组合测试`
+9. `crud_lifecycle` 显示为 `数据生命周期`
+10. `idempotency` 显示为 `幂等重试`
+11. `data_consistency` 显示为 `数据一致性`
+12. `calculation_precision` 显示为 `计算精度`
+13. `batch_partial_failure` 显示为 `批处理`
+14. `observability_audit` 显示为 `审计日志`
+15. `pass` 显示为 `通过`
+16. `conditional_pass` 显示为 `有条件通过`
+17. `fail` 显示为 `不通过`
+
+### 测试设计方法库补充
+
+`testcase-designer` 在判断功能点适用性时，除等价类、边界值、决策表、状态转换、角色权限、多入口一致性、空值默认值、异常容错、时间时序和 UI 展示外，还必须识别以下方法是否适用：
+
+1. `pairwise`：多条件组合较多但全量组合会爆炸时，覆盖两两组合和高风险组合。
+2. `crud_lifecycle`：配置对象、任务、Campaign、Adset、Creative 等存在创建、查看、编辑、删除、禁用、恢复或复制时，覆盖数据生命周期。
+3. `idempotency`：批单同步、定时任务、接口回调、告警发送或重复点击可能重复触发时，覆盖幂等、重试和去重。
+4. `data_consistency`：存在上游到下游、列表到详情、配置到生效结果等链路时，覆盖数据一致性和跨层级联动。
+5. `calculation_precision`：涉及金额、预算、百分比、eCPM、DVR、汇率、比例或数量计算时，覆盖小数、0、大值、舍入、截断和单位换算。
+6. `batch_partial_failure`：存在批量同步、批量创建、批量配置或批量发送时，覆盖全部成功、部分成功部分失败、失败明细和可重试范围。
+7. `observability_audit`：存在自动执行、系统关停、审批、告警、同步或配置生效时，覆盖日志、告警记录、审计字段和追踪关联。
+
+这些方法只能在功能点确实具备适用条件时展开，不能为了凑数量机械生成专项用例。
 
 ### 字段到导图层级映射
 

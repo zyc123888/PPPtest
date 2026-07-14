@@ -1,0 +1,17 @@
+gate: "requirement_gate"
+status: "pass"
+checked_artifacts:
+  - "ScopeIndex.yaml"
+  - "FunctionPoints.yaml"
+blocking_issues: []
+recovery_plan:
+  strategy: "none"
+  return_to: ""
+  rerun_scope:
+    source_ids: []
+    shard_ids: []
+    fp_ids: []
+    case_ids: []
+  preserve_artifacts: []
+  regenerate_artifacts: []
+  reason: ""

@@ -214,6 +214,7 @@ def ensure_schema(db_engine) -> list[str]:
             ("defect_records", "updated_by", "ALTER TABLE defect_records ADD COLUMN updated_by INTEGER NULL"),
             ("defect_records", "updated_at", "ALTER TABLE defect_records ADD COLUMN updated_at DATETIME NULL"),
             ("case_generation_jobs", "progress_json", "ALTER TABLE case_generation_jobs ADD COLUMN progress_json JSON NULL"),
+            ("ai_model_configs", "api_key_encrypted", "ALTER TABLE ai_model_configs ADD COLUMN api_key_encrypted TEXT NULL"),
             ("environments", "auth_config_json", "ALTER TABLE environments ADD COLUMN auth_config_json JSON NULL"),
             ("environments", "created_by", "ALTER TABLE environments ADD COLUMN created_by INTEGER NULL"),
             ("environments", "updated_by", "ALTER TABLE environments ADD COLUMN updated_by INTEGER NULL"),
@@ -234,6 +235,12 @@ def ensure_schema(db_engine) -> list[str]:
             ("test_runs", "artifacts_json", "ALTER TABLE test_runs ADD COLUMN artifacts_json JSON NULL"),
             ("test_runs", "step_results_json", "ALTER TABLE test_runs ADD COLUMN step_results_json JSON NULL"),
             ("case_generation_jobs", "task_id", "ALTER TABLE case_generation_jobs ADD COLUMN task_id VARCHAR(120) NULL"),
+            ("case_generation_jobs", "active_attempt_id", "ALTER TABLE case_generation_jobs ADD COLUMN active_attempt_id INTEGER NULL"),
+            ("case_generation_artifacts", "attempt_id", "ALTER TABLE case_generation_artifacts ADD COLUMN attempt_id INTEGER NULL"),
+            ("case_generation_artifacts", "expired_at", "ALTER TABLE case_generation_artifacts ADD COLUMN expired_at DATETIME NULL"),
+            ("case_generation_v2_jobs", "active_attempt_id", "ALTER TABLE case_generation_v2_jobs ADD COLUMN active_attempt_id INTEGER NULL"),
+            ("case_generation_v2_artifacts", "attempt_id", "ALTER TABLE case_generation_v2_artifacts ADD COLUMN attempt_id INTEGER NULL"),
+            ("case_generation_v2_artifacts", "expired_at", "ALTER TABLE case_generation_v2_artifacts ADD COLUMN expired_at DATETIME NULL"),
         ]
         for table_name, column_name, ddl in extra_columns:
             add_column_if_missing(connection, table_name, column_name, ddl)
@@ -272,6 +279,16 @@ def ensure_schema(db_engine) -> list[str]:
             connection,
             "idx_defect_records_project_status",
             "CREATE INDEX IF NOT EXISTS idx_defect_records_project_status ON defect_records(project_id, status)",
+        )
+        create_index_if_missing(
+            connection,
+            "idx_case_generation_jobs_active_attempt",
+            "CREATE INDEX IF NOT EXISTS idx_case_generation_jobs_active_attempt ON case_generation_jobs(active_attempt_id)",
+        )
+        create_index_if_missing(
+            connection,
+            "idx_case_generation_v2_jobs_active_attempt",
+            "CREATE INDEX IF NOT EXISTS idx_case_generation_v2_jobs_active_attempt ON case_generation_v2_jobs(active_attempt_id)",
         )
 
     return schema_changes

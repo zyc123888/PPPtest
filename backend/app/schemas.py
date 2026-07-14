@@ -1,6 +1,7 @@
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ORMBaseModel(BaseModel):
@@ -82,6 +83,95 @@ class APICaseDebugResponse(BaseModel):
     duration_ms: int
 
 
+UI_STEP_ACTIONS = {
+    "goto",
+    "click",
+    "fill",
+    "press",
+    "select_option",
+    "check",
+    "uncheck",
+    "hover",
+    "wait",
+    "wait_for_selector",
+    "wait_for_text",
+    "assert_text",
+    "assert_visible",
+    "assert_hidden",
+    "assert_url_contains",
+    "assert_title_contains",
+    "set_viewport",
+}
+
+UI_ASSERTION_TYPES = {
+    "text_present",
+    "text_visible",
+    "text_hidden",
+    "selector_visible",
+    "selector_hidden",
+    "url_contains",
+    "title_contains",
+}
+
+
+def _has_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _validate_ui_steps(steps: list[dict]) -> None:
+    for index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            raise ValueError(f"第 {index} 个 UI 步骤必须是对象")
+        action = str(step.get("action") or "").strip()
+        if action not in UI_STEP_ACTIONS:
+            raise ValueError(f"第 {index} 个 UI 步骤类型不支持：{action or '空'}")
+
+        if action in {"goto", "wait_for_text", "assert_text", "assert_url_contains", "assert_title_contains"}:
+            if not _has_text(step.get("value")):
+                raise ValueError(f"第 {index} 个 UI 步骤 {action} 必须填写值")
+        if action in {
+            "click",
+            "fill",
+            "press",
+            "select_option",
+            "check",
+            "uncheck",
+            "hover",
+            "wait_for_selector",
+            "assert_visible",
+            "assert_hidden",
+        } and not _has_text(step.get("selector")):
+            raise ValueError(f"第 {index} 个 UI 步骤 {action} 必须填写选择器")
+        if action in {"press", "select_option"} and not (
+            _has_text(step.get("value")) or (isinstance(step.get("value"), list) and step.get("value"))
+        ):
+            raise ValueError(f"第 {index} 个 UI 步骤 {action} 必须填写值")
+        if action == "wait":
+            duration_ms = step.get("duration_ms")
+            if not isinstance(duration_ms, int) or not 1 <= duration_ms <= 60_000:
+                raise ValueError(f"第 {index} 个 UI 步骤 wait 的等待时间必须是 1 到 60000 毫秒")
+        if action == "set_viewport":
+            width = step.get("width")
+            height = step.get("height")
+            if not isinstance(width, int) or not isinstance(height, int) or not 320 <= width <= 3840 or not 320 <= height <= 2160:
+                raise ValueError(f"第 {index} 个 UI 步骤 set_viewport 的宽高超出支持范围")
+
+
+def _validate_ui_assertions(assertions: list[dict] | None) -> None:
+    for index, assertion in enumerate(assertions or [], start=1):
+        if not isinstance(assertion, dict):
+            raise ValueError(f"第 {index} 个 UI 断言必须是对象")
+        assertion_type = str(assertion.get("type") or "").strip()
+        if assertion_type not in UI_ASSERTION_TYPES:
+            raise ValueError(f"第 {index} 个 UI 断言类型不支持：{assertion_type or '空'}")
+        if assertion_type in {"selector_visible", "selector_hidden"} and not _has_text(assertion.get("selector")):
+            raise ValueError(f"第 {index} 个 UI 断言 {assertion_type} 必须填写选择器")
+        if assertion_type in {"text_present", "text_visible", "text_hidden", "url_contains", "title_contains"}:
+            value = assertion.get("value", assertion.get("expected"))
+            if not _has_text(value):
+                raise ValueError(f"第 {index} 个 UI 断言 {assertion_type} 必须填写期望值")
+
+
 class UICaseCreate(BaseModel):
     project_id: int
     name: str = Field(..., min_length=2, max_length=120)
@@ -94,8 +184,14 @@ class UICaseCreate(BaseModel):
     review_note: str | None = None
     tags_json: list[str] | None = None
     assertions_json: list[dict] | None = None
-    steps_json: list[dict]
-    expect_text: str = Field(..., min_length=1)
+    steps_json: list[dict] = Field(default_factory=list)
+    expect_text: str = Field(..., min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def validate_ui_workflow(self):
+        _validate_ui_steps(self.steps_json)
+        _validate_ui_assertions(self.assertions_json)
+        return self
 
 
 class UICaseUpdate(UICaseCreate):
@@ -212,8 +308,8 @@ class CaseGenerationJobCreate(BaseModel):
     source_type: str = Field(default="PASTE", min_length=2, max_length=20)
     source_document_name: str | None = Field(default=None, max_length=255)
     source_url: str | None = Field(default=None, max_length=1000)
-    markdown_text: str | None = Field(default=None, min_length=10)
-    extra_notes: str | None = None
+    markdown_text: str | None = Field(default=None, min_length=10, max_length=5_000_000)
+    extra_notes: str | None = Field(default=None, max_length=100_000)
     export_xmind: bool = True
     openai_api_key: str | None = None
 
@@ -249,6 +345,13 @@ class AIModelConfigRead(ORMBaseModel):
     updated_at: datetime | None = None
 
 
+class AIModelOptionRead(BaseModel):
+    provider: str
+    label: str
+    value: str
+    base_url: str
+
+
 class CaseGenerationJobRead(ORMBaseModel):
     id: int
     workspace_id: int
@@ -260,6 +363,7 @@ class CaseGenerationJobRead(ORMBaseModel):
     progress_json: dict | None = None
     input_payload_json: dict | None = None
     task_id: str | None = None
+    active_attempt_id: int | None = None
     summary: str | None = None
     error_message: str | None = None
     started_at: datetime | None = None
@@ -272,16 +376,107 @@ class CaseGenerationJobRead(ORMBaseModel):
 class CaseGenerationArtifactRead(ORMBaseModel):
     id: int
     job_id: int
+    attempt_id: int | None = None
     artifact_type: str
     file_name: str | None = None
-    file_path: str | None = None
     content_json: dict | list | None = None
+    expired_at: datetime | None = None
     created_at: datetime | None = None
+
+
+class CaseGenerationAttemptRead(ORMBaseModel):
+    id: int
+    job_id: int
+    run_id: str
+    kind: str
+    source_id: str | None = None
+    status: str
+    task_id: str | None = None
+    progress_json: dict | None = None
+    summary: str | None = None
+    error_message: str | None = None
+    heartbeat_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class CaseGenerationJobDetail(BaseModel):
     job: CaseGenerationJobRead
     artifacts: list[CaseGenerationArtifactRead] = Field(default_factory=list)
+    attempts: list[CaseGenerationAttemptRead] = Field(default_factory=list)
+
+
+class CaseGenerationV2JobCreate(BaseModel):
+    project_id: int
+    name: str = Field(..., min_length=2, max_length=120)
+    mode: str = Field(default="MARKDOWN", min_length=2, max_length=30)
+    pipeline_mode: str = Field(default="lite", pattern="^(clone|trusted_v2|lite|trusted)$")
+    trusted_generation_strategy: str = Field(default="source_shard", pattern="^(source_shard|lite_review)$")
+    source_type: str = Field(default="PASTE", min_length=2, max_length=20)
+    source_document_name: str | None = Field(default=None, max_length=255)
+    source_url: str | None = Field(default=None, max_length=1000)
+    markdown_text: str | None = Field(default=None, min_length=10, max_length=5_000_000)
+    extra_notes: str | None = Field(default=None, max_length=100_000)
+    export_xmind: bool = True
+    openai_api_key: str | None = None
+
+
+class CaseGenerationV2JobRead(ORMBaseModel):
+    id: int
+    workspace_id: int
+    project_id: int
+    name: str
+    mode: str
+    status: str
+    source_document_name: str | None = None
+    progress_json: dict | None = None
+    input_payload_json: dict | None = None
+    task_id: str | None = None
+    active_attempt_id: int | None = None
+    summary: str | None = None
+    error_message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_by: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class CaseGenerationV2ArtifactRead(ORMBaseModel):
+    id: int
+    job_id: int
+    attempt_id: int | None = None
+    artifact_type: str
+    file_name: str | None = None
+    content_json: dict | list | None = None
+    expired_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+class CaseGenerationV2AttemptRead(ORMBaseModel):
+    id: int
+    job_id: int
+    run_id: str
+    kind: str
+    source_id: str | None = None
+    status: str
+    task_id: str | None = None
+    progress_json: dict | None = None
+    summary: str | None = None
+    error_message: str | None = None
+    heartbeat_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class CaseGenerationV2JobDetail(BaseModel):
+    job: CaseGenerationV2JobRead
+    artifacts: list[CaseGenerationV2ArtifactRead] = Field(default_factory=list)
+    attempts: list[CaseGenerationV2AttemptRead] = Field(default_factory=list)
 
 
 class DashboardSummary(BaseModel):
@@ -313,8 +508,16 @@ class UnifiedCaseRead(BaseModel):
     target_url: str | None = None
     expected_status: int | None = None
     step_count: int | None = None
+    steps_json: list[dict] | None = None
+    expect_text: str | None = None
+    headers_json: dict | None = None
+    body_json: dict | None = None
+    assertions_json: list[dict] | None = None
     concurrency: int | None = None
     total_requests: int | None = None
+    max_avg_response_ms: int | None = None
+    max_p95_response_ms: int | None = None
+    max_error_rate: float | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

@@ -3,15 +3,15 @@ services:
     image: mariadb:11.4
     container_name: ppptest-mysql
     environment:
-      MARIADB_DATABASE: test_platform
-      MARIADB_USER: tester
-      MARIADB_PASSWORD: tester123
-      MARIADB_ROOT_PASSWORD: root123
+      MARIADB_DATABASE: "${MARIADB_DATABASE}"
+      MARIADB_USER: "${MARIADB_USER}"
+      MARIADB_PASSWORD: "${MARIADB_PASSWORD}"
+      MARIADB_ROOT_PASSWORD: "${MARIADB_ROOT_PASSWORD}"
     volumes:
       - mysql_data:/var/lib/mysql
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -utester -ptester123 --silent"]
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u$${MARIADB_USER} -p$${MARIADB_PASSWORD} --silent"]
       interval: 10s
       timeout: 5s
       retries: 20
@@ -41,11 +41,11 @@ services:
   backend:
     build:
       context: ./backend
+      target: runtime
     container_name: ppptest-backend
-    user: "0:0"
     environment:
       APP_ENV: docker
-      DATABASE_URL: mysql+pymysql://tester:tester123@mysql:3306/test_platform
+      DATABASE_URL: "${DOCKER_DATABASE_URL}"
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
@@ -54,11 +54,21 @@ services:
       BACKEND_PUBLIC_URL: http://127.0.0.1:8000
       FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
       CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+      APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
+      INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD}"
       CASE_GENERATION_RULES_DIR: claw_5skill_final
-      CASE_GEN_MAX_CONCURRENCY: "8"
+      CASE_GENERATION_UNIFIED_RULES_DIR: claw_5skill_unified
+      CASE_GEN_MAX_CONCURRENCY: "4"
+      CASE_GEN_WATCHDOG_ENABLED: "true"
       CASE_GEN_REQUIREMENT_MAX_TOKENS: "8000"
+      CASE_GEN_REQUIREMENT_BATCH_CONCURRENCY: "2"
       CASE_GEN_TESTCASE_REPAIR_MAX_ROUNDS: "1"
-      CASE_GEN_MIN_CASES_PER_FUNCTION_POINT: "3"
+      CASE_GEN_TRUSTED_SHARD_CONCURRENCY: "2"
+      CASE_GEN_SCOPE_INDEX_CONCURRENCY: "2"
+      CASE_GEN_SCOPE_INDEX_TWO_PHASE_TRIGGER_SECTIONS: "16"
+      CASE_GEN_SCOPE_INDEX_TWO_PHASE_TRIGGER_TEXT: "48000"
+      CASE_GEN_TRUSTED_MODEL_GATE_ENABLED: "false"
+      CASE_GEN_TRUSTED_SHARD_MAX_ATTEMPTS: "2"
     depends_on:
       mysql:
         condition: service_healthy
@@ -68,6 +78,9 @@ services:
       - "8000:8000"
     volumes:
       - ./backend/reports:/app/reports
+      - ./backend/app:/app/app
+      - ./backend/claw_5skill_final:/app/claw_5skill_final
+      - ./backend/claw_5skill_unified:/app/claw_5skill_unified
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/v1/system/health || exit 1"]
@@ -90,12 +103,12 @@ services:
   worker:
     build:
       context: ./backend
+      target: execution
     container_name: ppptest-worker
-    user: "0:0"
-    command: celery -A app.core.celery_app.celery_app worker -l info --pool=solo
+    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=solo -Q execution,celery -n execution@%h'
     environment:
       APP_ENV: docker
-      DATABASE_URL: mysql+pymysql://tester:tester123@mysql:3306/test_platform
+      DATABASE_URL: "${DOCKER_DATABASE_URL}"
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
@@ -103,11 +116,19 @@ services:
       FRONTEND_INTERNAL_URL: http://frontend:3000
       BACKEND_PUBLIC_URL: http://127.0.0.1:8000
       FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
+      APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
       CASE_GENERATION_RULES_DIR: claw_5skill_final
-      CASE_GEN_MAX_CONCURRENCY: "8"
+      CASE_GENERATION_UNIFIED_RULES_DIR: claw_5skill_unified
+      CASE_GEN_MAX_CONCURRENCY: "4"
       CASE_GEN_REQUIREMENT_MAX_TOKENS: "8000"
+      CASE_GEN_REQUIREMENT_BATCH_CONCURRENCY: "2"
       CASE_GEN_TESTCASE_REPAIR_MAX_ROUNDS: "1"
-      CASE_GEN_MIN_CASES_PER_FUNCTION_POINT: "3"
+      CASE_GEN_TRUSTED_SHARD_CONCURRENCY: "2"
+      CASE_GEN_SCOPE_INDEX_CONCURRENCY: "2"
+      CASE_GEN_SCOPE_INDEX_TWO_PHASE_TRIGGER_SECTIONS: "16"
+      CASE_GEN_SCOPE_INDEX_TWO_PHASE_TRIGGER_TEXT: "48000"
+      CASE_GEN_TRUSTED_MODEL_GATE_ENABLED: "false"
+      CASE_GEN_TRUSTED_SHARD_MAX_ATTEMPTS: "2"
     depends_on:
       mysql:
         condition: service_healthy
@@ -117,12 +138,70 @@ services:
         condition: service_healthy
     volumes:
       - ./backend/reports:/app/reports
+      - ./backend/app:/app/app
+      - ./backend/claw_5skill_final:/app/claw_5skill_final
+      - ./backend/claw_5skill_unified:/app/claw_5skill_unified
+    restart: unless-stopped
+    shm_size: 256M
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - ppptest-network
+
+  case-worker:
+    build:
+      context: ./backend
+      target: runtime
+    container_name: ppptest-case-worker
+    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=solo -Q case_generation -n case-generation@%h'
+    environment:
+      APP_ENV: docker
+      DATABASE_URL: "${DOCKER_DATABASE_URL}"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      BACKEND_INTERNAL_URL: http://backend:8000
+      FRONTEND_INTERNAL_URL: http://frontend:3000
+      BACKEND_PUBLIC_URL: http://127.0.0.1:8000
+      FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
+      APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
+      CASE_GENERATION_RULES_DIR: claw_5skill_final
+      CASE_GENERATION_UNIFIED_RULES_DIR: claw_5skill_unified
+      CASE_GEN_REQUIREMENT_MAX_TOKENS: "8000"
+      CASE_GEN_REQUIREMENT_BATCH_CONCURRENCY: "2"
+      CASE_GEN_TESTCASE_REPAIR_MAX_ROUNDS: "1"
+      CASE_GEN_TRUSTED_SHARD_CONCURRENCY: "2"
+      CASE_GEN_SCOPE_INDEX_CONCURRENCY: "2"
+      CASE_GEN_SCOPE_INDEX_TWO_PHASE_TRIGGER_SECTIONS: "16"
+      CASE_GEN_SCOPE_INDEX_TWO_PHASE_TRIGGER_TEXT: "48000"
+      CASE_GEN_TRUSTED_MODEL_GATE_ENABLED: "false"
+      CASE_GEN_TRUSTED_SHARD_MAX_ATTEMPTS: "2"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./backend/reports:/app/reports
+      - ./backend/app:/app/app
+      - ./backend/claw_5skill_final:/app/claw_5skill_final
+      - ./backend/claw_5skill_unified:/app/claw_5skill_unified
     restart: unless-stopped
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: '0.5'
+          memory: 384M
+          cpus: '0.8'
     logging:
       driver: "json-file"
       options:
@@ -164,8 +243,8 @@ services:
     container_name: ppptest-e2e
     environment:
       E2E_BASE_URL: http://frontend:3000
-      E2E_ADMIN_USER: admin
-      E2E_ADMIN_PASSWORD: admin123
+      E2E_ADMIN_USER: "${E2E_ADMIN_USER:-admin}"
+      E2E_ADMIN_PASSWORD: "${E2E_ADMIN_PASSWORD}"
     depends_on:
       frontend:
         condition: service_healthy

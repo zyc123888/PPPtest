@@ -1,20 +1,23 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Layout from '@/layout/index.vue'
-import Login from '@/views/login/index.vue'
-import Dashboard from '@/views/dashboard/index.vue'
-import Workspace from '@/views/workspace/index.vue'
-import Project from '@/views/project/index.vue'
-import CaseCenter from '@/views/case/index.vue'
-import APICase from '@/views/case/api/index.vue'
-import UICase from '@/views/case/ui/index.vue'
-import PerformanceCase from '@/views/case/performance/index.vue'
-import CaseGenerator from '@/views/case/generator/index.vue'
-import Plan from '@/views/plan/index.vue'
-import Environment from '@/views/environment/index.vue'
-import Execution from '@/views/execution/index.vue'
-import Report from '@/views/report/index.vue'
-import Tools from '@/views/tools/index.vue'
-import User from '@/views/user/index.vue'
+import { useAuthStore } from '@/stores/auth'
+
+const Login = () => import('@/views/login/index.vue')
+const Dashboard = () => import('@/views/dashboard/index.vue')
+const Workspace = () => import('@/views/workspace/index.vue')
+const Project = () => import('@/views/project/index.vue')
+const CaseCenter = () => import('@/views/case/index.vue')
+const APICase = () => import('@/views/case/api/index.vue')
+const UICase = () => import('@/views/case/ui/index.vue')
+const PerformanceCase = () => import('@/views/case/performance/index.vue')
+const CaseGenerator = () => import('@/views/case/generator/index.vue')
+const CaseGenerator2 = () => import('@/views/case/generator2/index.vue')
+const Plan = () => import('@/views/plan/index.vue')
+const Environment = () => import('@/views/environment/index.vue')
+const Execution = () => import('@/views/execution/index.vue')
+const Report = () => import('@/views/report/index.vue')
+const Tools = () => import('@/views/tools/index.vue')
+const User = () => import('@/views/user/index.vue')
 
 export const constantRoutes = [
   {
@@ -94,6 +97,12 @@ export const constantRoutes = [
         component: CaseGenerator,
         name: 'CaseGenerator',
         meta: { title: '用例生成', icon: 'MagicStick' }
+      },
+      {
+        path: 'generator2',
+        component: CaseGenerator2,
+        name: 'CaseGenerator2',
+        meta: { title: '用例生成2', icon: 'Operation' }
       }
     ]
   },
@@ -184,7 +193,6 @@ router.beforeEach(async (to, from, next) => {
   if (to.meta?.public) {
     return next()
   }
-  const { useAuthStore } = await import('@/stores/auth')
   const authStore = useAuthStore()
   if (!authStore.isAuthenticated) {
     return next({ path: '/login', query: { redirect: to.fullPath } })
@@ -192,7 +200,7 @@ router.beforeEach(async (to, from, next) => {
   if (!authStore.loaded) {
     try {
       await authStore.fetchProfile()
-    } catch (error) {
+    } catch {
       await authStore.logout()
       return next({ path: '/login', query: { redirect: to.fullPath } })
     }

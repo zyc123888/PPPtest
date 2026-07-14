@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal, engine, init_db
 from app.models import (
     APICase,
+    AIModelConfig,
     Environment,
     ExecutionArtifact,
     ExecutionLog,
@@ -252,6 +253,7 @@ def seed_demo_data(db: Session) -> list[str]:
                     {"action": "goto", "value": frontend_url},
                     {"action": "wait_for_text", "value": "登录"},
                 ],
+                assertions_json=[{"type": "text_present", "expected": "登录"}],
                 expect_text="登录",
             )
         )
@@ -259,7 +261,7 @@ def seed_demo_data(db: Session) -> list[str]:
     else:
         ui_case.priority = ui_case.priority or "P1"
         ui_case.status = ui_case.status or "ACTIVE"
-        ui_case.assertions_json = ui_case.assertions_json or [{"type": "text_present", "expected": "常用工具"}]
+        ui_case.assertions_json = [{"type": "text_present", "expected": "登录"}]
         ui_case.target_url = frontend_url
         ui_case.steps_json = [
             {"action": "goto", "value": frontend_url},
@@ -379,6 +381,15 @@ def bootstrap_runtime(seed_demo_data_enabled: bool | None = None) -> dict:
 
     with SessionLocal() as db:
         seeded_resources = ensure_core_runtime_data(db)
+        migrated_model_keys = 0
+        for config in db.scalars(select(AIModelConfig)).all():
+            if config._legacy_api_key and not config.api_key_encrypted:
+                legacy_value = config._legacy_api_key
+                config.api_key = legacy_value
+                migrated_model_keys += 1
+        if migrated_model_keys:
+            db.commit()
+            seeded_resources.append(f"encrypted_model_keys:{migrated_model_keys}")
         if should_seed:
             for resource in seed_demo_data(db):
                 if resource not in seeded_resources:

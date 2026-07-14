@@ -77,8 +77,8 @@
 
 | 原始要求 | 后端实现 | 判定 |
 |---|---|---|
-| 先生成 .xmindmark 再用 `xmindmark` CLI 转 .xmind | `_convert_xmindmark` 调 CLI | ✅ 对齐 |
-| **禁止脚本手动拼 .xmind 压缩包** | 未手动拼 | ✅ 对齐 |
+| 先生成 .xmindmark，再转换并验证实际 .xmind | 项目确定性 exporter + 实际归档解析 | ✅ 行为对齐，已放弃会生成空白文件的 CLI 版本 |
+| **禁止业务逻辑随意拼 .xmind 压缩包** | 仅允许共用 exporter 生成，门禁解析实际交付文件 | ✅ 对齐 |
 | 同名交付、只交付一个 .xmind | 有同名 + 清理 | ✅ 对齐 |
 | 统计信息节点 / 中文化 / source_order 排序 / 固定层级 | `_build_xmindmark` Python 确定性生成 | ⚠️ **结果对齐，但实现方式偏离**（原始是 AI skill 产出 xmindmark；后端用 Python） |
 
@@ -119,7 +119,7 @@
 
 **应保留的合理后端**（基础设施，非内容生产）：
 - celery 任务编排、DB 持久化、阶段进度
-- 图片下载（I/O）、`xmindmark` CLI 转换（规范要求）
+- 图片下载（I/O）、确定性 XMind exporter 与实际归档校验
 - 模型调用封装、JSON 解析/截断重试、取消/超时
 - `_build_xmindmark` 确定性导出（见第 3 节取舍）
 
@@ -180,7 +180,7 @@
 
 **Phase 4 — 导出层取舍（保留 Python，但需结构对齐原始总纲）**
 - `_build_xmindmark` **维持 Python 确定性生成**：xmindmark 格式约束极严，Python 比 LLM 更不易违规；这与原始"导图是展示层、格式必须稳定"的目标一致。
-- 若你坚持纯 AI，可改由 artifact-exporter 产出 xmindmark + 后端只跑 `_validate_xmindmark` + CLI 转换（风险更高，不推荐作为首选）。
+- artifact-exporter 产出 xmindmark，后端只负责确定性转换和实际交付文件校验；不要回退到当前会生成空白文件的 CLI 版本。
 - **结构对齐（审计新增·按原始总纲修正，仍用 Python）**：
   - **补回独立 `scene` 层** —— 当前 scene 被并入功能点节点，违反总纲:352「不能跳过 scene 层直接从 module 进入功能点」。层级应为 根→统计信息→module→scene→FP→CaseID→字段节点。
   - **category 中文映射补全** —— 当前缺 `decision_table/state_transition/role_matrix/entry_consistency` → 决策表/状态转换/角色权限/多入口一致性（总纲:258-261）。

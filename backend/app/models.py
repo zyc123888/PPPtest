@@ -4,6 +4,7 @@ from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text,
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+from app.core.secrets import decrypt_secret, encrypt_secret
 
 
 class Workspace(Base):
@@ -44,7 +45,8 @@ class AIModelConfig(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False, default="默认模型配置")
     base_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     model: Mapped[str] = mapped_column(String(80), nullable=False, default="gpt-5.5")
-    api_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    _legacy_api_key: Mapped[str | None] = mapped_column("api_key", String(255), nullable=True)
+    api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
@@ -52,6 +54,17 @@ class AIModelConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
     )
+
+    @property
+    def api_key(self) -> str | None:
+        if self.api_key_encrypted:
+            return decrypt_secret(self.api_key_encrypted)
+        return self._legacy_api_key
+
+    @api_key.setter
+    def api_key(self, value: str | None) -> None:
+        self.api_key_encrypted = encrypt_secret(value)
+        self._legacy_api_key = None
 
 
 class Project(Base):
@@ -76,6 +89,7 @@ class Project(Base):
     test_plans = relationship("TestPlan", back_populates="project", cascade="all, delete-orphan")
     test_runs = relationship("TestRun", back_populates="project", cascade="all, delete-orphan")
     case_generation_jobs = relationship("CaseGenerationJob", back_populates="project", cascade="all, delete-orphan")
+    case_generation_v2_jobs = relationship("CaseGenerationV2Job", back_populates="project", cascade="all, delete-orphan")
 
 
 class APICase(Base):
@@ -377,6 +391,7 @@ class CaseGenerationJob(Base):
     progress_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     input_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     task_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    active_attempt_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
@@ -389,6 +404,39 @@ class CaseGenerationJob(Base):
 
     project = relationship("Project", back_populates="case_generation_jobs")
     artifacts = relationship("CaseGenerationArtifact", back_populates="job", cascade="all, delete-orphan")
+    attempts = relationship(
+        "CaseGenerationAttempt",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="CaseGenerationAttempt.id",
+    )
+
+
+class CaseGenerationAttempt(Base):
+    __tablename__ = "case_generation_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("case_generation_jobs.id"), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True)
+    execution_token: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False, default="full")
+    source_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", index=True)
+    task_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    input_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    progress_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    job = relationship("CaseGenerationJob", back_populates="attempts")
+    artifacts = relationship("CaseGenerationArtifact", back_populates="attempt")
 
 
 class CaseGenerationArtifact(Base):
@@ -396,13 +444,94 @@ class CaseGenerationArtifact(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("case_generation_jobs.id"), nullable=False, index=True)
+    attempt_id: Mapped[int | None] = mapped_column(ForeignKey("case_generation_attempts.id"), nullable=True, index=True)
     artifact_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     file_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     content_json: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
 
     job = relationship("CaseGenerationJob", back_populates="artifacts")
+    attempt = relationship("CaseGenerationAttempt", back_populates="artifacts")
+
+
+class CaseGenerationV2Job(Base):
+    __tablename__ = "case_generation_v2_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    mode: Mapped[str] = mapped_column(String(30), nullable=False, default="MARKDOWN")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", index=True)
+    source_document_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    progress_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    input_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    active_attempt_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    project = relationship("Project", back_populates="case_generation_v2_jobs")
+    artifacts = relationship("CaseGenerationV2Artifact", back_populates="job", cascade="all, delete-orphan")
+    attempts = relationship(
+        "CaseGenerationV2Attempt",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="CaseGenerationV2Attempt.id",
+    )
+
+
+class CaseGenerationV2Attempt(Base):
+    __tablename__ = "case_generation_v2_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("case_generation_v2_jobs.id"), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True)
+    execution_token: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False, default="full")
+    source_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", index=True)
+    task_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    input_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    progress_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    job = relationship("CaseGenerationV2Job", back_populates="attempts")
+    artifacts = relationship("CaseGenerationV2Artifact", back_populates="attempt")
+
+
+class CaseGenerationV2Artifact(Base):
+    __tablename__ = "case_generation_v2_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("case_generation_v2_jobs.id"), nullable=False, index=True)
+    attempt_id: Mapped[int | None] = mapped_column(ForeignKey("case_generation_v2_attempts.id"), nullable=True, index=True)
+    artifact_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    file_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    content_json: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+
+    job = relationship("CaseGenerationV2Job", back_populates="artifacts")
+    attempt = relationship("CaseGenerationV2Attempt", back_populates="artifacts")
 
 
 class DefectRecord(Base):

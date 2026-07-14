@@ -14,7 +14,10 @@ def client() -> TestClient:
     os.environ.setdefault("FRONTEND_INTERNAL_URL", "http://127.0.0.1:3000")
     os.environ.setdefault("FRONTEND_PUBLIC_URL", "http://127.0.0.1:3000")
     os.environ.setdefault("SEED_DEMO_DATA_ON_BOOTSTRAP", "true")
+    os.environ.setdefault("CASE_GEN_WATCHDOG_ENABLED", "false")
 
+    from app.core.config import settings
+    settings.case_gen_watchdog_enabled = False
     from app.main import app
 
     username = os.getenv("E2E_ADMIN_USER", "admin")

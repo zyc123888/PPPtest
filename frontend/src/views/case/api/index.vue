@@ -1864,7 +1864,7 @@ onMounted(() => {
 
 :deep(.el-dialog__header) {
   padding: 20px 24px 16px;
-  background: linear-gradient(135deg, rgba(248, 250, 255, 0.98), rgba(250, 245, 255, 0.98));
+  background: transparent;
   border-bottom: 1px solid rgba(129, 140, 248, 0.1);
 }
 
@@ -1883,6 +1883,30 @@ onMounted(() => {
   padding: 16px 24px 20px;
   border-top: 1px solid rgba(129, 140, 248, 0.08);
   background: rgba(248, 250, 255, 0.5);
+}
+
+:deep(.api-editor-dialog .el-dialog__headerbtn) {
+  top: 14px;
+  right: 14px;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.14);
+  color: #4f46e5;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+
+:deep(.api-editor-dialog .el-dialog__headerbtn:hover) {
+  background: rgba(99, 102, 241, 0.14);
+  border-color: rgba(99, 102, 241, 0.26);
+  color: #3730a3;
+  transform: translateY(-1px);
+}
+
+:deep(.api-editor-dialog .el-dialog__close) {
+  color: currentColor;
+  font-size: 16px;
 }
 
 /* ========== 列设置弹窗 ========== */

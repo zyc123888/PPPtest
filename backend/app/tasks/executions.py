@@ -107,6 +107,29 @@ def _append_retry_trace(summary: str, attempts: list[str]) -> str:
     return f"{summary}（重试轨迹: {'；'.join(attempts)}）"
 
 
+def _normalize_execution_result(result: dict | None) -> dict:
+    normalized = {
+        "status": "ERROR",
+        "summary": "执行结果为空",
+        "error_type": "SYSTEM",
+        "exit_code": 1,
+        "stdout_text": "",
+        "stderr_text": "",
+        "artifacts_json": [],
+        "step_results_json": [],
+        "request_payload": None,
+        "response_payload": None,
+    }
+    if result:
+        normalized.update(result)
+    if normalized["status"] == "SUCCESS":
+        normalized["error_type"] = None
+        normalized["exit_code"] = 0 if normalized["exit_code"] is None else normalized["exit_code"]
+    elif normalized["status"] == "TIMEOUT" and normalized["exit_code"] in (None, 1):
+        normalized["exit_code"] = 124
+    return normalized
+
+
 def _execute_case_with_retries(db: Session, run: TestRun, execute_once) -> dict:
     attempts: list[str] = []
     max_retries = max(run.max_retries or 0, 0)
@@ -153,15 +176,21 @@ def _execute_case_with_retries(db: Session, run: TestRun, execute_once) -> dict:
                 "response_payload": None,
             }
         except Exception as exc:
+            exception_payload = _exception_payload(exc) or {}
+            status = exception_payload.get("status")
+            if status not in {"FAILED", "ERROR", "TIMEOUT"}:
+                status = "ERROR"
             artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
             last_result = {
-                "status": "ERROR",
-                "summary": f"执行异常: {exc}",
-                "error_type": "SYSTEM",
+                "status": status,
+                "summary": f"执行异常: {_exception_message(exc)}",
+                "error_type": exception_payload.get("error_type") or "SYSTEM",
                 "stderr_text": traceback.format_exc(),
                 "artifacts_json": artifacts,
                 "step_results_json": step_results,
             }
+
+        last_result = _normalize_execution_result(last_result)
 
         run.retry_count = base_retry_count + attempt_index
         db.commit()
@@ -173,7 +202,7 @@ def _execute_case_with_retries(db: Session, run: TestRun, execute_once) -> dict:
 
         attempts.append(f"第{attempt_index + 1}次{last_result['status']}")
 
-    return last_result or {"status": "ERROR", "summary": "执行结果为空"}
+    return _normalize_execution_result(last_result)
 
 
 def _ensure_run_dir(run_id: int) -> str:
@@ -204,13 +233,25 @@ def _write_run_artifact(run_id: int, filename: str, content, *, binary: bool = F
     }
 
 
-def _normalize_exception_artifacts(run_id: int, exc: Exception) -> tuple[list[dict], list[dict]]:
-    payload = None
+def _exception_payload(exc: Exception) -> dict | None:
     if isinstance(exc, RuntimeError):
         try:
             payload = json.loads(str(exc))
         except Exception:
-            payload = None
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
+def _exception_message(exc: Exception) -> str:
+    payload = _exception_payload(exc)
+    if payload and payload.get("error"):
+        return str(payload["error"])
+    return str(exc) or exc.__class__.__name__
+
+
+def _normalize_exception_artifacts(run_id: int, exc: Exception) -> tuple[list[dict], list[dict]]:
+    payload = _exception_payload(exc)
     artifacts = payload.get("artifacts") if isinstance(payload, dict) else None
     steps = payload.get("steps") if isinstance(payload, dict) else None
     if artifacts is None:
@@ -229,15 +270,116 @@ def _ui_step_detail(
 ) -> dict:
     detail = {
         "action": step.get("action"),
+        "kind": step.get("_kind", "step"),
         "selector": selector,
         "value": value,
         "page_url": page_url,
     }
+    for key in ("duration_ms", "width", "height", "state", "wait_until"):
+        if step.get(key) is not None:
+            detail[key] = step[key]
     if error:
         detail["error"] = error
     if screenshot:
         detail["screenshot"] = screenshot
     return detail
+
+
+def _ui_assertion_as_step(assertion: dict) -> dict:
+    assertion_type = assertion.get("type")
+    value = assertion.get("value", assertion.get("expected"))
+    action_map = {
+        "text_present": "assert_text",
+        "text_visible": "assert_text",
+        "text_hidden": "assert_text_hidden",
+        "selector_visible": "assert_visible",
+        "selector_hidden": "assert_hidden",
+        "url_contains": "assert_url_contains",
+        "title_contains": "assert_title_contains",
+    }
+    return {
+        **assertion,
+        "action": action_map.get(assertion_type, assertion_type),
+        "value": value,
+        "name": assertion.get("name") or f"断言：{assertion_type}",
+        "_kind": "assertion",
+    }
+
+
+def _execute_ui_step(page, step: dict, timeout_ms: int) -> None:
+    action = step.get("action")
+    selector = step.get("selector")
+    value = step.get("value")
+
+    if action == "goto":
+        page.goto(
+            str(value),
+            wait_until=step.get("wait_until") or "domcontentloaded",
+            timeout=timeout_ms,
+        )
+    elif action == "wait_for_text":
+        if selector:
+            page.locator(selector).filter(has_text=str(value)).first.wait_for(
+                state="visible", timeout=timeout_ms
+            )
+        else:
+            page.locator(f"text={value}").first.wait_for(timeout=timeout_ms)
+    elif action == "wait_for_selector":
+        page.locator(selector).first.wait_for(
+            state=step.get("state") or "visible", timeout=timeout_ms
+        )
+    elif action == "click":
+        page.locator(selector).first.click(timeout=timeout_ms)
+    elif action == "fill":
+        page.locator(selector).first.fill(str(value or ""), timeout=timeout_ms)
+    elif action == "press":
+        page.locator(selector).first.press(str(value), timeout=timeout_ms)
+    elif action == "select_option":
+        page.locator(selector).first.select_option(value, timeout=timeout_ms)
+    elif action == "check":
+        page.locator(selector).first.check(timeout=timeout_ms)
+    elif action == "uncheck":
+        page.locator(selector).first.uncheck(timeout=timeout_ms)
+    elif action == "hover":
+        page.locator(selector).first.hover(timeout=timeout_ms)
+    elif action == "wait":
+        duration_ms = int(step.get("duration_ms") or 0)
+        if duration_ms > timeout_ms:
+            raise TimeoutError("等待时间超过本次执行剩余时间")
+        page.wait_for_timeout(duration_ms)
+    elif action == "set_viewport":
+        page.set_viewport_size({"width": int(step["width"]), "height": int(step["height"])})
+    elif action == "assert_text":
+        if selector:
+            locator = page.locator(selector).filter(has_text=str(value)).first
+            locator.wait_for(state="visible", timeout=timeout_ms)
+        else:
+            page.locator(f"text={value}").first.wait_for(timeout=timeout_ms)
+    elif action == "assert_text_hidden":
+        if selector:
+            page.locator(selector).filter(has_text=str(value)).first.wait_for(
+                state="hidden", timeout=timeout_ms
+            )
+        else:
+            page.locator(f"text={value}").first.wait_for(state="hidden", timeout=timeout_ms)
+    elif action == "assert_visible":
+        page.locator(selector).first.wait_for(state="visible", timeout=timeout_ms)
+    elif action == "assert_hidden":
+        page.locator(selector).first.wait_for(state="hidden", timeout=timeout_ms)
+    elif action == "assert_url_contains":
+        page.wait_for_function(
+            "expected => window.location.href.includes(expected)",
+            str(value),
+            timeout=timeout_ms,
+        )
+    elif action == "assert_title_contains":
+        page.wait_for_function(
+            "expected => document.title.includes(expected)",
+            str(value),
+            timeout=timeout_ms,
+        )
+    else:
+        raise ValueError(f"不支持的步骤类型: {action}")
 
 
 def _execute_api_case_httpx(
@@ -638,16 +780,30 @@ def _execute_ui_case(
     variables = environment.variables_json if environment and environment.variables_json else None
 
     target_url = _render_template(case.target_url, variables, "case.target_url")
-    steps = []
-    for step in case.steps_json:
-        rendered_step = dict(step)
-        if "value" in rendered_step and isinstance(rendered_step["value"], str):
-            rendered_step["value"] = _render_template(rendered_step["value"], variables, "case.steps_json.value")
-        if "selector" in rendered_step and isinstance(rendered_step["selector"], str):
-            rendered_step["selector"] = _render_template(
-                rendered_step["selector"], variables, "case.steps_json.selector"
-            )
-        steps.append(rendered_step)
+    steps = _render_data(case.steps_json or [], variables, "case.steps_json")
+    assertions = _render_data(case.assertions_json or [], variables, "case.assertions_json")
+    expect_text = _render_template(case.expect_text, variables, "case.expect_text")
+
+    checkpoints: list[dict] = []
+    if not steps or steps[0].get("action") != "goto":
+        checkpoints.append(
+            {
+                "action": "goto",
+                "value": target_url,
+                "name": "打开目标页面",
+                "_kind": "navigation",
+            }
+        )
+    checkpoints.extend({**step, "_kind": "step"} for step in steps)
+    checkpoints.extend(_ui_assertion_as_step(assertion) for assertion in assertions)
+    checkpoints.append(
+        {
+            "action": "assert_text",
+            "value": expect_text,
+            "name": "最终文本断言",
+            "_kind": "final_assertion",
+        }
+    )
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -658,6 +814,7 @@ def _execute_ui_case(
         page = context.new_page()
         step_results = []
         artifacts: list[dict] = []
+        screenshot_warnings: list[dict] = []
         trace_path = os.path.join(_ensure_run_dir(run.id), "ui-trace.zip")
 
         def step_timeout(seconds: int) -> int:
@@ -666,36 +823,45 @@ def _execute_ui_case(
         def capture_step_screenshot(index: int, action: str, suffix: str = "") -> dict | None:
             filename = f"step-{index + 1:02d}-{action}{suffix}.png"
             try:
-                content = page.screenshot(full_page=True)
-            except Exception:
+                content = page.screenshot(
+                    full_page=False,
+                    timeout=step_timeout(5),
+                    animations="disabled",
+                    caret="hide",
+                )
+            except Exception as exc:
+                screenshot_warnings.append(
+                    {
+                        "checkpoint": index + 1,
+                        "action": action,
+                        "file_name": filename,
+                        "error": str(exc) or exc.__class__.__name__,
+                    }
+                )
                 return None
             artifact = _write_run_artifact(run.id, filename, content, binary=True)
             artifacts.append(artifact)
             return artifact
 
+        def append_screenshot_warnings() -> None:
+            if screenshot_warnings:
+                artifacts.append(
+                    _write_run_artifact(run.id, "ui-evidence-warnings.json", screenshot_warnings)
+                )
+                screenshot_warnings.clear()
+
         try:
-            for index, step in enumerate(steps):
+            for index, step in enumerate(checkpoints):
                 action = step.get("action")
                 started_at = time.perf_counter()
                 selector = step.get("selector")
                 value = step.get("value")
                 try:
-                    if action == "goto":
-                        page.goto(step["value"], wait_until="networkidle", timeout=step_timeout(30))
-                    elif action == "wait_for_text":
-                        page.locator(f"text={step['value']}").first.wait_for(timeout=step_timeout(20))
-                    elif action == "click":
-                        page.locator(step["selector"]).first.click(timeout=step_timeout(20))
-                    elif action == "fill":
-                        page.locator(step["selector"]).first.fill(step.get("value", ""), timeout=step_timeout(20))
-                    elif action == "assert_text":
-                        page.locator(f"text={step['value']}").first.wait_for(timeout=step_timeout(20))
-                    else:
-                        raise ValueError(f"不支持的步骤类型: {action}")
+                    _execute_ui_step(page, step, step_timeout(30 if action == "goto" else 20))
                     screenshot_artifact = capture_step_screenshot(index, action or "step")
                     step_results.append(
                         {
-                            "name": action,
+                            "name": step.get("name") or action,
                             "status": "SUCCESS",
                             "duration_ms": int((time.perf_counter() - started_at) * 1000),
                             "detail": _ui_step_detail(
@@ -711,7 +877,7 @@ def _execute_ui_case(
                     screenshot_artifact = capture_step_screenshot(index, action or "step", "-failure")
                     step_results.append(
                         {
-                            "name": action or f"step_{index + 1}",
+                            "name": step.get("name") or action or f"step_{index + 1}",
                             "status": "FAILED",
                             "duration_ms": int((time.perf_counter() - started_at) * 1000),
                             "detail": _ui_step_detail(
@@ -725,43 +891,48 @@ def _execute_ui_case(
                         }
                     )
                     raise
-
-            expect_text = _render_template(case.expect_text, variables, "case.expect_text")
-            final_started_at = time.perf_counter()
-            page.locator(f"text={expect_text}").first.wait_for(timeout=step_timeout(15))
-            final_screenshot = capture_step_screenshot(len(steps), "assert-expect-text")
-            step_results.append(
-                {
-                    "name": "assert_expect_text",
-                    "status": "SUCCESS",
-                    "duration_ms": int((time.perf_counter() - final_started_at) * 1000),
-                    "detail": {
-                        "expect_text": expect_text,
-                        "page_url": page.url,
-                        "screenshot": final_screenshot["name"] if final_screenshot else None,
-                    },
-                }
+            summary_screenshot = page.screenshot(
+                full_page=True,
+                timeout=step_timeout(10),
+                animations="disabled",
+                caret="hide",
             )
-            summary_screenshot = page.screenshot(full_page=True)
             success_artifact = _write_run_artifact(run.id, "ui-success.png", summary_screenshot, binary=True)
             artifacts.append(success_artifact)
+            append_screenshot_warnings()
             if tracing and hasattr(tracing, "stop"):
                 tracing.stop(path=trace_path)
                 if os.path.exists(trace_path):
                     artifacts.append({"name": "ui-trace.zip", "path": trace_path, "type": "zip"})
             return {
                 "status": "SUCCESS",
-                "summary": "UI 巡检执行成功",
+                "summary": f"UI 用例执行成功，共 {len(step_results)} 个检查点",
                 "error_type": None,
                 "exit_code": 0,
                 "stdout_text": f"UI case visited {target_url}\nfinal_url={page.url}",
                 "stderr_text": "",
                 "artifacts_json": artifacts,
-                "request_payload": {"target_url": target_url, "steps": steps},
-                "response_payload": {"expect_text": expect_text, "final_url": page.url},
+                "request_payload": {
+                    "target_url": target_url,
+                    "steps": steps,
+                    "assertions": assertions,
+                },
+                "response_payload": {
+                    "expect_text": expect_text,
+                    "final_url": page.url,
+                    "checkpoint_count": len(step_results),
+                },
                 "step_results_json": step_results,
             }
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, (subprocess.TimeoutExpired, PlaywrightTimeoutError, TimeoutError)):
+                failure_status, failure_error_type = "TIMEOUT", "TIMEOUT"
+            elif isinstance(exc, AssertionError):
+                failure_status, failure_error_type = "FAILED", "ASSERTION"
+            elif isinstance(exc, ValueError):
+                failure_status, failure_error_type = "FAILED", "CONFIG"
+            else:
+                failure_status, failure_error_type = "ERROR", "SYSTEM"
             failure_artifact = capture_step_screenshot(len(step_results), "ui", "-failure")
             if failure_artifact is None:
                 try:
@@ -772,6 +943,7 @@ def _execute_ui_case(
                     failure_artifact = None
             error_text_artifact = _write_run_artifact(run.id, "ui-error.txt", traceback.format_exc())
             artifacts.append(error_text_artifact)
+            append_screenshot_warnings()
             try:
                 if tracing and hasattr(tracing, "stop"):
                     tracing.stop(path=trace_path)
@@ -782,6 +954,10 @@ def _execute_ui_case(
             raise RuntimeError(
                 json.dumps(
                     {
+                        "error": str(exc) or exc.__class__.__name__,
+                        "error_class": exc.__class__.__name__,
+                        "status": failure_status,
+                        "error_type": failure_error_type,
                         "artifacts": artifacts,
                         "steps": step_results,
                     },

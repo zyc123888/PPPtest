@@ -25,12 +25,14 @@ class Settings(BaseSettings):
     execution_engine: str = "pytest"
     report_output_dir: str = "reports"
     case_generation_rules_dir: str = ""
+    case_generation_unified_rules_dir: str = ""
     auto_bootstrap_on_startup: bool = True
     seed_demo_data_on_bootstrap: bool = False
     bootstrap_max_retries: int = 30
     bootstrap_retry_interval_seconds: int = 2
     initial_admin_password: str = "admin123"
     password_hash_iterations: int = 260000
+    app_encryption_key: str = ""
     normalize_mysql_charset_on_bootstrap: bool = False
 
     # —— 用例生成（case generation）可调参数 ——
@@ -48,20 +50,44 @@ class Settings(BaseSettings):
     case_gen_requirement_total_text_limit: int = 200000
     case_gen_requirement_batch_text_limit: int = 6000
     case_gen_requirement_batch_max_sections: int = 4
+    case_gen_requirement_batch_concurrency: int = 2
     # 输出侧上限：模型单次输出硬限，分批就是为了让每批输出 JSON 能完整闭合，勿随意调大
     case_gen_requirement_max_tokens: int = 8000
     case_gen_pending_confirmation_limit: int = 12
     case_gen_pending_confirmation_text_limit: int = 220
     case_gen_function_point_text_limit: int = 320
     case_gen_testcase_fp_batch_size: int = 5
-    case_gen_min_cases_per_function_point: int = 5
     case_gen_testcase_repair_max_rounds: int = 2
     case_gen_max_concurrency: int = 4
+    # V2 trusted source shards call the model once per source. Keep this conservative
+    # because some providers reject concurrent requests with 429 concurrency quota errors.
+    case_gen_trusted_shard_concurrency: int = 2
+    # Scope index uses model calls per document batch. Keep this separate from
+    # testcase shard concurrency so long documents can be indexed faster while
+    # still staying below provider concurrency quota.
+    case_gen_scope_index_concurrency: int = 2
+    case_gen_scope_index_two_phase_trigger_sections: int = 16
+    case_gen_scope_index_two_phase_trigger_text: int = 48000
+    # Unified trusted-gate is deterministic by default. Enable only when you
+    # explicitly want an additional model review after backend gate passes.
+    case_gen_trusted_model_gate_enabled: bool = False
+    case_gen_trusted_shard_max_attempts: int = 2
     case_gen_max_ai_retries: int = 2
     case_gen_default_chat_timeout_seconds: float = 240.0
     case_gen_long_chat_timeout_seconds: float = 420.0
-    case_gen_stale_seconds_with_task: int = 300
-    case_gen_stale_seconds_inline: int = 30
+    case_gen_heartbeat_seconds: int = 15
+    case_gen_watchdog_enabled: bool = True
+    case_gen_attempt_stale_seconds: int = 900
+    case_gen_dispatch_stale_seconds: int = 120
+    case_gen_watchdog_interval_seconds: int = 30
+    case_gen_artifact_retention_days: int = 30
+    case_gen_artifact_content_preview_bytes: int = 131072
+    case_gen_max_source_download_bytes: int = 10 * 1024 * 1024
+    case_gen_max_image_download_bytes: int = 12 * 1024 * 1024
+    case_gen_allow_private_urls: bool = False
+    case_gen_trusted_min_evidence_coverage_rate: float = 0.80
+    case_gen_trusted_max_weak_expected_rate: float = 0.10
+    case_gen_trusted_max_weak_step_rate: float = 0.10
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -3,15 +3,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import mimetypes
 import os
 import re
-import shutil
 import subprocess
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from pathlib import Path
 import ssl
 from urllib.parse import urljoin, urlparse
@@ -25,7 +24,28 @@ from app.core.celery_app import celery_app
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models import AIModelConfig, CaseGenerationArtifact, CaseGenerationJob
+from app.tasks.case_generation_common import convert_xmindmark_to_xmind, inspect_xmind_archive
+from app.tasks.case_generation_runtime import (
+    AttemptHeartbeat,
+    SupersededAttemptError,
+    assert_active_attempt,
+    attempt_output_dir,
+    bind_attempt,
+    current_attempt_id,
+    ensure_attempt,
+    finish_attempt,
+    mark_last_job_stage_failed,
+    mark_attempt_running,
+    raise_if_job_cancelled,
+    sync_attempt_from_job,
+    update_job_stage,
+)
+from app.tasks.secure_fetch import fetch_resource, fetch_resource_async
+from app.tasks.model_client import call_json_chat_completion
 from app.timeutil import utc_now_naive
+
+
+logger = logging.getLogger(__name__)
 
 
 _HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
@@ -55,7 +75,6 @@ _PENDING_CONFIRMATION_LIMIT = settings.case_gen_pending_confirmation_limit
 _PENDING_CONFIRMATION_TEXT_LIMIT = settings.case_gen_pending_confirmation_text_limit
 _FUNCTION_POINT_TEXT_LIMIT = settings.case_gen_function_point_text_limit
 _TESTCASE_FP_BATCH_SIZE = settings.case_gen_testcase_fp_batch_size
-_MIN_CASES_PER_FUNCTION_POINT = settings.case_gen_min_cases_per_function_point
 _TESTCASE_REPAIR_MAX_ROUNDS = settings.case_gen_testcase_repair_max_rounds
 _CASE_GENERATION_MAX_CONCURRENCY = settings.case_gen_max_concurrency
 _MAX_AI_RETRIES = settings.case_gen_max_ai_retries
@@ -314,6 +333,13 @@ _METHOD_LABELS = {
     "error_tolerance": "异常容错",
     "time_or_sequence": "时间时序",
     "ui_interaction": "UI交互",
+    "pairwise": "组合测试",
+    "crud_lifecycle": "数据生命周期",
+    "idempotency": "幂等重试",
+    "data_consistency": "数据一致性",
+    "calculation_precision": "计算精度",
+    "batch_partial_failure": "批处理",
+    "observability_audit": "审计日志",
 }
 
 
@@ -404,10 +430,7 @@ class GenerationContext:
 
 
 def _job_output_dir(job_id: int) -> str:
-    root_dir = settings.report_output_dir
-    if not os.path.isabs(root_dir):
-        root_dir = os.path.abspath(root_dir)
-    output_dir = os.path.join(root_dir, "case_generation", f"job_{job_id}")
+    output_dir = attempt_output_dir(job_id, "v1")
     _ensure_writable_dir(output_dir)
     return output_dir
 
@@ -436,8 +459,8 @@ def _ensure_output_dir_writable(output_dir: str) -> str:
 def _make_writable_file(path: str) -> str:
     try:
         os.chmod(path, 0o666)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.debug("unable to chmod generated file %s: %s", path, exc)
     return path
 
 
@@ -454,8 +477,8 @@ def _atomic_replace_file(file_path: str, write_callback) -> str:
         if os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning("unable to remove temporary file %s: %s", temp_path, exc)
 
 
 def _write_text_file(output_dir: str, file_name: str, content: str) -> str:
@@ -548,10 +571,7 @@ def _significant_requirement_terms(function_points: dict) -> set[str]:
 
 
 def _persist_stage_artifact(output_dir: str, file_name: str, payload: dict | list) -> None:
-    try:
-        _write_json_file(output_dir, file_name, payload)
-    except Exception:
-        pass
+    _write_json_file(output_dir, file_name, payload)
 
 
 # --- Phase 3：schema 字段形态强转（以 claw_5skill_final 模板为准，兼容旧字符串形态） ---
@@ -728,160 +748,15 @@ def sanitize_case_generation_payload(payload: dict | None, *, cleanup_secret: bo
 
 
 def _update_stage(job: CaseGenerationJob, db, key: str, title: str, status: str, summary: str) -> None:
-    progress = dict(job.progress_json or {})
-    stages = list(progress.get("stages") or [])
-    now_iso = utc_now_naive().isoformat()
-    updated = False
-    for item in stages:
-        if item.get("key") == key:
-            started_at = item.get("started_at") or now_iso
-            item.update({"title": title, "status": status, "summary": summary, "started_at": started_at, "updated_at": now_iso})
-            if status == "running":
-                item["duration_ms"] = item.get("duration_ms") or 0
-            else:
-                item["duration_ms"] = _duration_ms_from_iso(started_at, now_iso)
-            updated = True
-            break
-    if not updated:
-        stage = {"key": key, "title": title, "status": status, "summary": summary, "started_at": now_iso, "updated_at": now_iso}
-        stage["duration_ms"] = 0 if status == "running" else _duration_ms_from_iso(now_iso, now_iso)
-        stages.append(stage)
-    progress["stages"] = stages
-    job.progress_json = progress
-    flag_modified(job, "progress_json")
-    job.summary = summary
-    db.commit()
-
-
-def _duration_ms_from_iso(started_at: str | None, ended_at: str | None) -> int:
-    if not started_at or not ended_at:
-        return 0
-    try:
-        started = datetime.fromisoformat(started_at)
-        ended = datetime.fromisoformat(ended_at)
-    except ValueError:
-        return 0
-    return max(int((ended - started).total_seconds() * 1000), 0)
+    update_job_stage(db, job, key, title, status, summary)
 
 
 def _mark_last_stage_failed(job: CaseGenerationJob, *, summary: str) -> None:
-    progress = dict(job.progress_json or {})
-    stages = list(progress.get("stages") or [])
-    if not stages:
-        return
-    now_iso = utc_now_naive().isoformat()
-    current = stages[-1]
-    started_at = current.get("started_at") or now_iso
-    current["status"] = "failed"
-    current["summary"] = summary
-    current["updated_at"] = now_iso
-    current["duration_ms"] = _duration_ms_from_iso(started_at, now_iso)
-    progress["stages"] = stages
-    job.progress_json = progress
-    flag_modified(job, "progress_json")
+    mark_last_job_stage_failed(job, summary=summary)
 
 
 def _raise_if_job_cancelled(db, job_id: int) -> None:
-    current = db.get(CaseGenerationJob, job_id)
-    if current is not None and current.status == "CANCELLED":
-        raise RuntimeError("任务已取消")
-
-
-def _remove_file_if_exists(path: str | None) -> None:
-    if path and os.path.exists(path):
-        os.remove(path)
-
-
-def _cleanup_case_generation_output_dir(output_dir: str, *, keep_paths: set[str] | None = None) -> None:
-    if not output_dir or not os.path.isdir(output_dir):
-        return
-    normalized_keep_paths = {os.path.abspath(path) for path in (keep_paths or set()) if path}
-    for entry in os.listdir(output_dir):
-        entry_path = os.path.join(output_dir, entry)
-        if os.path.abspath(entry_path) in normalized_keep_paths:
-            continue
-        try:
-            if os.path.isdir(entry_path):
-                shutil.rmtree(entry_path)
-            else:
-                os.remove(entry_path)
-        except OSError:
-            pass
-
-
-def _collect_final_artifact_paths(db, job_id: int) -> set[str]:
-    final_artifacts = list(
-        db.scalars(
-            select(CaseGenerationArtifact).where(
-                CaseGenerationArtifact.job_id == job_id,
-                CaseGenerationArtifact.artifact_type == "xmind",
-            )
-        ).all()
-    )
-    return {artifact.file_path for artifact in final_artifacts if artifact.file_path}
-
-
-def _delete_case_generation_artifact(db, artifact: CaseGenerationArtifact) -> None:
-    _remove_file_if_exists(artifact.file_path)
-    db.delete(artifact)
-
-
-def _cleanup_previous_success_xmind_for_project(db, current_job: CaseGenerationJob) -> None:
-    if current_job.project_id is None:
-        return
-    keep_job_id = current_job.id
-    success_jobs = list(
-        db.scalars(
-            select(CaseGenerationJob)
-            .where(
-                CaseGenerationJob.project_id == current_job.project_id,
-                CaseGenerationJob.status == "SUCCESS",
-                CaseGenerationJob.id != keep_job_id,
-            )
-            .order_by(CaseGenerationJob.finished_at.desc(), CaseGenerationJob.id.desc())
-        ).all()
-    )
-    for job in success_jobs:
-        artifacts = list(
-            db.scalars(
-                select(CaseGenerationArtifact)
-                .where(
-                    CaseGenerationArtifact.job_id == job.id,
-                    CaseGenerationArtifact.artifact_type == "xmind",
-                )
-                .order_by(CaseGenerationArtifact.id.asc())
-            ).all()
-        )
-        for artifact in artifacts:
-            _delete_case_generation_artifact(db, artifact)
-
-
-def _cleanup_expired_success_xmind(db, *, retention_days: int = 3) -> None:
-    cutoff = utc_now_naive() - timedelta(days=retention_days)
-    expired_jobs = list(
-        db.scalars(
-            select(CaseGenerationJob)
-            .where(
-                CaseGenerationJob.status == "SUCCESS",
-                CaseGenerationJob.finished_at.is_not(None),
-                CaseGenerationJob.finished_at < cutoff,
-            )
-            .order_by(CaseGenerationJob.finished_at.asc(), CaseGenerationJob.id.asc())
-        ).all()
-    )
-    for job in expired_jobs:
-        artifacts = list(
-            db.scalars(
-                select(CaseGenerationArtifact)
-                .where(
-                    CaseGenerationArtifact.job_id == job.id,
-                    CaseGenerationArtifact.artifact_type == "xmind",
-                )
-                .order_by(CaseGenerationArtifact.id.asc())
-            ).all()
-        )
-        for artifact in artifacts:
-            _delete_case_generation_artifact(db, artifact)
+    raise_if_job_cancelled(db, CaseGenerationJob, job_id)
 
 
 def _extract_sections(markdown_text: str) -> list[dict]:
@@ -1218,17 +1093,16 @@ def _html_to_text(content: str) -> str:
 
 
 def _fetch_source_url(source_url: str) -> str:
-    response = httpx.get(
+    resource = fetch_resource(
         source_url,
-        follow_redirects=True,
-        timeout=30.0,
-        headers={"User-Agent": "PPPTest-CaseGenerator/1.0"},
+        max_bytes=settings.case_gen_max_source_download_bytes,
+        accepted_prefixes=("text/", "application/json", "application/markdown", "application/octet-stream"),
+        timeout_seconds=30.0,
     )
-    response.raise_for_status()
-    content_type = (response.headers.get("content-type") or "").lower()
-    text = response.text
+    content_type = resource.content_type.lower()
+    text = resource.content.decode("utf-8", errors="replace")
     if "text/html" in content_type:
-        image_links = [urljoin(source_url, item) for item in _HTML_IMAGE_PATTERN.findall(text)]
+        image_links = [urljoin(resource.url, item) for item in _HTML_IMAGE_PATTERN.findall(text)]
         image_markdown = "\n".join(f"![页面图片]({item})" for item in sorted(set(image_links)))
         body_text = _html_to_text(text)
         return f"{body_text}\n\n{image_markdown}".strip()
@@ -1245,10 +1119,11 @@ def _resolve_markdown_text(payload: dict) -> str:
     return ""
 
 
-def _extract_image_links(markdown_text: str) -> list[str]:
+def _extract_image_links(markdown_text: str, base_url: str | None = None) -> list[str]:
     links = [item.strip() for item in _MARKDOWN_IMAGE_PATTERN.findall(markdown_text)]
     links.extend(item.strip() for item in _HTML_IMAGE_PATTERN.findall(markdown_text))
-    return sorted({item for item in links if item and not item.startswith("data:")})
+    resolved = [urljoin(base_url, item) if base_url else item for item in links]
+    return sorted({item for item in resolved if item and not item.startswith("data:")})
 
 
 async def _download_single_image_async(client: httpx.AsyncClient, *, index: int, url: str, image_dir: str) -> dict:
@@ -1259,15 +1134,14 @@ async def _download_single_image_async(client: httpx.AsyncClient, *, index: int,
     file_path = os.path.join(image_dir, file_name)
     record = {"image_id": f"IMG-{index:03d}", "url": url, "file_name": file_name, "file_path": file_path}
     try:
-        response = await client.get(
+        resource = await fetch_resource_async(
+            client,
             url,
-            follow_redirects=True,
-            timeout=30.0,
-            headers={"User-Agent": "PPPTest-CaseGenerator/1.0"},
+            max_bytes=settings.case_gen_max_image_download_bytes,
+            accepted_prefixes=("image/",),
         )
-        response.raise_for_status()
 
-        def _write_image(path: str, content: bytes = response.content) -> None:
+        def _write_image(path: str, content: bytes = resource.content) -> None:
             with open(path, "wb") as handle:
                 handle.write(content)
 
@@ -1281,7 +1155,7 @@ async def _download_single_image_async(client: httpx.AsyncClient, *, index: int,
 async def _download_image_links_async(image_links: list[str], output_dir: str) -> list[dict]:
     image_dir = os.path.join(output_dir, "images")
     _ensure_writable_dir(image_dir)
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         return await _gather_limited(
             [
                 _download_single_image_async(client, index=index, url=url, image_dir=image_dir)
@@ -1406,6 +1280,20 @@ def _compact_function_points_for_ai(function_points: list[dict]) -> list[dict]:
     for item in function_points:
         if not isinstance(item, dict):
             continue
+        raw_test_hints = item.get("test_hints")
+        if isinstance(raw_test_hints, dict):
+            test_hints = {
+                "positive": [_truncate_text(str(text), 140) for text in list(raw_test_hints.get("positive") or [])[:3]],
+                "boundary": [_truncate_text(str(text), 140) for text in list(raw_test_hints.get("boundary") or [])[:3]],
+                "negative": [_truncate_text(str(text), 140) for text in list(raw_test_hints.get("negative") or [])[:3]],
+            }
+        elif isinstance(raw_test_hints, list):
+            hint_values = [_truncate_text(str(text), 140) for text in raw_test_hints[:6]]
+            test_hints = {"positive": hint_values[:3], "boundary": hint_values[3:5], "negative": hint_values[5:6]}
+        elif raw_test_hints:
+            test_hints = {"positive": [_truncate_text(str(raw_test_hints), 140)], "boundary": [], "negative": []}
+        else:
+            test_hints = {"positive": [], "boundary": [], "negative": []}
         compacted.append(
             {
                 "fp_id": item.get("fp_id"),
@@ -1418,11 +1306,7 @@ def _compact_function_points_for_ai(function_points: list[dict]) -> list[dict]:
                 "description": _truncate_text(str(item.get("description") or ""), _FUNCTION_POINT_TEXT_LIMIT),
                 "source_refs": list(item.get("source_refs") or [])[:6],
                 "rules": [_truncate_text(str(rule), 140) for rule in list(item.get("rules") or [])[:6]],
-                "test_hints": {
-                    "positive": [_truncate_text(str(text), 140) for text in list((item.get("test_hints") or {}).get("positive") or [])[:3]],
-                    "boundary": [_truncate_text(str(text), 140) for text in list((item.get("test_hints") or {}).get("boundary") or [])[:3]],
-                    "negative": [_truncate_text(str(text), 140) for text in list((item.get("test_hints") or {}).get("negative") or [])[:3]],
-                },
+                "test_hints": test_hints,
                 "priority_hint": item.get("priority_hint"),
                 "source_order": item.get("source_order"),
             }
@@ -1439,42 +1323,18 @@ async def _call_openai_text_async(
     user_content: str | list,
     max_tokens: int = 12000,
     timeout_seconds: float = _DEFAULT_CHAT_TIMEOUT_SECONDS,
-) -> dict:
+) -> str:
     if not api_key or api_key == _SECRET_SENTINEL:
         raise ValueError("请提供有效的 OpenAI API Key")
-    payload = {
-        "model": model or _DEFAULT_MODEL,
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        "max_tokens": max_tokens,
-    }
-    endpoint = f"{(base_url or _OPENAI_BASE_URL).rstrip('/')}/chat/completions"
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                endpoint,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-                timeout=timeout_seconds,
-            )
-            response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
-    except httpx.ReadTimeout as exc:
-        raise RuntimeError(f"模型响应超时（>{int(timeout_seconds)}s），请重试或缩小需求范围") from exc
-    except httpx.HTTPStatusError as exc:
-        try:
-            error_payload = exc.response.json().get("error", {})
-            message = error_payload.get("message") or str(exc)
-        except Exception:
-            message = exc.response.text[:500] or str(exc)
-        raise RuntimeError(f"OpenAI 请求失败，HTTP {exc.response.status_code}：{message}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"模型请求过程中发生未知错误：{str(exc)}") from exc
+    return await call_json_chat_completion(
+        api_key=api_key,
+        model=model or _DEFAULT_MODEL,
+        base_url=base_url or _OPENAI_BASE_URL,
+        system_prompt=system_prompt,
+        user_content=user_content,
+        max_tokens=max_tokens,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 async def _call_openai_json_async(
@@ -1592,8 +1452,8 @@ async def _call_skill_with_gate_async(
             if output_contract:
                 contract_dict = json.loads(output_contract)
                 top_level_keys = list(contract_dict.keys())
-        except Exception:
-            pass
+        except (json.JSONDecodeError, TypeError):
+            top_level_keys = []
         
         structure_hint = ""
         if top_level_keys:
@@ -1787,8 +1647,8 @@ def _call_skill_with_gate(
             if output_contract:
                 contract_dict = json.loads(output_contract)
                 top_level_keys = list(contract_dict.keys())
-        except Exception:
-            pass
+        except (json.JSONDecodeError, TypeError):
+            top_level_keys = []
         
         structure_hint = ""
         if top_level_keys:
@@ -1965,7 +1825,7 @@ def _build_orchestration_plan(job: CaseGenerationJob, payload: dict, markdown_te
             "模块顺序必须遵循需求文档原始章节顺序",
             "图片链接必须先下载并分析，再做正文理解",
             "最终只突出同名 XMind 文件",
-            "XMind 必须由后端根据 TestcasePackage 确定性展开，并由 xmindmark CLI 转换生成",
+            "XMind 必须由后端根据 TestcasePackage 确定性展开，并由项目 exporter 转换后解析实际归档校验",
         ],
     }
 
@@ -2310,6 +2170,13 @@ def _build_requirement_analysis(
                 "禁止依据你对业务/产品的理解自创模块名（例如不得把『筛选栏优化』改成『Ad Manager 筛选器』）；模块名只能来自需求文档真实出现的章节标题。",
                 f"本批共有 {batch_section_count} 个有正文的章节，必须为每一个章节至少提取 1 个功能点，禁止遗漏任何章节；同一章节可按需拆分多个功能点。",
                 f"本批功能点总数不得少于章节数（≥{batch_section_count} 个）；若某章节确实无可测内容，必须在 pending_confirmations 中说明原因，而不是直接跳过。",
+                "【章节内合并优先原则】同一章节内的多条规则，默认应合并进同一个 FP 的 rules 字段，而不是拆成多个 FP。"
+                "仅在以下情况才允许拆分为独立 FP：(1) 不同操作入口或页面（如筛选栏 vs 新建页面）；"
+                "(2) 互斥的开关状态且各自有完整独立流程（如按钮开/关各自触发不同保存逻辑）；"
+                "(3) 不同业务对象且规则有实质差异（如 CPI 出价 vs ROI 出价的字段逻辑不同）。"
+                "以下情况禁止拆分：同一字段在不同 Tab（Campaign/Ad Set/Ad Creative）下展示逻辑完全相同；"
+                "同一操作的正常/边界/异常分支（这些属于测试维度，由 testcase-designer 处理，不应在此拆 FP）；"
+                "纯枚举的改名映射列表（多个字段改名合并为 1 个 FP，rules 逐条列出每个映射）。",
                 "如果图片与正文冲突，以正文为主，并在 pending_confirmations 中记录冲突。",
             ],
         }
@@ -2679,21 +2546,23 @@ def _build_testcase_package(
         allowed_fp_ids = {item.get("fp_id") for item in batch_fps}
         compact_batch_fps = _compact_function_points_for_ai(batch_fps)
         prompt = {
-            "task": "按 claw_5skill_final 的 testcase-designer 规则，仅基于本批 FunctionPoints 生成中文执行级测试用例。必须覆盖正交维度与异常路径。",
+            "task": "按 claw_5skill_final 的 testcase-designer 规则，仅基于本批 FunctionPoints 生成中文执行级测试用例。先判断测试设计方法是否适用，再生成高价值、可执行、可观察的用例。",
             "batch_label": batch_label,
             "function_points": compact_batch_fps,
             "pending_confirmations": compact_pending_confirmations,
             "constraints": [
                 "只能覆盖本批 function_points 中的 fp_id，不要生成其他 fp_id。",
-                "每个 fp_id 至少生成 1 条主流程用例；再按测试设计方法库（等价类/边界值/决策表/状态转换/角色权限矩阵/多入口一致性/空值默认值/异常容错/时间时序）选择适用方法补充用例。",
-                "若某功能点的 rules/description 中包含并列列举的多个独立子规则（例如三种占位图：图片出错/未上传/JS代码不支持预览；或多个字段改名映射：A→B、C→D；或多条互斥的保存逻辑分支），必须为每一个子规则各生成至少 1 条独立用例并在标题中点明该子项，禁止把多个并列子规则合并进同一条用例笼统验证。",
+                "每个 fp_id 至少要有可追溯覆盖，但不要机械凑数量；先判断主流程、边界、异常和专项方法是否适用，再按风险与可观察性生成用例。",
+                "测试设计方法库包含 equivalence/boundary/decision_table/state_transition/role_matrix/entry_consistency/default_or_empty/error_tolerance/time_or_sequence/ui_interaction/pairwise/crud_lifecycle/idempotency/data_consistency/calculation_precision/batch_partial_failure/observability_audit。只有功能点确实具备适用条件时才展开专项方法。",
+                "若某功能点的 rules/description 中包含并列列举的多个独立子规则（例如三种占位图、多个字段改名映射、多条互斥保存逻辑分支），优先保证可独立观察的高风险子规则被覆盖；对同构或低风险子规则可合并为参数化用例，并在标题、test_data 或 generation_basis.rationale 中点明覆盖范围，禁止笼统验证。",
+                "【跨模块同构禁令】若某功能点同时覆盖多个同构模块（如 Campaign/Ad Set/Ad Creative/Product），且各模块的操作步骤和预期结果完全相同、仅模块名不同，禁止为每个模块单独生成一条用例；应将多个模块合并为 1 条参数化用例（标题点明全部模块，test_data 枚举各模块入参），或选取 1 个代表性模块写主流程、其余模块用 1 条多入口一致性用例覆盖。仅当各模块存在实质性差异（不同字段、不同交互逻辑、不同权限）时，才允许分开生成。",
                 "按场景价值决定用例数量：不堆数量、不为追求覆盖制造大量同质用例，也不要机械凑数。",
                 "category 只能使用 functional/ui/boundary/negative/regression/compatibility/performance/security。",
                 "priority 只能使用 P0/P1/P2/P3，并参考 function_points.priority_hint；无明确业务优先级时不要过度使用 P0。",
                 "标题必须包含具体业务对象、场景或规则，不得使用正常流程验证/主流程验证/边界验证/异常验证等模板标题。",
                 "steps 必须让新人可照着执行：包含入口/前置数据、具体操作对象、触发动作、页面或接口或数据层核验；禁止写“进入对应页面/执行正常流程验证/观察结果”等空泛步骤。",
                 "expected_results 必须可观察、可判定、可复核（状态变化、记录落库、接口字段、提示文案、预算或任务状态等），不能只写系统正常/结果正确/符合预期。",
-                "generation_basis 必须写明 method（取自方法库，如 equivalence/boundary/decision_table/state_transition/role_matrix/entry_consistency）与 rationale（这条用例为何需要存在）。",
+                "generation_basis 必须写明 method（取自方法库，如 equivalence/boundary/decision_table/state_transition/role_matrix/entry_consistency/pairwise/crud_lifecycle/idempotency/data_consistency/calculation_precision/batch_partial_failure/observability_audit）与 rationale（这条用例为何需要存在，或为什么合并覆盖）。",
                 "traceability 必须准确引用 fp_id 和 source_refs。",
                 "test_data 必须是对象数组，每项 {name, value}；review_flags 给出 executable_risk 与 ambiguity_risk（low/medium/high）。",
                 "不要回读原始需求文档，不要自由发明业务规则。",
@@ -2753,13 +2622,21 @@ def _build_testcase_package(
         return sorted_cases
 
     def dedupe_cases(cases: list[dict]) -> list[dict]:
-        seen: set[tuple[str, str]] = set()
+        seen_fp_title: set[tuple[str, str]] = set()
+        seen_title_only: set[str] = set()
         unique: list[dict] = []
         for case in cases:
-            key = (case.get("fp_id") or "", re.sub(r"\s+", "", str(case.get("title") or "")))
-            if key in seen:
+            fp_id = case.get("fp_id") or ""
+            norm_title = re.sub(r"\s+", "", str(case.get("title") or ""))
+            # 同一 FP 内完全相同标题去重
+            fp_key = (fp_id, norm_title)
+            if fp_key in seen_fp_title:
                 continue
-            seen.add(key)
+            seen_fp_title.add(fp_key)
+            # 跨 FP 标题完全相同去重（捕获不同 FP 间的同质用例）
+            if norm_title in seen_title_only:
+                continue
+            seen_title_only.add(norm_title)
             unique.append(case)
         return unique
 
@@ -2840,7 +2717,7 @@ def _build_review_report(
         "constraints": [
             "覆盖率检查：每个 FunctionPoint 至少被 1 条用例覆盖；列出未覆盖 fp_id，存在未覆盖时结论不得为 pass。",
             "维度完整性：核对 functional/entry/role/data/time/environment/consistency 七个维度是否被覆盖，缺失维度在 dimension_matrix 标 missing。",
-            "方法覆盖：核对等价类/边界值/决策表/状态转换/角色权限/多入口一致性/空值默认/异常容错/时间时序/UI 交互十类方法；方法名出现过 ≠ 真正覆盖，需看用例是否真的体现该方法。",
+            "方法覆盖：核对等价类/边界值/决策表/状态转换/角色权限/多入口一致性/空值默认/异常容错/时间时序/UI 交互/组合测试/数据生命周期/幂等重试/数据一致性/计算精度/批处理/审计日志十七类方法；方法名出现过 ≠ 真正覆盖，需看用例是否真的体现该方法，且只在适用场景下要求覆盖。",
             "去重：识别重复或高度同质用例并计入 summary.duplicate_count；数量多 ≠ 覆盖好。",
             "可执行性：步骤是否新人可照做，含入口/前置/操作对象/触发动作/核验点；空泛步骤计入 ambiguous_step_count。",
             "可验证性：预期是否可观察可判定（状态/记录/接口字段/提示文案）；不可验证预期计入 unverifiable_expectation_count。",
@@ -2873,7 +2750,7 @@ def _build_review_report(
         output_contract=(
             '{"summary": {"testcase_count": 0, "duplicate_count": 0, "uncovered_fp_count": 0, "ambiguous_step_count": 0, "unverifiable_expectation_count": 0, "overall_score": 0, "release_readiness": "pass|conditional_pass|fail"}, '
             '"coverage": {"fp_covered": 0, "fp_total": 0, "uncovered_fp_ids": []}, '
-            '"method_coverage": {"equivalence": "covered|partial|missing", "boundary": "covered|partial|missing", "decision_table": "covered|partial|missing", "state_transition": "covered|partial|missing", "role_matrix": "covered|partial|missing", "entry_consistency": "covered|partial|missing", "default_or_empty": "covered|partial|missing", "error_tolerance": "covered|partial|missing", "time_or_sequence": "covered|partial|missing", "ui_interaction": "covered|partial|missing"}, '
+            '"method_coverage": {"equivalence": "covered|partial|missing", "boundary": "covered|partial|missing", "decision_table": "covered|partial|missing", "state_transition": "covered|partial|missing", "role_matrix": "covered|partial|missing", "entry_consistency": "covered|partial|missing", "default_or_empty": "covered|partial|missing", "error_tolerance": "covered|partial|missing", "time_or_sequence": "covered|partial|missing", "ui_interaction": "covered|partial|missing", "pairwise": "covered|partial|missing", "crud_lifecycle": "covered|partial|missing", "idempotency": "covered|partial|missing", "data_consistency": "covered|partial|missing", "calculation_precision": "covered|partial|missing", "batch_partial_failure": "covered|partial|missing", "observability_audit": "covered|partial|missing"}, '
             '"dimension_matrix": {"functional": "covered|partial|missing", "entry": "covered|partial|missing", "role": "covered|partial|missing", "data": "covered|partial|missing", "time": "covered|partial|missing", "environment": "covered|partial|missing", "consistency": "covered|partial|missing"}, '
             '"evidence_trace": {"image_link_count": 0, "download_success_count": 0, "download_failed_count": 0, "pending_confirmation_count": 0, "status": "complete|incomplete"}, '
             '"execution_proof": {"text_fp_count": 0, "text_and_image_fp_count": 0, "image_or_inferred_fp_count": 0, "image_observation_count": 0, "summary_lines": ["string"]}, '
@@ -2894,7 +2771,7 @@ def _build_review_report(
     review_summary = ai_review.get("summary") or {}
     uncovered_ids = (ai_review.get("coverage") or {}).get("uncovered_fp_ids") or []
     review_summary.setdefault("release_readiness", readiness)
-    review_summary.setdefault("testcase_count", len(cases))
+    review_summary["testcase_count"] = len(cases)  # 强制用后端实际数，不信任模型自报
     review_summary.setdefault("duplicate_count", 0)
     review_summary.setdefault("uncovered_fp_count", len(uncovered_ids))
     review_summary.setdefault("ambiguous_step_count", 0)
@@ -3018,7 +2895,12 @@ def _build_xmindmark(
     _append_node(lines, 1, f"图片下载成功数量：{review_report.get('image_download_success_count', 0)}")
     _append_node(lines, 1, f"图片下载失败数量：{review_report.get('image_download_failed_count', 0)}")
     _append_node(lines, 1, f"审查结论：{review_report.get('review_conclusion', '有条件通过')}")
-    _append_node(lines, 1, f"待确认项数量：{len(review_report.get('pending_confirmations') or [])}")
+    pending_confirmations = review_report.get("pending_confirmations") or []
+    _append_node(lines, 1, f"待确认项数量：{len(pending_confirmations)}")
+    for pc in pending_confirmations:
+        pc_id = pc.get("pending_id") or ""
+        pc_msg = _short_text(pc.get("message") or "", 100)
+        _append_node(lines, 2, f"{pc_id}：{pc_msg}" if pc_id else pc_msg)
     if category_counts:
         _append_node(lines, 1, "类型分布：" + " / ".join(f"{_category_label(key)} {value}" for key, value in category_counts.items()))
     method_counts = Counter(
@@ -3104,15 +2986,20 @@ def _upsert_artifact(
     file_path: str | None = None,
     content_json: dict | list | None = None,
 ) -> None:
+    attempt_id = current_attempt_id()
+    filters = [
+        CaseGenerationArtifact.job_id == job_id,
+        CaseGenerationArtifact.artifact_type == artifact_type,
+    ]
+    if attempt_id is not None:
+        filters.append(CaseGenerationArtifact.attempt_id == attempt_id)
     artifact = db.scalar(
-        select(CaseGenerationArtifact).where(
-            CaseGenerationArtifact.job_id == job_id,
-            CaseGenerationArtifact.artifact_type == artifact_type,
-        )
+        select(CaseGenerationArtifact).where(*filters)
     )
     if artifact is None:
         artifact = CaseGenerationArtifact(
             job_id=job_id,
+            attempt_id=attempt_id,
             artifact_type=artifact_type,
             file_name=file_name,
             file_path=file_path,
@@ -3123,32 +3010,12 @@ def _upsert_artifact(
     artifact.file_name = file_name
     artifact.file_path = file_path
     artifact.content_json = content_json
+    artifact.expired_at = None
 
 
 def _convert_xmindmark(output_dir: str, xmindmark_file_path: str, output_stem: str) -> str:
-    if not shutil.which("xmindmark"):
-        raise RuntimeError("缺少 xmindmark 命令，请先在后端运行环境安装 xmindmark")
     _ensure_output_dir_writable(output_dir)
-    generated_path = os.path.join(output_dir, f"{Path(xmindmark_file_path).stem}.xmind")
-    final_path = os.path.join(output_dir, f"{output_stem}.xmind")
-    for path in {generated_path, final_path}:
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                _make_writable_file(path)
-                os.remove(path)
-    subprocess.run(
-        ["xmindmark", "-f", "xmind", "-o", output_dir, xmindmark_file_path],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    if not os.path.exists(generated_path):
-        raise RuntimeError("xmindmark 转换完成但未生成 .xmind 文件")
-    if generated_path != final_path:
-        os.replace(generated_path, final_path)
-    return _make_writable_file(final_path)
+    return convert_xmindmark_to_xmind(output_dir, xmindmark_file_path, output_stem)
 
 
 def _assert_required_skill_execution(audit_log: list[dict]) -> None:
@@ -3258,8 +3125,7 @@ def _renumber_cases_global(cases: list[dict], function_points: dict) -> list[dic
     return sorted_cases
 
 
-@celery_app.task(name="app.tasks.case_generation.run_case_generation_job")
-def run_case_generation_job(job_id: int) -> None:
+def _run_case_generation_job_attempt(job_id: int, attempt_id: int) -> None:
     db = SessionLocal()
     run_started_at = time.perf_counter()
     audit_log: list[dict] = []
@@ -3267,19 +3133,18 @@ def run_case_generation_job(job_id: int) -> None:
         job = db.get(CaseGenerationJob, job_id)
         if job is None:
             return
+        assert_active_attempt(job, attempt_id, db=db)
         if job.status == "CANCELLED":
             return
+        attempt = ensure_attempt(db, job, pipeline_version="v1", attempt_id=attempt_id)
+        mark_attempt_running(db, job, attempt)
 
         payload = dict(job.input_payload_json or {})
         markdown_text = _resolve_markdown_text(payload)
         if not markdown_text:
-            job.status = "FAILED"
-            job.task_id = None
-            job.summary = "输入内容为空"
-            job.error_message = "请提供需求文本、上传文件内容或有效的需求文档链接"
-            job.finished_at = utc_now_naive()
-            db.commit()
-            return
+            message = "请提供需求文本、上传文件内容或有效的需求文档链接"
+            finish_attempt(db, job, status="FAILED", summary="输入内容为空", error_message=message)
+            raise ValueError(message)
 
         model_config_id = payload.get("model_config_id")
         model_config = db.get(AIModelConfig, model_config_id) if model_config_id else None
@@ -3291,25 +3156,20 @@ def run_case_generation_job(job_id: int) -> None:
             api_key,
         )
         if not api_key:
-            job.status = "FAILED"
-            job.task_id = None
-            job.summary = "缺少模型配置"
-            job.error_message = "当前工作空间未配置可用模型或 API Key"
-            job.finished_at = utc_now_naive()
-            db.commit()
-            return
+            message = "当前工作空间未配置可用模型或 API Key"
+            finish_attempt(db, job, status="FAILED", summary="缺少模型配置", error_message=message)
+            raise ValueError(message)
 
         job.status = "RUNNING"
         job.summary = "正在按 claw_5skill_final 生成 XMind 用例"
         job.started_at = utc_now_naive()
         job.progress_json = {"stages": []}
-        db.execute(delete(CaseGenerationArtifact).where(CaseGenerationArtifact.job_id == job.id))
         db.commit()
         _raise_if_job_cancelled(db, job.id)
 
         output_dir = _job_output_dir(job.id)
         output_stem = _sanitize_file_stem(job.source_document_name or job.name)
-        image_links = _extract_image_links(markdown_text)
+        image_links = _extract_image_links(markdown_text, payload.get("source_url"))
         _update_stage(job, db, "orchestrate", "任务编排", "running", "正在生成确定性执行计划")
         orchestration_plan = _build_orchestration_plan(job, payload, markdown_text, image_links)
         _update_stage(job, db, "orchestrate", "任务编排", "success", f"执行模式：{orchestration_plan.get('mode', 'full')}")
@@ -3410,7 +3270,7 @@ def run_case_generation_job(job_id: int) -> None:
             model,
             base_url,
             audit_log,
-            block_on_fail=False,
+            block_on_fail=True,
         )
         _raise_if_job_cancelled(db, job.id)
         review_report["quality_summary"] = _build_case_generation_quality_summary(function_points, testcase_package)
@@ -3484,10 +3344,7 @@ def run_case_generation_job(job_id: int) -> None:
             )
         xmindmark_text = _build_xmindmark(job, function_points, testcase_package, review_report)
 
-        try:
-            _write_text_file(output_dir, "delivery_summary.md", _build_delivery_summary(job, function_points, testcase_package, review_report))
-        except Exception:
-            pass
+        _write_text_file(output_dir, "delivery_summary.md", _build_delivery_summary(job, function_points, testcase_package, review_report))
 
         xmindmark_file_name = f"{output_stem}.xmindmark"
         xmindmark_file_path = _write_text_file(output_dir, xmindmark_file_name, xmindmark_text)
@@ -3495,6 +3352,12 @@ def run_case_generation_job(job_id: int) -> None:
         if payload.get("export_xmind", True):
             try:
                 xmind_file_path = _convert_xmindmark(output_dir, xmindmark_file_path, output_stem)
+                xmind_inspection = inspect_xmind_archive(xmind_file_path)
+                expected_case_count = len(testcase_package.get("testcases") or [])
+                if xmind_inspection.get("testcase_count") != expected_case_count:
+                    raise ValueError(
+                        f"XMind 用例节点数 {xmind_inspection.get('testcase_count')} 与用例包 {expected_case_count} 不一致"
+                    )
                 _upsert_artifact(
                     db,
                     job_id=job.id,
@@ -3515,7 +3378,14 @@ def run_case_generation_job(job_id: int) -> None:
                 )
                 raise
         _raise_if_job_cancelled(db, job.id)
-        _remove_file_if_exists(xmindmark_file_path)
+        _upsert_artifact(
+            db,
+            job_id=job.id,
+            artifact_type="xmindmark",
+            file_name=xmindmark_file_name,
+            file_path=xmindmark_file_path,
+            content_json={"text": xmindmark_text},
+        )
         _update_stage(job, db, "export", "导出 XMind", "success", "已完成 XMind 导出")
         review_report_path = None
         if attach_review_report:
@@ -3529,43 +3399,59 @@ def run_case_generation_job(job_id: int) -> None:
                 content_json=review_report,
             )
         job.input_payload_json = sanitize_case_generation_payload(payload, cleanup_secret=True)
-        job.status = "SUCCESS"
-        job.task_id = None
+        # A failed quality review may still leave a draft export for manual
+        # inspection, but it must never be represented as a successful run.
+        final_status = "CONDITIONAL" if final_readiness in {"conditional_pass", "fail"} else "SUCCESS"
         if final_readiness == "fail":
             job.summary = f"已导出 XMind（质量审查未通过，{len(review_findings)} 项问题待人工复核），共 {review_report['case_count']} 条用例"
         elif final_readiness == "conditional_pass":
             job.summary = f"已生成 {review_report['case_count']} 条用例并导出 XMind（有条件通过，{len(review_findings)} 项改进建议）"
         else:
             job.summary = f"已生成 {review_report['case_count']} 条用例，并导出 XMind"
-        job.error_message = None
-        job.finished_at = utc_now_naive()
-        db.commit()
-        db.refresh(job)
-        _cleanup_previous_success_xmind_for_project(db, job)
-        _cleanup_expired_success_xmind(db, retention_days=3)
-        db.commit()
-        keep_paths = _collect_final_artifact_paths(db, job.id)
-        if review_report_path:
-            keep_paths.add(review_report_path)
-        _cleanup_case_generation_output_dir(output_dir, keep_paths=keep_paths)
+        finish_attempt(db, job, status=final_status, summary=job.summary, error_message=None)
     except Exception as exc:
         job = db.get(CaseGenerationJob, job_id)
         if job is not None:
+            if isinstance(exc, SupersededAttemptError) or job.active_attempt_id != attempt_id:
+                db.rollback()
+                return
             if job.status == "CANCELLED":
-                job.summary = "生成已取消"
-                job.error_message = "任务已手动停止"
-                job.task_id = None
-                job.finished_at = utc_now_naive()
-                db.commit()
+                finish_attempt(
+                    db,
+                    job,
+                    status="CANCELLED",
+                    summary="生成已取消",
+                    error_message="任务已手动停止",
+                )
                 return
             payload = dict(job.input_payload_json or {})
             job.input_payload_json = sanitize_case_generation_payload(payload, cleanup_secret=True)
             _mark_last_stage_failed(job, summary=str(exc))
-            job.status = "FAILED"
-            job.task_id = None
-            job.summary = "生成失败"
-            job.error_message = str(exc)
-            job.finished_at = utc_now_naive()
+            finish_attempt(db, job, status="FAILED", summary="生成失败", error_message=str(exc))
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.case_generation.run_case_generation_job",
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def run_case_generation_job(self, job_id: int, attempt_id: int | None = None) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(CaseGenerationJob, job_id)
+        if job is None:
+            return
+        attempt = ensure_attempt(db, job, pipeline_version="v1", attempt_id=attempt_id)
+        if self.request.id and not attempt.task_id:
+            attempt.task_id = self.request.id
+            if job.active_attempt_id == attempt.id:
+                job.task_id = self.request.id
             db.commit()
     finally:
         db.close()
+    with bind_attempt(attempt.id, "v1", attempt.run_id), AttemptHeartbeat(attempt.id, "v1"):
+        _run_case_generation_job_attempt(job_id, attempt.id)

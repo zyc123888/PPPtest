@@ -1,0 +1,75 @@
+version: "trusted-skill-v2"
+project: "项目名称"
+reviewed_at: "2026-07-02T00:00:00+08:00"
+inputs:
+  evidence_trace: "EvidenceTrace.yaml"
+  scope_index: "ScopeIndex.yaml"
+  function_points: "FunctionPoints.yaml"
+  testcase_package: "TestcasePackage.yaml"
+  testcase_gate_report: "TestcaseGateReport.yaml"
+summary:
+  source_count: 0
+  function_point_count: 0
+  testcase_count: 0
+  duplicate_count: 0
+  uncovered_fp_count: 0
+  ambiguous_step_count: 0
+  unverifiable_expectation_count: 0
+  unsupported_assertion_count: 0
+  evidence_mismatch_count: 0
+  current_state_as_expected_count: 0
+  exact_value_loss_count: 0
+  source_traceability_rate: 1.0
+  assertion_basis_rate: 1.0
+  release_readiness: "conditional_pass"
+order_consistency:
+  function_points_have_source_order: true
+  function_points_have_title_path: true
+  testcases_use_id_reference_chain: true
+  no_case_or_fp_long_text_duplication: true
+  xmind_follows_requirement_order: true
+source_coverage:
+  expected_sources: []
+  completed_sources: []
+  missing_sources: []
+  duplicate_sources: []
+fp_coverage:
+  fp_total: 0
+  fp_covered: 0
+  fp_merged: 0
+  fp_blocked: 0
+  fp_not_applicable: 0
+  uncovered_fp_ids: []
+method_coverage:
+  equivalence: "pending"
+  boundary: "pending"
+  decision_table: "pending"
+  state_transition: "pending"
+  role_matrix: "pending"
+  entry_consistency: "pending"
+evidence_trace:
+  image_link_count: 0
+  download_success_count: 0
+  download_failed_count: 0
+  pending_confirmation_count: 0
+  status: "complete"
+execution_proof:
+  scope_index_gate_passed: false
+  requirement_gate_passed: false
+  testcase_gate_passed: false
+findings:
+  - finding_id: "F-001"
+    severity: "medium"
+    type: "missing_coverage"
+    source_id: "SRC-001"
+    fp_id: "FP-003"
+    case_id: ""
+    message: "功能点未覆盖"
+    suggestion: "补充可观察步骤和预期，或登记合并/阻塞原因"
+semantic_consistency:
+  - case_id: "TC-001"
+    source_id: "SRC-001"
+    status: "supported"
+    unsupported_assertions: []
+    evidence_issues: []
+    exact_value_losses: []

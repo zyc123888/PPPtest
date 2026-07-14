@@ -1,0 +1,45 @@
+version: "3.2-skill-only"
+project: "项目名称"
+generated_at: "2026-04-02"
+source_function_points: "FunctionPoints.yaml"
+testcases:
+  - case_id: "TC-001-001"
+    module: "功能模块"
+    scene: "波动分析"
+    source_order: "1"
+    fp_id: "FP-001"
+    title: "波动分析页面查询成功"
+    category: "functional"
+    priority: "P1"
+    preconditions:
+      - "用户已登录"
+      - "页面加载成功"
+    test_data:
+      - name: "开始日期"
+        value: "2026-04-01"
+      - name: "结束日期"
+        value: "2026-04-02"
+    steps:
+      - step_no: 1
+        action: "进入波动分析页面"
+      - step_no: 2
+        action: "输入开始日期和结束日期"
+      - step_no: 3
+        action: "点击查询按钮"
+    expected_results:
+      - "查询成功"
+      - "图表刷新"
+      - "列表数据与筛选条件一致"
+    traceability:
+      function_points:
+        - "FP-001"
+      sources:
+        - "text"
+        - "image"
+    generation_basis:
+      method: "equivalence"
+      rationale: "基于功能点正常流程生成"
+    scenario_dimensions:
+      - "functional"
+      - "data"
+    baseline_candidate: true

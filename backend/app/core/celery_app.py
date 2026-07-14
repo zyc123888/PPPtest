@@ -11,8 +11,20 @@ celery_app = Celery(
 
 celery_app.conf.update(
     task_track_started=True,
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    worker_prefetch_multiplier=1,
+    task_soft_time_limit=6900,
+    task_time_limit=7200,
     timezone="Asia/Shanghai",
     enable_utc=False,
     result_expires=3600,
-    imports=("app.tasks.executions", "app.tasks.case_generation"),
+    imports=("app.tasks.executions", "app.tasks.case_generation", "app.tasks.case_generation_v2"),
+    task_routes={
+        "app.tasks.case_generation.*": {"queue": "case_generation"},
+        "app.tasks.case_generation_v2.*": {"queue": "case_generation"},
+        "app.tasks.run_*": {"queue": "execution"},
+        "app.tasks.executions.*": {"queue": "execution"},
+    },
+    broker_transport_options={"visibility_timeout": 7500},
 )

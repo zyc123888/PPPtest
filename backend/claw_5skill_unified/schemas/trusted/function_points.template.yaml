@@ -1,0 +1,83 @@
+version: "trusted-skill-v2"
+project: "项目名称"
+generated_at: "2026-07-02T00:00:00+08:00"
+scope_index: "ScopeIndex.yaml"
+evidence_trace: "EvidenceTrace.yaml"
+scope_index_consumption:
+  - source_type: "assigned_primary_source"
+    source_ref: "SRC-001"
+    consumption_result: "converted_to_output"
+    output_refs:
+      - "FP-001"
+    reason: "主来源转化为可测试功能点"
+dependency_binding_consumption:
+  - dependency_source_id: "SRC-IMG-001"
+    bound_direct_testcase_sources:
+      - "SRC-001"
+    consumption_result: "linked_to_feature_points"
+    output_refs:
+      - "FP-001"
+    evidence_refs:
+      - "IMG-001"
+    reason: "图片字段证据用于补充入口和控件"
+index_risk_consumption:
+  - risk_ref: "RISK-001"
+    source_ref: "SRC-001"
+    consumption_result: "resolved_with_source_evidence"
+    output_refs:
+      - "FP-001"
+    evidence_refs:
+      - "TXT-001"
+function_points:
+  - fp_id: "FP-001"
+    source_id: "SRC-001"
+    shard_id: "SHARD-001"
+    module: "Offer 管理"
+    scene: "编辑弹窗"
+    source_order: "2.1"
+    title_path: "2.1 Offer 编辑弹窗"
+    title: "校验必填字段"
+    type: "functional"
+    description: "用户保存编辑弹窗时，系统校验必填字段"
+    source_refs:
+      - evidence_id: "TXT-001"
+        source_type: "text"
+        source_location: "requirement.md#2.1"
+        quote: "原文片段"
+      - evidence_id: "IMG-001"
+        source_type: "image"
+        source_location: "downloads/IMG-001.png"
+        quote: "图片中可见保存按钮和字段"
+    source_quotes:
+      - "用户保存编辑弹窗时，系统校验必填字段"
+    target_evidence_refs: []
+    rules:
+      - "必填字段为空时禁止保存"
+    test_hints:
+      positive:
+        - "填写全部必填字段后保存成功"
+      boundary:
+        - "字段达到最大长度时保存"
+      negative:
+        - "必填字段为空时保存失败"
+    priority_hint: "P1"
+    source_distribution: "text_and_image"
+    atomicity_check:
+      passed: true
+      issues: []
+    mergeable: false
+block_coverage:
+  - source_id: "SRC-001"
+    shard_id: "SHARD-001"
+    function_point_count: 1
+    question_count: 0
+    coverage_conclusion: "主来源已转化为功能点"
+xmind_trace_contract:
+  required_fp_fields:
+    - "source_id"
+    - "shard_id"
+    - "module"
+    - "scene"
+    - "source_order"
+    - "title_path"
+  title_path_rule: "必须与 ScopeIndex.yaml 中对应 source/shard 的 title_path 一致"

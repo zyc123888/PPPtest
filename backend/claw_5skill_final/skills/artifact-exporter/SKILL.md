@@ -28,17 +28,15 @@
 5. `TestCases_Full.md`
 6. `DeliverySummary.md`
 
-**【极其重要：禁止手动组装 .xmind 压缩包】**
-你绝对不能通过 Python、Node.js 或其他脚本手动拼接 JSON/XML 后压缩并重命名为 `.xmind` 文件，这会导致 XMind 解析失败并提示“文件损坏”。
+**【极其重要：只能使用项目共用 exporter】**
+业务 Skill 不能自行拼接 JSON/XML 或生成另一份临时 `.xmind`；必须使用项目内受测试的确定性 exporter，并校验实际交付归档。
 
 你必须按照以下步骤生成最终导图：
 
 1. 先生成符合规范的 `.xmindmark` 文件。
-2. 再调用本地可用的 `xmindmark` 转换器生成最终 `.xmind` 文件。
-3. 推荐命令形式：
-   `xmindmark -f xmind "<需求文档同名>.xmindmark" -o "<输出目录>"`
-4. 若本地不存在 `xmindmark` 命令，则必须中止并明确报告“缺少 xmindmark 转换工具”。
-5. 不允许因为缺少转换器而退回到手动拼装 `.xmind` 文件。
+2. 再调用项目共用的确定性 exporter 生成最终 `.xmind` 文件。
+3. 解析实际 `.xmind`，确认根节点非空且 TC 数量与用例包一致。
+4. exporter 或实际文件校验失败时必须中止交付。
 
 ## 文件命名规则
 
@@ -159,6 +157,13 @@
 5. `state_transition` -> `状态转换`
 6. `role_matrix` -> `角色权限`
 7. `entry_consistency` -> `多入口一致性`
+8. `pairwise` -> `组合测试`
+9. `crud_lifecycle` -> `数据生命周期`
+10. `idempotency` -> `幂等重试`
+11. `data_consistency` -> `数据一致性`
+12. `calculation_precision` -> `计算精度`
+13. `batch_partial_failure` -> `批处理`
+14. `observability_audit` -> `审计日志`
 
 审查结论映射至少包含：
 

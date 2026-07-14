@@ -169,13 +169,11 @@ testcase-orchestrator
 
 ## XMind 转换工具约束
 
-1. 最终 `.xmind` 不能通过脚本手动拼装压缩包得到
-2. 必须先生成 `.xmindmark`
-3. 再调用本地可用的 `xmindmark` 转换器生成 `.xmind`
-4. 推荐命令形式：
-   `xmindmark -f xmind "<需求文档同名>.xmindmark" -o "<输出目录>"`
-5. 如果本地不存在 `xmindmark` 命令，必须中止并报告缺少转换工具
-6. 不允许因为命令不可用而退回到 Python、Node.js 或其他脚本手动拼装 `.xmind`
+1. 必须先生成并校验 `.xmindmark`。
+2. 再调用项目共用、受测试的确定性 exporter 生成 `.xmind`。
+3. exporter 失败或实际文件无法解析时必须中止交付。
+4. 业务 Skill 不得绕过共用 exporter 自行拼装 `.xmind`。
+5. 最终必须解析实际交付文件并核对根节点和 TC 数量。
 
 ## XMind 导出约束
 
@@ -230,9 +228,16 @@ testcase-orchestrator
 5. `state_transition` 显示为 `状态转换`
 6. `role_matrix` 显示为 `角色权限`
 7. `entry_consistency` 显示为 `多入口一致性`
-8. `pass` 显示为 `通过`
-9. `conditional_pass` 显示为 `有条件通过`
-10. `fail` 显示为 `不通过`
+8. `pairwise` 显示为 `组合测试`
+9. `crud_lifecycle` 显示为 `数据生命周期`
+10. `idempotency` 显示为 `幂等重试`
+11. `data_consistency` 显示为 `数据一致性`
+12. `calculation_precision` 显示为 `计算精度`
+13. `batch_partial_failure` 显示为 `批处理`
+14. `observability_audit` 显示为 `审计日志`
+15. `pass` 显示为 `通过`
+16. `conditional_pass` 显示为 `有条件通过`
+17. `fail` 显示为 `不通过`
 
 示例：
 

@@ -281,7 +281,12 @@ const handleSelect = () => {
   height: 18px;
 }
 
+.sidebar-root.is-collapsed :deep(.el-sub-menu__icon-arrow),
 .sidebar-root :deep(.el-menu--collapse .el-sub-menu__icon-arrow) {
-  display: none;
+  display: none !important;
+  opacity: 0 !important;
+  width: 0 !important;
+  margin: 0 !important;
+  overflow: hidden !important;
 }
 </style>

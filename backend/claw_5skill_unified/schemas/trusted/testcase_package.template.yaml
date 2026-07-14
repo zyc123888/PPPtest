@@ -1,0 +1,124 @@
+version: "trusted-skill-v2"
+project: "项目名称"
+generated_at: "2026-07-02T00:00:00+08:00"
+scope_index: "ScopeIndex.yaml"
+source_function_points: "FunctionPoints.yaml"
+part_index: 1
+part_total: 1
+part_scope:
+  source_ids:
+    - "SRC-001"
+  shard_ids:
+    - "SHARD-001"
+requirements_input_consumption:
+  - input_type: "dependency_binding_consumption"
+    input_ref: "SRC-IMG-001"
+    consumption_result: "used_as_design_boundary"
+    case_refs:
+      - "TC-001"
+    feature_point_refs:
+      - "FP-001"
+    reason: "图片仅作为界面入口和控件证据"
+feature_point_consumption:
+  - fp_id: "FP-001"
+    source_id: "SRC-001"
+    shard_id: "SHARD-001"
+    consumption_result: "covered_by_case"
+    case_refs:
+      - "TC-001"
+    reason: "主成功路径覆盖必填字段保存"
+source_case_summary:
+  - source_id: "SRC-001"
+    shard_id: "SHARD-001"
+    source_order: "2.1"
+    coverage_budget:
+      guidance: "按 must_cover 和适用方法生成可观察用例；低风险重复字段可合并，不以固定条数为目标。"
+    actual_case_count: 1
+    coverage_status: "partial_example"
+    reason: "示例模板仅展示样例用例，真实产物必须覆盖 must_cover 或说明合并/不适用原因"
+method_consumption:
+  - source_id: "SRC-001"
+    shard_id: "SHARD-001"
+    method: "equivalence"
+    consumption_result: "covered_by_case"
+    case_refs:
+      - "TC-001"
+    reason: "有效等价类由保存成功用例覆盖"
+  - source_id: "SRC-001"
+    shard_id: "SHARD-001"
+    method: "boundary_value"
+    consumption_result: "not_applicable_with_reason"
+    case_refs: []
+    reason: "示例中未给出明确长度或数值边界"
+testcases:
+  - case_id: "TC-001"
+    source_id: "SRC-001"
+    shard_id: "SHARD-001"
+    fp_ids:
+      - "FP-001"
+    title: "必填字段填写完整后保存成功"
+    category: "functional"
+    priority: "P1"
+    preconditions:
+      - "运营用户已登录并进入 Offer 管理列表"
+    test_data:
+      - name: "Offer Name"
+        value: "Auto Offer 001"
+    steps:
+      - step_no: 1
+        action: "点击目标 Offer 的编辑入口"
+      - step_no: 2
+        action: "填写全部必填字段"
+      - step_no: 3
+        action: "点击保存"
+    expected_results:
+      - "保存成功"
+      - "列表或详情展示更新后的字段值"
+    evidence_refs:
+      - "DOC-001"
+      - "IMG-001"
+    assertion_basis:
+      - expected_result: "保存成功"
+        basis_type: "text"
+        basis_ref: "DOC-001"
+        source_quote: "填写全部必填字段后保存成功"
+        evidence_role: "target"
+      - expected_result: "列表或详情展示更新后的字段值"
+        basis_type: "text"
+        basis_ref: "DOC-001"
+        source_quote: "保存后展示更新后的字段值"
+        evidence_role: "target"
+    design_method: "equivalence"
+    design_methods:
+      - "equivalence"
+      - "ui_display"
+    scenario_dimensions:
+      - "functional"
+      - "data"
+    baseline_candidate: true
+xmind_grouping_contract:
+  required_tree: "模块 -> 场景 -> SRC -> FP -> TC"
+  required_case_fields:
+    - "source_id"
+    - "shard_id"
+    - "fp_ids"
+  join_sources:
+    module: "ScopeIndex.yaml.source_blocks[source_id].module"
+    scene: "ScopeIndex.yaml.source_blocks[source_id].scene"
+    source_order: "ScopeIndex.yaml.source_blocks[source_id].source_order"
+    title_path: "ScopeIndex.yaml.source_blocks[source_id].title_path"
+    fp_title: "FunctionPoints.yaml.function_points[fp_id].title"
+  no_duplicate_long_fields:
+    - "module"
+    - "scene"
+    - "source_order"
+    - "title_path"
+    - "description"
+    - "rules"
+    - "traceability"
+    - "generation_basis.rationale"
+  forbidden_shapes:
+    - "root -> TC"
+    - "SRC -> TC"
+    - "root -> SRC -> TC"
+    - "模块 -> TC"

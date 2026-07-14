@@ -1,0 +1,48 @@
+version: "3.2-skill-only"
+project: "项目名称"
+generated_at: "2026-04-17"
+source_document: "requirement.md"
+evidence_summary:
+  text_block_count: 1
+  table_count: 0
+  image_link_count: 0
+  download_success_count: 0
+  download_failed_count: 0
+  image_observation_count: 0
+  pending_confirmation_count: 0
+text_blocks:
+  - text_id: "TXT-001"
+    source_location: "requirement.md#2.1"
+    section_title: "示例章节"
+    summary: "原文描述的功能、字段、交互或业务规则摘要"
+    evidence_status: "confirmed"
+tables: []
+images:
+  - image_id: "IMG-001"
+    image_url: "https://example.com/1.png"
+    local_path: "./downloads/IMG-001.png"
+    download_status: "success"
+    download_tool: "download_image"
+    vision_status: "success"
+    vision_tool: "vision_analyze"
+    tool_status: "downloaded_and_analyzed"
+    source_type: "image"
+    observed_elements:
+      - "搜索按钮"
+      - "分类页签"
+      - "书籍封面"
+    mapped_function_points:
+      - "FP-001"
+    notes:
+      - "图片中可见搜索入口"
+failed_images:
+  - image_id: "IMG-002"
+    url: "https://example.com/2.png"
+    reason: "Download failed"
+    referenced_section: "示例章节"
+    impact: "无法通过截图核对该章节中的界面字段、控件状态或提示文案"
+pending_confirmations:
+  - pending_id: "PENDING-001"
+    source: "image"
+    ref_id: "IMG-002"
+    message: "图片下载失败，无法完成识图"

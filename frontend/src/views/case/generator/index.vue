@@ -52,7 +52,7 @@
             </div>
           </el-form-item>
           <el-form-item label="模型">
-            <el-select v-model="modelConfig.model" class="model-select" placeholder="请选择模型">
+            <el-select v-model="modelConfig.model" class="model-select" placeholder="请选择或输入模型" filterable allow-create default-first-option>
               <el-option-group
                 v-for="group in groupedModelOptions"
                 :key="group.label"
@@ -139,6 +139,13 @@
             <div>
               <div class="panel-title">最近任务</div>
             </div>
+            <el-select v-model="jobStatusFilter" class="job-filter" size="small" clearable placeholder="全部状态" @change="fetchJobs">
+              <el-option label="进行中" value="RUNNING" />
+              <el-option label="成功" value="SUCCESS" />
+              <el-option label="有条件" value="CONDITIONAL" />
+              <el-option label="失败" value="FAILED" />
+              <el-option label="已取消" value="CANCELLED" />
+            </el-select>
           </div>
           <div class="job-list">
             <div v-if="pinnedRunningJob" class="job-pinned">
@@ -157,7 +164,7 @@
                   <span>#{{ pinnedRunningJob.id }}</span>
                   <el-tag size="small" :type="statusTagType(pinnedRunningJob.status)">{{ pinnedRunningJob.status }}</el-tag>
                 </div>
-                <div class="job-item__desc">{{ pinnedRunningJob.summary || '暂无摘要' }}</div>
+                <div class="job-item__desc">{{ formatJobListSummary(pinnedRunningJob) }}</div>
               </div>
             </div>
 
@@ -177,9 +184,10 @@
                 <span>#{{ item.id }}</span>
                 <el-tag size="small" :type="statusTagType(item.status)">{{ item.status }}</el-tag>
               </div>
-              <div class="job-item__desc">{{ item.summary || '暂无摘要' }}</div>
+              <div class="job-item__desc">{{ formatJobListSummary(item) }}</div>
             </div>
             <el-empty v-if="!jobs.length" description="暂无生成任务" />
+            <el-button v-if="jobsHasMore" class="load-more-button" :loading="loadingMoreJobs" @click="loadMoreJobs">加载更多</el-button>
           </div>
         </el-card>
 
@@ -197,77 +205,95 @@
             </div>
           </div>
 
-          <el-empty v-if="!currentJob" description="请选择一个任务查看详情" />
+          <div class="detail-body">
+            <el-empty v-if="!currentJob" description="请选择一个任务查看详情" />
 
-          <template v-else>
-            <div class="detail-summary">
-              <div class="summary-line"><span>状态</span><el-tag :type="statusTagType(currentJob.status)">{{ currentJob.status }}</el-tag></div>
-              <div class="summary-line"><span>摘要</span><strong>{{ currentJob.summary || '-' }}</strong></div>
-              <div class="summary-line"><span>来源</span><span>{{ currentJob.source_document_name || '-' }}</span></div>
-              <div class="summary-line" v-if="currentJob.error_message"><span>错误</span><span class="error-text">{{ currentJob.error_message }}</span></div>
-            </div>
+            <template v-else>
+              <div class="detail-summary">
+                <div class="summary-line"><span>状态</span><el-tag :type="statusTagType(currentJob.status)">{{ currentJob.status }}</el-tag></div>
+                <div class="summary-line"><span>摘要</span><strong>{{ currentJob.summary || '-' }}</strong></div>
+                <div class="summary-line"><span>来源</span><span>{{ currentJob.source_document_name || '-' }}</span></div>
+                <div class="summary-line" v-if="activeAttempt"><span>本次执行</span><span>{{ activeAttempt.run_id }} · {{ activeAttempt.status }}</span></div>
+                <div class="summary-line" v-if="currentJob.error_message"><span>错误</span><span class="error-text">{{ currentJob.error_message }}</span></div>
+              </div>
 
-            <div class="progress-card">
-              <div class="progress-card__head">
-                <div>
-                  <div class="progress-card__title">执行进度</div>
-                  <div class="progress-card__subtitle">{{ progressStatusText }}</div>
-                </div>
-                <div class="progress-percent">{{ progressPercent }}%</div>
-              </div>
-              <div class="progress-track" aria-hidden="true">
-                <div class="progress-track__fill" :style="{ width: `${progressPercent}%` }"></div>
-              </div>
-              <div class="progress-stage-rail">
-                <div
-                  v-for="stage in progressStageItems"
-                  :key="stage.key"
-                  class="progress-stage-node"
-                  :class="`is-${stage.status}`"
-                >
-                  <div class="progress-stage-node__dot">{{ stage.index }}</div>
-                  <div class="progress-stage-node__label">{{ stage.label }}</div>
-                  <div v-if="stage.durationText" class="progress-stage-node__duration">{{ stage.durationText }}</div>
-                </div>
-              </div>
-              <div class="stage-summary-list">
-                <div
-                  v-for="stage in stageSummaries"
-                  :key="stage.key"
-                  class="stage-summary-item"
-                  :class="`is-${stage.status || 'pending'}`"
-                >
-                  <div class="stage-summary-item__title-wrap">
-                    <div class="stage-summary-item__title">{{ stage.title }}</div>
-                    <div v-if="formatStageDuration(stage)" class="stage-summary-item__duration">{{ formatStageDuration(stage) }}</div>
+              <div class="progress-card">
+                <div class="progress-card__head">
+                  <div>
+                    <div class="progress-card__title">执行进度</div>
+                    <div class="progress-card__subtitle">{{ progressStatusText }}</div>
                   </div>
-                  <el-tag size="small" :type="stageTagType(stage.status)">{{ stage.status }}</el-tag>
-                  <div class="stage-summary-item__desc">{{ stage.summary || '-' }}</div>
+                  <div class="progress-percent">{{ progressPercent }}%</div>
+                </div>
+                <div class="progress-track" aria-hidden="true">
+                  <div class="progress-track__fill" :style="{ width: `${progressPercent}%` }"></div>
+                </div>
+                <div class="progress-stage-rail">
+                  <div
+                    v-for="stage in progressStageItems"
+                    :key="stage.key"
+                    class="progress-stage-node"
+                    :class="`is-${stage.status}`"
+                  >
+                    <div class="progress-stage-node__dot">{{ stage.index }}</div>
+                    <div class="progress-stage-node__label">{{ stage.label }}</div>
+                    <div v-if="stage.durationText" class="progress-stage-node__duration">{{ stage.durationText }}</div>
+                  </div>
+                </div>
+                <div class="stage-summary-list">
+                  <div
+                    v-for="stage in stageSummaries"
+                    :key="stage.key"
+                    class="stage-summary-item"
+                    :class="`is-${stage.status || 'pending'}`"
+                  >
+                    <div class="stage-summary-item__title-wrap">
+                      <div class="stage-summary-item__title">{{ stage.title }}</div>
+                      <div v-if="formatStageDuration(stage)" class="stage-summary-item__duration">{{ formatStageDuration(stage) }}</div>
+                    </div>
+                    <el-tag size="small" :type="stageTagType(stage.status)">{{ stage.status }}</el-tag>
+                    <div class="stage-summary-item__desc">{{ stage.summary || '-' }}</div>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div v-if="finalXmindArtifact" class="xmind-download-card">
-              <div>
-                <div class="xmind-download-card__title">最终 XMind 用例</div>
-                <div class="xmind-download-card__desc">{{ finalXmindArtifact.file_name }}</div>
+              <div v-if="finalXmindArtifact" class="xmind-download-card">
+                <div>
+                  <div class="xmind-download-card__title">最终 XMind 用例</div>
+                  <div class="xmind-download-card__desc">{{ finalXmindArtifact.file_name }}</div>
+                </div>
+                <el-button type="primary" @click="downloadArtifact(finalXmindArtifact)">下载 .xmind</el-button>
               </div>
-              <el-button type="primary" @click="downloadArtifact(finalXmindArtifact)">下载 .xmind</el-button>
-            </div>
-            <el-alert
-              v-else-if="currentJob.status === 'SUCCESS'"
-              title="当前任务未找到 .xmind 产物"
-              type="warning"
-              :closable="false"
-            />
-            <el-alert
-              v-if="exportLogArtifact"
-              :title="formatArtifactContent(exportLogArtifact)"
-              type="error"
-              :closable="false"
-              class="export-log-alert"
-            />
-          </template>
+              <el-alert
+                v-else-if="['SUCCESS', 'CONDITIONAL'].includes(currentJob.status)"
+                title="当前任务未找到 .xmind 产物"
+                type="warning"
+                :closable="false"
+              />
+              <el-alert
+                v-if="exportLogArtifact"
+                :title="formatArtifactContent(exportLogArtifact)"
+                type="error"
+                :closable="false"
+                class="export-log-alert"
+              />
+              <div v-if="visibleArtifacts.length" class="artifact-panel">
+                <div class="artifact-toolbar">
+                  <el-radio-group v-model="activeArtifactType" size="small">
+                    <el-radio-button
+                      v-for="artifact in visibleArtifacts"
+                      :key="artifact.id"
+                      :label="artifact.artifact_type"
+                    >
+                      {{ artifactLabel(artifact) }}
+                    </el-radio-button>
+                  </el-radio-group>
+                  <el-button v-if="activeArtifact" size="small" @click="downloadArtifact(activeArtifact)">下载</el-button>
+                </div>
+                <pre v-if="activeArtifact" class="artifact-preview">{{ formatArtifactContent(activeArtifact) }}</pre>
+              </div>
+            </template>
+          </div>
         </el-card>
       </div>
     </div>
@@ -286,20 +312,24 @@ import {
   caseGenerationArtifactLabel,
   caseGenerationStatusTagType,
   createCaseGenerationJob,
+  getCaseGenerationArtifact,
   getCaseGenerationModelConfig,
   downloadCaseGenerationArtifact,
   formatCaseGenerationArtifactContent,
   getCaseGenerationJobDetail,
   listCaseGenerationJobs,
+  listCaseGenerationModelOptions,
   rerunCaseGenerationJob,
   saveCaseGenerationModelConfig
 } from '@/lib/caseGeneration'
+import { nextPollingDelay, normalizeModelOptions, validateRequirementFile } from '@/lib/caseGenerationUi'
 
 const projects = ref([])
 const jobs = ref([])
 const allJobs = ref([])
 const currentJob = ref(null)
 const currentArtifacts = ref([])
+const currentAttempts = ref([])
 const activeArtifactType = ref('')
 const submitting = ref(false)
 const rerunning = ref(false)
@@ -326,28 +356,14 @@ const modelConfig = ref({
 const uploadedFileName = ref('')
 const uploadedCharCount = ref(0)
 const pageError = ref('')
+const jobStatusFilter = ref('')
+const jobsHasMore = ref(false)
+const loadingMoreJobs = ref(false)
 
-const modelOptions = [
-  { provider: 'OpenAI', label: 'GPT-5.5', value: 'gpt-5.5', baseUrl: 'https://api.openai.com/v1' },
-  { provider: 'OpenAI', label: 'GPT-5.4', value: 'gpt-5.4', baseUrl: 'https://api.openai.com/v1' },
-  { provider: 'Ollama', label: 'gpt-oss:120b', value: 'gpt-oss:120b', baseUrl: 'https://ollama.com/v1' },
-  { provider: 'Ollama', label: 'glm-5.1', value: 'glm-5.1', baseUrl: 'https://ollama.com/v1' },
-  { provider: 'Ollama', label: 'kimi-k2.6', value: 'kimi-k2.6', baseUrl: 'https://ollama.com/v1' },
-  { provider: 'Ollama', label: 'minimax-m3', value: 'minimax-m3', baseUrl: 'https://ollama.com/v1' },
-  { provider: 'Ollama', label: 'qwen3.5', value: 'qwen3.5', baseUrl: 'https://ollama.com/v1' },
-  { provider: 'Qwen', label: 'qwen3.7-plus', value: 'qwen3.7-plus', baseUrl: 'https://coding.dashscope.aliyuncs.com/v1' },
-  { provider: 'Qwen', label: 'qwen3.6-plus', value: 'qwen3.6-plus', baseUrl: 'https://coding.dashscope.aliyuncs.com/v1' },
-  { provider: 'Qwen', label: 'qwen3.5-plus', value: 'qwen3.5-plus', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
-  { provider: 'Qwen', label: 'qwen-max', value: 'qwen-max', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
-  { provider: 'DeepSeek', label: 'deepseek-chat', value: 'deepseek-chat', baseUrl: 'https://api.deepseek.com/v1' },
-  { provider: 'DeepSeek', label: 'deepseek-reasoner', value: 'deepseek-reasoner', baseUrl: 'https://api.deepseek.com/v1' },
-  { provider: 'GLM', label: 'glm-4.5', value: 'glm-4.5', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
-  { provider: 'GLM', label: 'glm-4.5-air', value: 'glm-4.5-air', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
-  { provider: 'Custom', label: '自定义 OpenAI 兼容模型', value: 'custom-openai-compatible', baseUrl: '' }
-]
+const modelOptions = ref([])
 const groupedModelOptions = computed(() => {
   const groups = new Map()
-  for (const item of modelOptions) {
+  for (const item of modelOptions.value) {
     if (!groups.has(item.provider)) {
       groups.set(item.provider, [])
     }
@@ -356,12 +372,17 @@ const groupedModelOptions = computed(() => {
   return Array.from(groups.entries()).map(([label, options]) => ({ label, options }))
 })
 
-const visibleArtifacts = computed(() => currentArtifacts.value.filter((item) => item.artifact_type === 'xmind' || item.artifact_type === 'xmind_export_log'))
+const visibleArtifacts = computed(() => currentArtifacts.value.filter((item) =>
+  ['xmind', 'xmind_export_log', 'model_call_trace'].includes(item.artifact_type)
+))
+const activeArtifact = computed(() =>
+  visibleArtifacts.value.find((item) => item.artifact_type === activeArtifactType.value) || visibleArtifacts.value[0] || null
+)
 const finalXmindArtifact = computed(() => currentArtifacts.value.find((item) => item.artifact_type === 'xmind'))
 const exportLogArtifact = computed(() => currentArtifacts.value.find((item) => item.artifact_type === 'xmind_export_log'))
+const activeAttempt = computed(() => currentAttempts.value.find((item) => item.id === currentJob.value?.active_attempt_id) || currentAttempts.value[0] || null)
 const canRerunCurrentJob = computed(() => !!currentJob.value)
 const rerunDisabled = computed(() => rerunning.value || !currentJob.value || ['RUNNING', 'PENDING'].includes(currentJob.value.status))
-const selectedModelOption = computed(() => modelOptions.find((item) => item.value === modelConfig.value.model))
 const currentUserId = computed(() => authStore.user?.id || null)
 
 const pinnedRunningJob = computed(() => jobs.value.find((item) => ['RUNNING', 'PENDING'].includes(item.status)))
@@ -386,13 +407,6 @@ const progressStageLabels = {
   review: '评审',
   export: '导出'
 }
-const progressActiveIndex = computed(() => {
-  if (!currentJob.value) return 0
-  const stageMap = new Map(stageSummaries.value.map((item) => [item.key, item.status]))
-  const index = progressStageKeys.findIndex((key) => stageMap.get(key) !== 'success')
-  if (currentJob.value.status === 'SUCCESS') return progressStageKeys.length
-  return index === -1 ? 0 : index
-})
 const progressStageItems = computed(() => {
   const stageMap = new Map(stageSummaries.value.map((item) => [item.key, item]))
   return progressStageKeys.map((key, index) => {
@@ -409,7 +423,7 @@ const progressStageItems = computed(() => {
 })
 const progressPercent = computed(() => {
   if (!currentJob.value) return 0
-  if (currentJob.value.status === 'SUCCESS') return 100
+  if (['SUCCESS', 'CONDITIONAL'].includes(currentJob.value.status)) return 100
   const completedCount = progressStageItems.value.filter((item) => item.status === 'success').length
   const runningIndex = progressStageItems.value.findIndex((item) => item.status === 'running')
   const failedIndex = progressStageItems.value.findIndex((item) => item.status === 'failed')
@@ -421,6 +435,7 @@ const progressPercent = computed(() => {
 const progressStatusText = computed(() => {
   if (!currentJob.value) return '请选择任务查看执行状态'
   if (currentJob.value.status === 'SUCCESS') return '全部阶段已完成'
+  if (currentJob.value.status === 'CONDITIONAL') return '全部阶段已完成，质量审查为有条件通过'
   if (currentJob.value.status === 'FAILED') return '任务执行失败，请查看错误摘要'
   if (currentJob.value.status === 'CANCELLED') return '任务已停止'
   const runningStage = progressStageItems.value.find((item) => item.status === 'running')
@@ -429,6 +444,8 @@ const progressStatusText = computed(() => {
 
 let pollTimer = null
 let pollInFlight = false
+let pollDelay = 3000
+let pollCycle = 0
 
 function extractRawUrl(value) {
   const raw = (value || '').trim()
@@ -452,11 +469,34 @@ function normalizeApiKey(value) {
   return apiKey.replace(/^['"]+|['"]+$/g, '').trim()
 }
 
+function formatJobListSummary(job) {
+  const summary = String(job?.summary || '').trim()
+  if (!summary) return '暂无摘要'
+
+  const generatedMatch = summary.match(/已生成\s*(\d+)\s*条用例/)
+  const suggestionMatch = summary.match(/(\d+)\s*项改进建议/)
+
+  if (generatedMatch) {
+    const parts = [`${generatedMatch[1]} 条用例`]
+    if (summary.includes('有条件通过')) {
+      parts.push('条件通过')
+    } else if (summary.includes('导出 XMind')) {
+      parts.push('已导出 XMind')
+    }
+    if (suggestionMatch) {
+      parts.push(`${suggestionMatch[1]} 项建议`)
+    }
+    return parts.join(' · ')
+  }
+
+  return summary
+}
+
 function normalizeModelConfigInput() {
   const model = (modelConfig.value.model || '').trim()
   const apiKey = normalizeApiKey(modelConfig.value.api_key)
   const baseUrl = extractRawUrl(modelConfig.value.base_url)
-  const matched = modelOptions.find((item) => item.value === model)
+  const matched = modelOptions.value.find((item) => item.value === model)
   let normalizedBaseUrl = baseUrl || matched?.baseUrl || ''
 
   if (isQwenModel(model)) {
@@ -473,7 +513,7 @@ function normalizeModelConfigInput() {
 }
 
 function resolveModelProvider(model) {
-  return modelOptions.find((item) => item.value === model)?.provider || 'OPENAI'
+  return modelOptions.value.find((item) => item.value === model)?.provider || 'OPENAI'
 }
 
 function validateModelConfigInput() {
@@ -497,14 +537,21 @@ function validateModelConfigInput() {
 
 function stopPolling() {
   if (pollTimer) {
-    clearInterval(pollTimer)
+    clearTimeout(pollTimer)
     pollTimer = null
   }
 }
 
 function startPolling() {
   stopPolling()
-  pollTimer = setInterval(async () => {
+  pollDelay = 3000
+  pollCycle = 0
+  scheduleNextPoll()
+}
+
+function scheduleNextPoll() {
+  stopPolling()
+  pollTimer = setTimeout(async () => {
     if (pollInFlight) return
     if (!currentJob.value) return
     if (!['RUNNING', 'PENDING'].includes(currentJob.value.status)) {
@@ -513,11 +560,18 @@ function startPolling() {
     }
     pollInFlight = true
     try {
-      await refreshCurrentJob()
+      await refreshCurrentJob({ refreshList: pollCycle % 4 === 3 })
+      pollCycle += 1
+      pollDelay = nextPollingDelay(pollDelay)
+    } catch {
+      pollDelay = nextPollingDelay(pollDelay, true)
     } finally {
       pollInFlight = false
+      if (['RUNNING', 'PENDING'].includes(currentJob.value?.status)) {
+        scheduleNextPoll()
+      }
     }
-  }, 5000)
+  }, pollDelay)
 }
 
 watch(
@@ -528,12 +582,21 @@ watch(
 )
 
 watch(
+  () => activeArtifactType.value,
+  async () => {
+    if (activeArtifact.value && !activeArtifact.value.content_json && activeArtifact.value.artifact_type !== 'xmind') {
+      await loadArtifactContent(activeArtifact.value)
+    }
+  }
+)
+
+watch(
   () => modelConfig.value.model,
   (model) => {
-    const matched = modelOptions.find((item) => item.value === model)
-  if (matched && matched.baseUrl) {
-    modelConfig.value.base_url = matched.baseUrl
-  }
+    const matched = modelOptions.value.find((item) => item.value === model)
+    if (matched && matched.baseUrl) {
+      modelConfig.value.base_url = matched.baseUrl
+    }
     if (matched && matched.value === 'custom-openai-compatible' && !modelConfig.value.base_url) {
       modelConfig.value.base_url = ''
     }
@@ -582,10 +645,11 @@ async function fetchProjects() {
 async function fetchJobs() {
   try {
     const [projectJobs, visibleJobs] = await Promise.all([
-      listCaseGenerationJobs({ projectId: form.value.project_id }),
+      listCaseGenerationJobs({ projectId: form.value.project_id, status: jobStatusFilter.value, limit: 50 }),
       listCaseGenerationJobs()
     ])
     jobs.value = projectJobs
+    jobsHasMore.value = projectJobs.length === 50
     allJobs.value = visibleJobs
     pageError.value = ''
     if (!jobs.value.length) {
@@ -602,20 +666,48 @@ async function fetchJobs() {
       await selectJob(pinnedRunningJob.value || jobs.value[0])
     }
   } catch (error) {
-    jobs.value = []
-    allJobs.value = []
-    currentJob.value = null
-    currentArtifacts.value = []
     pageError.value = error?.message || '加载任务失败'
-    ElMessage.error(pageError.value)
+    throw error
   }
+}
+
+async function loadMoreJobs() {
+  const beforeId = jobs.value.at(-1)?.id
+  if (!beforeId || loadingMoreJobs.value) return
+  loadingMoreJobs.value = true
+  try {
+    const older = await listCaseGenerationJobs({
+      projectId: form.value.project_id,
+      status: jobStatusFilter.value,
+      beforeId,
+      limit: 50
+    })
+    const existingIds = new Set(jobs.value.map((item) => item.id))
+    jobs.value.push(...older.filter((item) => !existingIds.has(item.id)))
+    jobsHasMore.value = older.length === 50
+  } catch (error) {
+    ElMessage.error(error?.message || '加载更多任务失败')
+  } finally {
+    loadingMoreJobs.value = false
+  }
+}
+
+async function loadArtifactContent(artifact) {
+  if (!currentJob.value || !artifact || artifact.content_json || artifact.artifact_type === 'xmind') return
+  const hydrated = await getCaseGenerationArtifact(currentJob.value.id, artifact.id)
+  currentArtifacts.value = currentArtifacts.value.map((item) => item.id === hydrated.id ? hydrated : item)
 }
 
 async function selectJob(job) {
   try {
     const detail = await getCaseGenerationJobDetail(job.id)
+    const previousContent = new Map(currentArtifacts.value.map((item) => [item.id, item.content_json]))
     currentJob.value = detail.job
-    currentArtifacts.value = detail.artifacts || []
+    currentAttempts.value = detail.attempts || []
+    currentArtifacts.value = (detail.artifacts || []).map((item) => ({
+      ...item,
+      content_json: previousContent.get(item.id) || item.content_json || null
+    }))
     activeArtifactType.value = currentArtifacts.value[0]?.artifact_type || ''
     pageError.value = ''
   } catch (error) {
@@ -624,10 +716,20 @@ async function selectJob(job) {
   }
 }
 
-async function refreshCurrentJob() {
+async function refreshCurrentJob(options = {}) {
   if (!currentJob.value) return
+  const wasRunning = ['RUNNING', 'PENDING'].includes(currentJob.value.status)
   await selectJob(currentJob.value)
-  await fetchJobs()
+  const index = jobs.value.findIndex((item) => item.id === currentJob.value.id)
+  if (index >= 0) jobs.value.splice(index, 1, currentJob.value)
+  const allIndex = allJobs.value.findIndex((item) => item.id === currentJob.value.id)
+  if (allIndex >= 0) allJobs.value.splice(allIndex, 1, currentJob.value)
+  const finished = wasRunning && !['RUNNING', 'PENDING'].includes(currentJob.value.status)
+  if (options.refreshList || finished) await fetchJobs()
+}
+
+async function loadModelOptions() {
+  modelOptions.value = normalizeModelOptions(await listCaseGenerationModelOptions())
 }
 
 function currentWorkspaceId() {
@@ -737,6 +839,11 @@ function handleFileChange(uploadFile) {
   if (!rawFile) {
     return
   }
+  const validationError = validateRequirementFile(rawFile)
+  if (validationError) {
+    ElMessage.error(validationError)
+    return
+  }
   const reader = new FileReader()
   reader.onload = () => {
     const content = typeof reader.result === 'string' ? reader.result : ''
@@ -840,6 +947,7 @@ onMounted(async () => {
   if (!authStore.user && authStore.token) {
     await authStore.fetchProfile()
   }
+  await loadModelOptions()
   await fetchProjects()
   await fetchJobs()
 })
@@ -914,6 +1022,15 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 12px;
+}
+
+.job-filter {
+  width: 112px;
+}
+
+.load-more-button {
+  width: 100%;
+  flex: 0 0 auto;
 }
 
 .panel-title {
@@ -1095,6 +1212,11 @@ onBeforeUnmount(() => {
   margin-top: 8px;
   color: var(--color-text-secondary);
   line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
 }
 
 .detail-actions {
@@ -1124,13 +1246,21 @@ onBeforeUnmount(() => {
   padding-inline: 10px;
 }
 
+.detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
 .detail-summary {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   margin-bottom: 14px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   border-radius: 16px;
   background: rgba(248, 250, 255, 0.88);
+  border: 1px solid rgba(148, 163, 184, 0.12);
 }
 
 .stage-summary-list {
@@ -1140,10 +1270,10 @@ onBeforeUnmount(() => {
 
 .stage-summary-item {
   display: grid;
-  grid-template-columns: minmax(72px, 96px) auto;
-  gap: 8px 12px;
-  align-items: center;
-  padding: 11px 13px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 12px;
+  align-items: start;
+  padding: 12px 14px;
   border-radius: 14px;
   border: 1px solid rgba(148, 163, 184, 0.14);
   background: rgba(255, 255, 255, 0.78);
@@ -1165,6 +1295,7 @@ onBeforeUnmount(() => {
 .stage-summary-item__title-wrap {
   display: grid;
   gap: 4px;
+  min-width: 0;
 }
 
 .stage-summary-item__duration {
@@ -1172,10 +1303,21 @@ onBeforeUnmount(() => {
   color: var(--color-text-secondary);
 }
 
+.stage-summary-item :deep(.el-tag) {
+  justify-self: end;
+  align-self: start;
+  min-width: 0;
+  padding-inline: 10px;
+  border-radius: 999px;
+  font-weight: 600;
+  text-transform: lowercase;
+}
+
 .stage-summary-item__desc {
   grid-column: 1 / -1;
   color: var(--color-text-secondary);
   line-height: 1.5;
+  margin-top: 2px;
 }
 
 .export-log-alert {
@@ -1303,13 +1445,31 @@ onBeforeUnmount(() => {
 
 .summary-line {
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr);
-  gap: 10px;
-  align-items: center;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
 }
 
 .summary-line span:first-child {
   color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  padding-top: 2px;
+}
+
+.summary-line strong,
+.summary-line > span:last-child {
+  min-width: 0;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.summary-line :deep(.el-tag) {
+  justify-self: start;
+  min-width: 96px;
+  padding-inline: 12px;
+  border-radius: 999px;
+  font-weight: 600;
 }
 
 .xmind-download-card {

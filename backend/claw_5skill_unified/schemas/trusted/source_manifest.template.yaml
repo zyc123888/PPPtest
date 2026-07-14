@@ -1,0 +1,41 @@
+version: "trusted-skill-v2"
+project: "项目名称"
+mode: "full"
+created_at: "2026-07-02T00:00:00+08:00"
+output_basename: "需求文档同名"
+source_documents:
+  - doc_id: "DOC-001"
+    path: "requirement.md"
+    type: "markdown"
+    status: "loaded"
+    role: "primary_requirement"
+section_sources:
+  - source_id: "DOC-001"
+    title_path: "2.1 Offer 编辑弹窗"
+    text_excerpt: "用户保存编辑弹窗时，系统校验必填字段"
+    image_refs:
+      - "IMG-001"
+attachments: []
+image_links:
+  - image_ref: "IMG-LINK-001"
+    url: "https://example.com/image.png"
+    discovered_in: "DOC-001"
+    anchor: "2.1 页面说明"
+    status: "pending_download"
+user_scope:
+  included_sections: []
+  excluded_sections: []
+  focus_notes: []
+expected_artifacts:
+  - "EvidenceTrace.yaml"
+  - "ScopeIndex.yaml"
+  - "ScopeIndexGateReport.yaml"
+  - "FunctionPoints.yaml"
+  - "RequirementGateReport.yaml"
+  - "TestcasePackage.yaml"
+  - "TestcaseGateReport.yaml"
+  - "ReviewReport.yaml"
+  - "DeliverySummary.md"
+  - "需求文档同名.xmindmark"
+  - "需求文档同名.xmind"
+  - "FinalDeliveryGateReport.yaml"

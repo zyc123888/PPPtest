@@ -28,6 +28,7 @@
       "scope": "built-in-global",
       "path": "/Users/zhangyongcheng/.trae/design_libraries/dl_builtin_apple",
       "versionSource": "selected-context"
-    }
+    },
+    "showEdge": true
   }
 }

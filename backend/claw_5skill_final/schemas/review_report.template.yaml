@@ -53,4 +53,4 @@ findings:
     case_id: null
     fp_id: "FP-003"
     message: "功能点未覆盖"
-    suggestion: "补充至少一条正常流程和一条异常流程用例"
+    suggestion: "补充可观察的正常流程和异常路径覆盖"

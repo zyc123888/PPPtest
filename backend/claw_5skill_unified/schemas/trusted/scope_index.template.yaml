@@ -1,0 +1,109 @@
+version: "trusted-skill-v2"
+project: "项目名称"
+generated_at: "2026-07-02T00:00:00+08:00"
+source_manifest: "SourceManifest.yaml"
+evidence_trace: "EvidenceTrace.yaml"
+metadata:
+  index_method: "mixed_direct_source_with_reference_artifacts"
+  direct_testcase_source_level: "按需求文档中独立可测业务功能识别"
+source_blocks:
+  - block_id: "SRC-001"
+    title_path: "2.1 Offer 编辑弹窗"
+    source_order: "2.1"
+    module: "Offer 管理"
+    scene: "编辑弹窗"
+    source_location: "requirement.md#2.1"
+    source_type: "prd_text"
+    source_doc_id: "DOC-001"
+    source_excerpt: "用户保存编辑弹窗时，系统校验必填字段"
+    source_state_semantics:
+      has_state_transition: false
+      current_text: ""
+      target_text: ""
+      current_image_refs: []
+      target_image_refs: []
+    image_refs:
+      - "IMG-001"
+    evidence_refs:
+      - "DOC-001"
+      - "IMG-001"
+    xmind_source_node: "SRC-001｜2.1 Offer 编辑弹窗"
+scope_classification:
+  - source_id: "SRC-001"
+    title: "Offer 编辑弹窗"
+    classification: "direct_testcase_source"
+    scope_status: "in_scope"
+    reason: "该章节描述独立可操作功能"
+    related_sources:
+      - "SRC-IMG-001"
+    risk_signals:
+      - "form_validation"
+    evidence:
+      - source_location: "requirement.md#2.1"
+        summary: "描述编辑弹窗字段、保存和校验规则"
+shards:
+  - shard_id: "SHARD-001"
+    direct_testcase_source: "SRC-001"
+    source_order: "2.1"
+    title_path: "2.1 Offer 编辑弹窗"
+    module: "Offer 管理"
+    scene: "编辑弹窗"
+    xmind_source_node: "SRC-001｜2.1 Offer 编辑弹窗"
+    assigned_primary_sources:
+      - "SRC-001"
+    assigned_dependency_sources:
+      - "SRC-IMG-001"
+    rule_clusters:
+      - cluster_id: "RC-001"
+        sources:
+          - "SRC-001"
+          - "SRC-IMG-001"
+        merge_reason: "正文规则和图片界面共同定义编辑弹窗行为"
+        evidence:
+          - source_location: "requirement.md#2.1"
+            summary: "字段和保存规则"
+    dependency_reason: "图片提供字段与按钮证据，正文提供业务规则"
+    backcheck_sources:
+      - "AC-001"
+    excluded_sources: []
+    smoke_test_scope_note: "进入编辑弹窗，修改必填字段并保存成功"
+    risk_signals:
+      - "field_validation"
+    complexity_score: 4
+    complexity_reasons:
+      - "字段校验和弹窗状态"
+    test_design_profile:
+      applicable_methods:
+        - "equivalence"
+        - "boundary_value"
+        - "ui_interaction"
+      risk_signals:
+        - "field_validation"
+      must_cover:
+        - "必填字段填写完整后保存成功"
+        - "必填字段缺失时不能保存"
+      merge_allowed:
+        - "字段展示和保存结果可在同一条主流程用例中观察"
+      not_applicable:
+        - method: "role_matrix"
+          reason: "当前 source 未描述角色差异"
+      coverage_budget:
+        guidance: "按 must_cover 和适用方法生成可观察用例；低风险重复字段可合并，不以固定条数为目标。"
+    recommended_shard_group: "standalone"
+dependency_bindings:
+  - dependency_source_id: "SRC-IMG-001"
+    bound_direct_testcase_sources:
+      - "SRC-001"
+    binding_reason: "图片展示编辑弹窗字段和保存按钮"
+    evidence:
+      - source_location: "downloads/IMG-001.png"
+        summary: "可见字段、按钮、弹窗布局"
+coverage_check:
+  all_source_blocks_classified: true
+  all_direct_sources_have_shards: true
+  all_dependency_sources_bound: true
+  unassigned_sources: []
+  index_warnings: []
+  index_risks: []
+expected_source_list:
+  - "SRC-001"
