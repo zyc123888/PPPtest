@@ -54,14 +54,29 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          docker compose exec -T backend pytest -q --junitxml=/app/reports/pytest-stack.xml 2>&1 | tee backend/reports/pytest-stack.log
+          docker compose exec -T \
+            -e DATABASE_URL="sqlite:////tmp/pytest-${GITHUB_RUN_ID}.db" \
+            -e BACKEND_INTERNAL_URL=http://testserver \
+            -e BACKEND_PUBLIC_URL=http://testserver \
+            -e REPORT_OUTPUT_DIR="/tmp/pytest-reports-${GITHUB_RUN_ID}" \
+            -e SEED_DEMO_DATA_ON_BOOTSTRAP=true \
+            -e CASE_GEN_WATCHDOG_ENABLED=false \
+            backend pytest -q --junitxml=/app/reports/pytest-stack.xml 2>&1 | tee backend/reports/pytest-stack.log
           test_exit=${PIPESTATUS[0]}
           echo "exit_code=${test_exit}" >> "$GITHUB_OUTPUT"
           exit "${test_exit}"
 
       - name: Backend pytest verbose retry on failure
         if: steps.backend_pytest.outputs.exit_code != '0'
-        run: docker compose exec -T backend pytest -vv --maxfail=1 || true
+        run: |
+          docker compose exec -T \
+            -e DATABASE_URL="sqlite:////tmp/pytest-retry-${GITHUB_RUN_ID}.db" \
+            -e BACKEND_INTERNAL_URL=http://testserver \
+            -e BACKEND_PUBLIC_URL=http://testserver \
+            -e REPORT_OUTPUT_DIR="/tmp/pytest-reports-retry-${GITHUB_RUN_ID}" \
+            -e SEED_DEMO_DATA_ON_BOOTSTRAP=true \
+            -e CASE_GEN_WATCHDOG_ENABLED=false \
+            backend pytest -vv --maxfail=1 || true
 
       - name: Upload backend pytest report
         if: always()
