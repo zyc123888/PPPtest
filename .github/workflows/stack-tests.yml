@@ -19,6 +19,7 @@ jobs:
       DOCKER_DATABASE_URL: mysql+pymysql://tester:ci-test-password@mysql:3306/test_platform
       INITIAL_ADMIN_PASSWORD: admin123
       E2E_ADMIN_PASSWORD: admin123
+      SEED_DEMO_DATA_ON_BOOTSTRAP: "true"
 
     steps:
       - name: Checkout

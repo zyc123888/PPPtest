@@ -13,7 +13,7 @@ test('企业级后台首页加载与导航验证', async ({ page }) => {
   await login(page)
   
   // 验证页面标题
-  await expect(page).toHaveTitle(/自动化测试平台/)
+  await expect(page).toHaveTitle(/OmniTest/)
   
   // 验证侧边栏菜单存在
   const sidebar = page.locator('.layout-aside')
@@ -26,39 +26,40 @@ test('企业级后台首页加载与导航验证', async ({ page }) => {
   // 2. 验证仪表盘核心元素
   // 检查统计卡片 (限定在 main 区域内查找，避免匹配到菜单)
   const main = page.locator('.layout-main')
-  await expect(main.getByText('工作空间')).toBeVisible()
-  await expect(main.getByText('项目总数')).toBeVisible()
-  await expect(main.getByText('接口用例')).toBeVisible()
-  await expect(main.getByText('UI 用例')).toBeVisible()
-  await expect(main.getByText('用例执行')).toBeVisible()
+  const resourceGrid = main.locator('.resource-grid')
+  await expect(resourceGrid.getByText('工作空间', { exact: true })).toBeVisible()
+  await expect(resourceGrid.getByText('项目总数', { exact: true })).toBeVisible()
+  await expect(resourceGrid.getByText('接口用例', { exact: true })).toBeVisible()
+  await expect(resourceGrid.getByText('UI 用例', { exact: true })).toBeVisible()
+  await expect(resourceGrid.getByText('用例执行', { exact: true })).toBeVisible()
   
   // 检查健康状态面板
-  await expect(page.getByText('系统健康状态')).toBeVisible()
+  await expect(page.locator('[aria-label="系统运行状态"]')).toBeVisible()
 
   // 3. 导航切换测试
   // 切换到项目管理
   await page.getByRole('menuitem', { name: '项目管理' }).click()
-  await expect(page.url()).toContain('/project')
+  await expect(page).toHaveURL(/\/project/)
   await expect(page.getByRole('button', { name: '新增项目' })).toBeVisible()
 
   // 切换到接口用例
   await page.getByRole('menuitem', { name: '用例管理' }).click()
   await page.getByRole('menuitem', { name: '接口用例' }).click()
-  await expect(page.url()).toContain('/case/api')
+  await expect(page).toHaveURL(/\/case\/api/)
   await expect(page.getByRole('button', { name: '新增接口用例' })).toBeVisible()
 
   // 切换到 UI 用例
   await page.getByRole('menuitem', { name: 'UI 用例' }).click()
-  await expect(page.url()).toContain('/case/ui')
+  await expect(page).toHaveURL(/\/case\/ui/)
   await expect(page.getByRole('button', { name: '新增 UI 用例' })).toBeVisible()
   
   // 切换到执行中心
   await page.getByRole('menuitem', { name: '执行中心' }).click()
-  await expect(page.url()).toContain('/execution')
+  await expect(page).toHaveURL(/\/execution/)
   
   // 切换到常用工具
   await page.getByRole('menuitem', { name: '常用工具' }).click()
-  await expect(page.url()).toContain('/tools')
+  await expect(page).toHaveURL(/\/tools/)
   await expect(page.getByText('JSON 格式化')).toBeVisible()
 })
 
