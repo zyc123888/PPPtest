@@ -12,10 +12,20 @@ jobs:
     timeout-minutes: 30
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      MARIADB_DATABASE: test_platform
+      MARIADB_USER: tester
+      MARIADB_PASSWORD: ci-test-password
+      MARIADB_ROOT_PASSWORD: ci-root-password
+      DOCKER_DATABASE_URL: mysql+pymysql://tester:ci-test-password@mysql:3306/test_platform
+      INITIAL_ADMIN_PASSWORD: admin123
+      E2E_ADMIN_PASSWORD: admin123
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Prepare CI secrets
+        run: echo "APP_ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d '\n')" >> "$GITHUB_ENV"
 
       - name: Prepare report placeholders
         run: |
