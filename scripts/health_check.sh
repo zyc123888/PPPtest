@@ -30,7 +30,8 @@ echo "基础健康检查通过"
 
 if [[ "${RUN_MODE}" == "docker" ]]; then
   echo "检查 MySQL 连接"
-  compose_cmd exec -T mysql env MYSQL_PWD=tester123 mariadb -utester -e "SELECT 1;" test_platform >/dev/null
+  compose_cmd exec -T mysql sh -lc \
+    'MYSQL_PWD="$MARIADB_PASSWORD" mariadb -u"$MARIADB_USER" -e "SELECT 1;" "$MARIADB_DATABASE"' >/dev/null
 
   echo "检查 Redis 连接"
   compose_cmd exec -T redis redis-cli ping | grep -q PONG
