@@ -101,61 +101,74 @@ PPPtest/
 - API 用例：`示例健康检查接口`
 - UI 用例：`示例前端首页巡检`
 
-## 一键部署
+## 本地 Docker 启动
 
-### 1. 启动服务
+### 1. 启动并验证 Docker（Colima）
+
+macOS 使用 Colima 时，重启电脑后需要先启动 Colima。若 `docker info` 已能正常返回信息，可跳过 `colima start`。
 
 ```bash
-docker-compose up --build -d
-
-### 如果你连数据库数据也想一起清掉，用：
-docker-compose down -v
-
-### 如果只是临时停掉、不删除容器，可以用：
-docker-compose stop
-
-### 以后再启动就执行：
-docker-compose start
-
-### 或者需要重建时再用：
-docker-compose up --build -d
-
-
-
-
-
-
-
+colima status
+colima start
+docker info
 ```
 
-### 2. 访问地址
+若提示 `colima: command not found`，请使用 Docker Desktop 启动 Docker，或安装并配置 Colima。若提示 Docker socket 不存在，通常表示 Colima 尚未启动。
+
+### 2. 启动项目
+
+```bash
+cd /Users/zhangyongcheng/Desktop/PPPtest
+docker-compose up -d --build
+docker-compose ps
+```
+
+`docker-compose ps` 中 backend、frontend、mysql、redis 和 worker 应处于运行状态；backend、frontend、mysql、redis 会显示 `healthy`。
+
+### 3. 访问地址
 
 - 前端：[http://localhost:3000](http://localhost:3000)
 - 后端 OpenAPI：[http://localhost:8000/docs](http://localhost:8000/docs)
 - 后端健康检查：[http://localhost:8000/api/v1/system/health](http://localhost:8000/api/v1/system/health)
 
-### 3. 运行健康检查
+### 4. 运行健康检查
 
 ```bash
 bash scripts/health_check.sh
 ```
 
-### 4. 运行后端 pytest
+### 5. 运行后端 pytest
 
 ```bash
 docker-compose exec -T backend pytest
 ```
 
-### 5. 运行前端 Playwright 自测
+### 6. 运行前端 Playwright 自测
 
 ```bash
 docker-compose --profile test run --rm e2e
 ```
 
-### 6. 一键启动并执行全部验证
+### 7. 一键启动并执行全部验证
 
 ```bash
 bash scripts/run_stack_tests.sh
+```
+
+### 8. 停止、重启和清理
+
+```bash
+# 临时停止，不删除容器和数据
+docker-compose stop
+
+# 恢复已停止的容器
+docker-compose start
+
+# 停止并删除容器，保留数据库数据
+docker-compose down
+
+# 停止并删除容器和数据库数据（不可恢复）
+docker-compose down -v
 ```
 
 ## 后端核心接口
