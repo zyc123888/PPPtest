@@ -63,6 +63,7 @@ from app.tasks.case_generation_v2 import (
     run_case_generation_v2_job,
 )
 from app.tasks.case_generation_runtime import attempt_output_dir, create_attempt, set_attempt_task_id
+from app.tasks.case_generation_v2_support.metrics import build_generation_metrics, compare_generation_metrics
 from app.tasks.executions import (
     run_api_case,
     run_performance_case,
@@ -70,6 +71,7 @@ from app.tasks.executions import (
     run_ui_case,
 )
 from app.timeutil import utc_now_naive
+from app.ui_case_ai import generate_ui_case_draft
 
 
 auth_scheme = HTTPBearer(auto_error=False)
@@ -645,6 +647,7 @@ _JSON_CASE_GENERATION_ARTIFACT_TYPES = {
     "trusted_review_report",
     "execution_proof",
     "model_call_trace",
+    "generation_metrics",
     "final_delivery_gate",
     "xmind_export_log",
 }
@@ -762,6 +765,11 @@ def _serialize_unified_case(case_type: str, case) -> schemas.UnifiedCaseRead:
         "headers_json": getattr(case, "headers_json", None),
         "body_json": getattr(case, "body_json", None),
         "assertions_json": getattr(case, "assertions_json", None),
+        "generation_mode": getattr(case, "generation_mode", None),
+        "ai_goal": getattr(case, "ai_goal", None),
+        "skill_name": getattr(case, "skill_name", None),
+        "skill_version": getattr(case, "skill_version", None),
+        "generation_meta_json": getattr(case, "generation_meta_json", None),
         "concurrency": getattr(case, "concurrency", None),
         "total_requests": getattr(case, "total_requests", None),
         "max_avg_response_ms": getattr(case, "max_avg_response_ms", None),
@@ -807,7 +815,15 @@ def _case_snapshot(case) -> dict:
     for field in ("method", "path", "target_url", "expect_text", "priority", "status", "expected_status"):
         if hasattr(case, field):
             payload[field] = getattr(case, field)
-    for field in ("review_status", "version_no", "review_note"):
+    for field in (
+        "review_status",
+        "version_no",
+        "review_note",
+        "generation_mode",
+        "ai_goal",
+        "skill_name",
+        "skill_version",
+    ):
         if hasattr(case, field):
             payload[field] = getattr(case, field)
     return payload
@@ -818,6 +834,8 @@ def _ensure_case_defaults(case) -> None:
         case.review_status = "DRAFT"
     if hasattr(case, "version_no") and not getattr(case, "version_no", None):
         case.version_no = "1.0.0"
+    if hasattr(case, "generation_mode") and not getattr(case, "generation_mode", None):
+        case.generation_mode = "manual"
 
 
 def _record_case_history(
@@ -1450,6 +1468,11 @@ def import_cases(
                 steps_json=item.steps_json or [],
                 assertions_json=item.assertions_json,
                 expect_text=item.expect_text or "ok",
+                generation_mode=item.generation_mode,
+                ai_goal=item.ai_goal,
+                skill_name=item.skill_name,
+                skill_version=item.skill_version,
+                generation_meta_json=item.generation_meta_json,
             ).model_dump()
             case = UICase(
                 **validated,
@@ -1863,7 +1886,7 @@ def cancel_case_generation_job(
     if job.status not in {"PENDING", "RUNNING"}:
         raise HTTPException(status_code=400, detail="当前状态不允许停止")
     if job.task_id:
-        celery_app.control.revoke(job.task_id, terminate=True)
+        celery_app.control.revoke(job.task_id, terminate=True, signal="SIGTERM")
     progress = dict(job.progress_json or {})
     stages = list(progress.get("stages") or [])
     if stages:
@@ -2099,6 +2122,104 @@ def get_case_generation_v2_job(
     )
 
 
+def _generation_metrics_for_job(db: Session, job, *, pipeline_version: str) -> dict | None:
+    attempt_cls = CaseGenerationV2Attempt if pipeline_version == "v2" else CaseGenerationAttempt
+    artifact_cls = CaseGenerationV2Artifact if pipeline_version == "v2" else CaseGenerationArtifact
+    attempt = db.get(attempt_cls, job.active_attempt_id) if job.active_attempt_id else None
+    if attempt is None:
+        attempt = db.scalar(
+            select(attempt_cls)
+            .where(attempt_cls.job_id == job.id)
+            .order_by(attempt_cls.id.desc())
+        )
+    artifact_stmt = select(artifact_cls).where(artifact_cls.job_id == job.id)
+    if attempt is not None:
+        artifact_stmt = artifact_stmt.where(artifact_cls.attempt_id == attempt.id)
+    artifacts = list(db.scalars(artifact_stmt.order_by(artifact_cls.id.asc())).all())
+    if not artifacts and attempt is not None:
+        artifacts = list(
+            db.scalars(
+                select(artifact_cls)
+                .where(artifact_cls.job_id == job.id)
+                .order_by(artifact_cls.id.asc())
+            ).all()
+        )
+    metrics_artifact = next(
+        (
+            item
+            for item in reversed(artifacts)
+            if item.artifact_type == "generation_metrics" and isinstance(item.content_json, dict)
+        ),
+        None,
+    )
+    if metrics_artifact is not None:
+        return dict(metrics_artifact.content_json)
+    if attempt is None:
+        return None
+    trace = next(
+        (
+            item.content_json
+            for item in reversed(artifacts)
+            if item.artifact_type == "model_call_trace" and isinstance(item.content_json, dict)
+        ),
+        {},
+    )
+    return build_generation_metrics(
+        job=job,
+        attempt=attempt,
+        artifacts=artifacts,
+        model_calls=list((trace or {}).get("calls") or []),
+        pipeline_version=pipeline_version,
+        status=attempt.status or job.status,
+    )
+
+
+@protected_router.get(
+    "/case-generation-v2/jobs/{job_id}/metrics-comparison",
+    response_model=schemas.CaseGenerationMetricsComparison,
+)
+def compare_case_generation_v2_metrics(
+    job_id: int,
+    baseline_job_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.CaseGenerationMetricsComparison:
+    candidate_job = db.get(CaseGenerationV2Job, job_id)
+    if candidate_job is None:
+        raise HTTPException(status_code=404, detail="V2 生成任务不存在")
+    _require_project_access(db, current_user, db.get(Project, candidate_job.project_id))
+    if baseline_job_id is not None:
+        baseline_job = db.get(CaseGenerationJob, baseline_job_id)
+        if baseline_job is None:
+            raise HTTPException(status_code=404, detail="V1 基线任务不存在")
+        _require_project_access(db, current_user, db.get(Project, baseline_job.project_id))
+    else:
+        baseline_stmt = (
+            select(CaseGenerationJob)
+            .where(
+                CaseGenerationJob.project_id == candidate_job.project_id,
+                CaseGenerationJob.status.in_(["SUCCESS", "CONDITIONAL"]),
+            )
+            .order_by(CaseGenerationJob.id.desc())
+        )
+        if candidate_job.source_document_name:
+            same_document = db.scalar(
+                baseline_stmt.where(CaseGenerationJob.source_document_name == candidate_job.source_document_name)
+            )
+            baseline_job = same_document or db.scalar(baseline_stmt)
+        else:
+            baseline_job = db.scalar(baseline_stmt)
+    comparison = compare_generation_metrics(
+        _generation_metrics_for_job(db, baseline_job, pipeline_version="v1") if baseline_job else None,
+        _generation_metrics_for_job(db, candidate_job, pipeline_version="v2"),
+    )
+    return schemas.CaseGenerationMetricsComparison(
+        baseline_job_id=baseline_job.id if baseline_job else None,
+        candidate_job_id=candidate_job.id,
+        **comparison,
+    )
+
+
 @protected_router.post(
     "/case-generation-v2/jobs/{job_id}/rerun",
     response_model=schemas.CaseGenerationV2JobRead,
@@ -2245,7 +2366,7 @@ def cancel_case_generation_v2_job(
     if job.status not in {"PENDING", "RUNNING"}:
         raise HTTPException(status_code=400, detail="当前状态不允许停止")
     if job.task_id:
-        celery_app.control.revoke(job.task_id, terminate=True)
+        celery_app.control.revoke(job.task_id, terminate=True, signal="SIGTERM")
     progress = dict(job.progress_json or {})
     stages = list(progress.get("stages") or [])
     if stages:
@@ -2389,6 +2510,11 @@ def download_case_generation_v2_artifact(
         path=artifact.file_path,
         media_type=_case_generation_artifact_media_type(artifact.artifact_type),
         filename=artifact.file_name or os.path.basename(artifact.file_path),
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 
@@ -2773,6 +2899,42 @@ def list_ui_cases(
     return items
 
 
+@protected_router.post(
+    "/ui-cases/ai/generate",
+    response_model=schemas.UICaseAIGenerateResponse,
+    dependencies=[Depends(require_tester)],
+)
+async def generate_ui_case_with_ai(
+    payload: schemas.UICaseAIGenerateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.UICaseAIGenerateResponse:
+    project = _require_project_access(db, current_user, db.get(Project, payload.project_id))
+    model_config = db.scalar(
+        select(AIModelConfig)
+        .where(AIModelConfig.workspace_id == project.workspace_id, AIModelConfig.is_active == 1)
+        .order_by(AIModelConfig.id.desc())
+    )
+    if model_config is None or not model_config.api_key:
+        raise HTTPException(status_code=400, detail="请先配置该工作空间的模型连接信息")
+    model = (model_config.model or settings.case_gen_default_model).strip()
+    api_key = model_config.api_key
+    base_url = _normalize_model_base_url(model, model_config.base_url, api_key)
+    try:
+        return await generate_ui_case_draft(
+            payload,
+            project_name=project.name,
+            project_base_url=project.base_url,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @protected_router.get("/ui-cases/{case_id}", response_model=schemas.UICaseRead)
 def get_ui_case(
     case_id: int,
@@ -2814,6 +2976,11 @@ def update_ui_case(
         ui_case.expect_text,
         ui_case.steps_json,
         ui_case.assertions_json,
+        ui_case.generation_mode,
+        ui_case.ai_goal,
+        ui_case.skill_name,
+        ui_case.skill_version,
+        ui_case.generation_meta_json,
     )
     for key, value in payload.model_dump().items():
         setattr(ui_case, key, value)
@@ -2829,6 +2996,11 @@ def update_ui_case(
         ui_case.expect_text,
         ui_case.steps_json,
         ui_case.assertions_json,
+        ui_case.generation_mode,
+        ui_case.ai_goal,
+        ui_case.skill_name,
+        ui_case.skill_version,
+        ui_case.generation_meta_json,
     )
     if new_signature != original_signature:
         ui_case.version_no = _bump_version(ui_case.version_no)

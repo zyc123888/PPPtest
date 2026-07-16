@@ -1,0 +1,4 @@
+interface:
+  display_name: "UI Case Designer"
+  short_description: "Generate reviewable browser test case drafts"
+  default_prompt: "Use $ui-case-designer to design a reviewable UI test case draft."

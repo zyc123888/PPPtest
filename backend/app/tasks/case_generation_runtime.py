@@ -24,6 +24,7 @@ from app.models import (
     CaseGenerationV2Attempt,
     CaseGenerationV2Job,
 )
+from app.tasks.case_generation_v2_support.metrics import build_generation_metrics
 from app.timeutil import utc_now_naive
 
 
@@ -336,8 +337,10 @@ def finish_attempt(
     job.task_id = None
     job.finished_at = now
     model_calls = current_model_calls()
+    pipeline_version = current_pipeline_version() or "v1"
+    artifact_cls = _artifact_model(pipeline_version)
+    output_dir = attempt_output_dir(job.id, pipeline_version)
     if model_calls:
-        output_dir = attempt_output_dir(job.id, current_pipeline_version() or "v1")
         trace_path = os.path.join(output_dir, "model_call_trace.json")
         trace_payload = {
             "run_id": attempt.run_id,
@@ -349,7 +352,6 @@ def finish_attempt(
             "calls": model_calls,
         }
         Path(trace_path).write_text(json.dumps(trace_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        artifact_cls = _artifact_model(current_pipeline_version() or "v1")
         artifact = db.scalar(
             select(artifact_cls).where(
                 artifact_cls.job_id == job.id,
@@ -368,6 +370,44 @@ def finish_attempt(
         artifact.file_path = trace_path
         artifact.content_json = trace_payload
         artifact.expired_at = None
+    db.flush()
+    current_artifacts = list(
+        db.scalars(
+            select(artifact_cls).where(
+                artifact_cls.job_id == job.id,
+                artifact_cls.attempt_id == attempt.id,
+                artifact_cls.artifact_type != "generation_metrics",
+            )
+        ).all()
+    )
+    metrics_payload = build_generation_metrics(
+        job=job,
+        attempt=attempt,
+        artifacts=current_artifacts,
+        model_calls=model_calls,
+        pipeline_version=pipeline_version,
+        status=status,
+    )
+    metrics_path = os.path.join(output_dir, "generation_metrics.json")
+    Path(metrics_path).write_text(json.dumps(metrics_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    metrics_artifact = db.scalar(
+        select(artifact_cls).where(
+            artifact_cls.job_id == job.id,
+            artifact_cls.attempt_id == attempt.id,
+            artifact_cls.artifact_type == "generation_metrics",
+        )
+    )
+    if metrics_artifact is None:
+        metrics_artifact = artifact_cls(
+            job_id=job.id,
+            attempt_id=attempt.id,
+            artifact_type="generation_metrics",
+        )
+        db.add(metrics_artifact)
+    metrics_artifact.file_name = "generation_metrics.json"
+    metrics_artifact.file_path = metrics_path
+    metrics_artifact.content_json = metrics_payload
+    metrics_artifact.expired_at = None
     db.commit()
     return True
 

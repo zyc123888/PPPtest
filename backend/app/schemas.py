@@ -186,6 +186,11 @@ class UICaseCreate(BaseModel):
     assertions_json: list[dict] | None = None
     steps_json: list[dict] = Field(default_factory=list)
     expect_text: str = Field(..., min_length=1, max_length=255)
+    generation_mode: str = Field(default="manual", pattern="^(manual|ai_skill)$")
+    ai_goal: str | None = Field(default=None, max_length=4000)
+    skill_name: str | None = Field(default=None, max_length=120)
+    skill_version: str | None = Field(default=None, max_length=30)
+    generation_meta_json: dict | None = None
 
     @model_validator(mode="after")
     def validate_ui_workflow(self):
@@ -213,10 +218,32 @@ class UICaseRead(ORMBaseModel):
     assertions_json: list[dict] | None = None
     steps_json: list[dict]
     expect_text: str
+    generation_mode: str = "manual"
+    ai_goal: str | None = None
+    skill_name: str | None = None
+    skill_version: str | None = None
+    generation_meta_json: dict | None = None
     created_by: int | None = None
     updated_by: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class UICaseAIGenerateRequest(BaseModel):
+    project_id: int
+    target_url: str = Field(..., min_length=5, max_length=2000)
+    goal: str = Field(..., min_length=5, max_length=4000)
+    context: str | None = Field(default=None, max_length=8000)
+    max_steps: int = Field(default=12, ge=1, le=30)
+
+
+class UICaseAIGenerateResponse(BaseModel):
+    draft: UICaseCreate
+    skill_name: str
+    skill_version: str
+    model: str
+    warnings: list[str] = Field(default_factory=list)
+    design_notes: list[str] = Field(default_factory=list)
 
 
 class PerformanceCaseCreate(BaseModel):
@@ -414,6 +441,7 @@ class CaseGenerationV2JobCreate(BaseModel):
     mode: str = Field(default="MARKDOWN", min_length=2, max_length=30)
     pipeline_mode: str = Field(default="lite", pattern="^(clone|trusted_v2|lite|trusted)$")
     trusted_generation_strategy: str = Field(default="source_shard", pattern="^(source_shard|lite_review)$")
+    generation_density: str = Field(default="balanced", pattern="^(concise|balanced|exhaustive)$")
     source_type: str = Field(default="PASTE", min_length=2, max_length=20)
     source_document_name: str | None = Field(default=None, max_length=255)
     source_url: str | None = Field(default=None, max_length=1000)
@@ -479,6 +507,14 @@ class CaseGenerationV2JobDetail(BaseModel):
     attempts: list[CaseGenerationV2AttemptRead] = Field(default_factory=list)
 
 
+class CaseGenerationMetricsComparison(BaseModel):
+    baseline_job_id: int | None = None
+    candidate_job_id: int
+    baseline: dict | None = None
+    candidate: dict | None = None
+    delta: dict | None = None
+
+
 class DashboardSummary(BaseModel):
     workspace_count: int
     project_count: int
@@ -513,6 +549,11 @@ class UnifiedCaseRead(BaseModel):
     headers_json: dict | None = None
     body_json: dict | None = None
     assertions_json: list[dict] | None = None
+    generation_mode: str | None = None
+    ai_goal: str | None = None
+    skill_name: str | None = None
+    skill_version: str | None = None
+    generation_meta_json: dict | None = None
     concurrency: int | None = None
     total_requests: int | None = None
     max_avg_response_ms: int | None = None
@@ -605,6 +646,11 @@ class CaseImportItem(BaseModel):
     headers_json: dict | None = None
     body_json: dict | None = None
     assertions_json: list[dict] | None = None
+    generation_mode: str = Field(default="manual", pattern="^(manual|ai_skill)$")
+    ai_goal: str | None = Field(default=None, max_length=4000)
+    skill_name: str | None = Field(default=None, max_length=120)
+    skill_version: str | None = Field(default=None, max_length=30)
+    generation_meta_json: dict | None = None
     concurrency: int | None = None
     total_requests: int | None = None
     max_avg_response_ms: int | None = None

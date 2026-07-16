@@ -11,6 +11,7 @@
         <el-tooltip content="刷新" placement="bottom">
           <el-button :icon="Refresh" aria-label="刷新 UI 用例" :loading="listLoading" @click="getList" />
         </el-tooltip>
+        <el-button v-if="canTest" :icon="MagicStick" @click="openAIDialog">AI 创建</el-button>
         <el-button v-if="canTest" type="primary" :icon="Plus" @click="handleCreate">新增 UI 用例</el-button>
       </template>
     </PageHeader>
@@ -58,6 +59,7 @@
               <span>{{ scope.row.folder_path || '未分组' }}</span>
               <span>v{{ scope.row.version_no }}</span>
               <span>{{ (scope.row.steps_json || []).length }} 步</span>
+              <el-tag v-if="scope.row.generation_mode === 'ai_skill'" size="small" effect="plain">AI</el-tag>
             </div>
           </template>
         </el-table-column>
@@ -101,6 +103,7 @@
           <div class="mobile-case__tags">
             <el-tag size="small" :type="priorityTag(item.priority)">{{ item.priority }}</el-tag>
             <el-tag size="small" :type="item.status === 'ACTIVE' ? 'success' : 'info'">{{ caseStatusText(item.status) }}</el-tag>
+            <el-tag v-if="item.generation_mode === 'ai_skill'" size="small" effect="plain">AI</el-tag>
           </div>
           <div class="mobile-case__url">{{ item.target_url }}</div>
           <div class="row-actions">
@@ -115,11 +118,46 @@
       </div>
     </section>
 
+    <el-dialog v-model="aiDialogVisible" title="AI 创建 UI 用例" width="min(680px, 94vw)" destroy-on-close>
+      <el-form ref="aiFormRef" :model="aiForm" :rules="aiRules" label-position="top">
+        <div class="ai-form-grid">
+          <el-form-item label="所属项目" prop="project_id">
+            <el-select v-model="aiForm.project_id" style="width: 100%" @change="handleAIProjectChange">
+              <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="Skill">
+            <el-input model-value="ui-case-designer · v1.0.0" disabled />
+          </el-form-item>
+        </div>
+        <el-form-item label="目标地址" prop="target_url">
+          <el-input v-model="aiForm.target_url" placeholder="https://example.com" />
+        </el-form-item>
+        <el-form-item label="测试目标" prop="goal">
+          <el-input v-model="aiForm.goal" type="textarea" :rows="4" maxlength="4000" show-word-limit placeholder="例如：打开 Google，搜索 OmniTest，并验证结果页显示 OmniTest" />
+        </el-form-item>
+        <el-form-item label="补充上下文">
+          <el-input v-model="aiForm.context" type="textarea" :rows="3" maxlength="8000" placeholder="可填写测试数据、登录前置条件或已知的稳定选择器" />
+        </el-form-item>
+        <el-form-item label="最多步骤">
+          <el-input-number v-model="aiForm.max_steps" :min="1" :max="30" controls-position="right" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="aiDialogVisible = false">取消</el-button>
+        <el-button type="primary" :icon="MagicStick" :loading="aiGenerating" @click="generateAIDraft">生成草稿</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="editorVisible" :title="isEditing ? '编辑 UI 用例' : '新增 UI 用例'" width="min(1080px, 96vw)" top="4vh" destroy-on-close>
       <el-form ref="editorFormRef" :model="temp" :rules="rules" label-position="top">
         <el-tabs v-model="editorTab" class="editor-tabs">
           <el-tab-pane label="基本信息" name="basic">
             <div class="form-grid">
+              <div v-if="temp.generation_mode === 'ai_skill'" class="ai-origin form-grid__wide">
+                <el-tag effect="plain">AI Skill</el-tag>
+                <span>{{ temp.skill_name }} · v{{ temp.skill_version }}</span>
+              </div>
               <el-form-item label="所属项目" prop="project_id">
                 <el-select v-model="temp.project_id" placeholder="请选择项目" style="width: 100%">
                   <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
@@ -237,7 +275,9 @@
           <el-descriptions :column="2" border size="small">
             <el-descriptions-item label="项目">{{ projectMap[currentCase.project_id] || currentCase.project_id }}</el-descriptions-item><el-descriptions-item label="优先级">{{ currentCase.priority }}</el-descriptions-item>
             <el-descriptions-item label="分组">{{ currentCase.folder_path || '-' }}</el-descriptions-item><el-descriptions-item label="评审">{{ reviewText(currentCase.review_status) }}</el-descriptions-item>
+            <el-descriptions-item label="生成方式">{{ currentCase.generation_mode === 'ai_skill' ? 'AI Skill' : '手工' }}</el-descriptions-item><el-descriptions-item label="Skill">{{ currentCase.skill_name ? `${currentCase.skill_name} · v${currentCase.skill_version}` : '-' }}</el-descriptions-item>
             <el-descriptions-item label="目标地址" :span="2">{{ currentCase.target_url }}</el-descriptions-item><el-descriptions-item label="最终文本" :span="2">{{ currentCase.expect_text }}</el-descriptions-item>
+            <el-descriptions-item v-if="currentCase.ai_goal" label="测试目标" :span="2">{{ currentCase.ai_goal }}</el-descriptions-item>
           </el-descriptions>
           <section class="detail-section"><div class="detail-section__head"><h3>操作步骤</h3><span>{{ (currentCase.steps_json || []).length }} 步</span></div><div v-if="currentCase.steps_json?.length" class="definition-list"><div v-for="(step, index) in currentCase.steps_json" :key="index" class="definition-item"><span>{{ index + 1 }}</span><div><strong>{{ step.name || stepLabel(step.action) }}</strong><code v-if="step.selector">{{ step.selector }}</code><p v-if="step.value !== undefined">{{ step.value }}</p></div></div></div><el-empty v-else description="无附加步骤" :image-size="60" /></section>
           <section class="detail-section"><div class="detail-section__head"><h3>断言</h3><span>{{ (currentCase.assertions_json || []).length + 1 }} 项</span></div><div class="definition-list"><div class="definition-item"><span>1</span><div><strong>最终文本可见</strong><p>{{ currentCase.expect_text }}</p></div></div><div v-for="(assertion, index) in currentCase.assertions_json || []" :key="index" class="definition-item"><span>{{ index + 2 }}</span><div><strong>{{ assertion.name || assertionLabel(assertion.type) }}</strong><code v-if="assertion.selector">{{ assertion.selector }}</code><p>{{ assertion.value ?? assertion.expected }}</p></div></div></div></section>
@@ -273,7 +313,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Bottom, CircleCheck, CopyDocument, Delete, Document, Download, Edit, Picture, Plus,
+  Bottom, CircleCheck, CopyDocument, Delete, Document, Download, Edit, MagicStick, Picture, Plus,
   Refresh, Search, Top, Upload, VideoPlay, View, WarningFilled
 } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -311,6 +351,9 @@ const runDetailLoading = ref(false)
 const previewUrl = ref('')
 const importVisible = ref(false)
 const importText = ref('')
+const aiDialogVisible = ref(false)
+const aiGenerating = ref(false)
+const aiFormRef = ref(null)
 const { canAdmin, canTest } = usePermissions()
 let itemKey = 0
 let pollTimer = null
@@ -320,14 +363,21 @@ const page = ref(1)
 const pageSize = ref(10)
 const temp = reactive({
   project_id: undefined, name: '', folder_path: '', target_url: '', priority: 'P1', status: 'ACTIVE',
-  review_status: 'DRAFT', version_no: '1.0.0', review_note: '', expect_text: '', tags_json: [], steps: [], assertions: []
+  review_status: 'DRAFT', version_no: '1.0.0', review_note: '', expect_text: '', tags_json: [], steps: [], assertions: [],
+  generation_mode: 'manual', ai_goal: '', skill_name: '', skill_version: '', generation_meta_json: null
 })
+const aiForm = reactive({ project_id: undefined, target_url: '', goal: '', context: '', max_steps: 12 })
 const runForm = reactive({ case_id: undefined, project_id: undefined, environment_id: undefined, timeout_seconds: 60, max_retries: 0 })
 const rules = {
   project_id: [{ required: true, message: '请选择项目', trigger: 'change' }],
   name: [{ required: true, message: '请输入用例名称', trigger: 'blur' }, { min: 2, message: '名称至少 2 个字符', trigger: 'blur' }],
   target_url: [{ required: true, message: '请输入目标地址', trigger: 'blur' }],
   expect_text: [{ required: true, message: '请输入最终文本断言', trigger: 'blur' }]
+}
+const aiRules = {
+  project_id: [{ required: true, message: '请选择项目', trigger: 'change' }],
+  target_url: [{ required: true, message: '请输入目标地址', trigger: 'blur' }],
+  goal: [{ required: true, message: '请输入测试目标', trigger: 'blur' }, { min: 5, message: '测试目标至少 5 个字符', trigger: 'blur' }]
 }
 
 const withKey = (item) => ({ ...item, _key: ++itemKey })
@@ -382,8 +432,65 @@ const resetTemp = () => {
   Object.assign(temp, {
     project_id: project?.id, name: '', folder_path: '', target_url: project?.base_url || 'http://frontend:3000',
     priority: 'P1', status: 'ACTIVE', review_status: 'DRAFT', version_no: '1.0.0', review_note: '',
-    expect_text: '', tags_json: [], steps: [], assertions: []
+    expect_text: '', tags_json: [], steps: [], assertions: [], generation_mode: 'manual', ai_goal: '',
+    skill_name: '', skill_version: '', generation_meta_json: null
   })
+}
+
+const handleAIProjectChange = (projectId) => {
+  const project = projects.value.find((item) => item.id === projectId)
+  if (project) aiForm.target_url = project.base_url || ''
+}
+
+const openAIDialog = () => {
+  const project = projects.value.find((item) => item.id === filters.projectId) || projects.value[0]
+  Object.assign(aiForm, {
+    project_id: project?.id,
+    target_url: project?.base_url || 'http://frontend:3000',
+    goal: '',
+    context: '',
+    max_steps: 12
+  })
+  aiDialogVisible.value = true
+  nextTick(() => aiFormRef.value?.clearValidate())
+}
+
+const generateAIDraft = async () => {
+  const valid = await aiFormRef.value?.validate().catch(() => false)
+  if (!valid) return
+  aiGenerating.value = true
+  try {
+    const result = await api.post('/ui-cases/ai/generate', {
+      project_id: aiForm.project_id,
+      target_url: aiForm.target_url.trim(),
+      goal: aiForm.goal.trim(),
+      context: aiForm.context.trim() || null,
+      max_steps: aiForm.max_steps
+    })
+    const draft = result.draft
+    Object.assign(temp, {
+      project_id: draft.project_id, name: draft.name, folder_path: draft.folder_path || '', target_url: draft.target_url,
+      priority: draft.priority || 'P2', status: draft.status || 'ACTIVE', review_status: 'DRAFT',
+      version_no: draft.version_no || '1.0.0', review_note: '', expect_text: draft.expect_text,
+      tags_json: [...(draft.tags_json || [])], steps: (draft.steps_json || []).map((step) => withKey(normalizeUiStep(step))),
+      assertions: (draft.assertions_json || []).map((assertion) => withKey(normalizeUiAssertion(assertion))),
+      generation_mode: draft.generation_mode || 'ai_skill', ai_goal: draft.ai_goal || aiForm.goal.trim(),
+      skill_name: draft.skill_name || result.skill_name, skill_version: draft.skill_version || result.skill_version,
+      generation_meta_json: draft.generation_meta_json || null
+    })
+    aiDialogVisible.value = false
+    isEditing.value = false
+    editingCaseId.value = null
+    editorTab.value = 'steps'
+    editorVisible.value = true
+    if (result.warnings?.length) ElMessage.warning(`AI 草稿已生成，含 ${result.warnings.length} 项待确认`)
+    else ElMessage.success('AI 草稿已生成，请确认后保存')
+    nextTick(() => editorFormRef.value?.clearValidate())
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    aiGenerating.value = false
+  }
 }
 
 const handleCreate = () => {
@@ -401,7 +508,9 @@ const handleEdit = (row) => {
     priority: row.priority || 'P2', status: row.status || 'ACTIVE', review_status: row.review_status || 'DRAFT',
     version_no: row.version_no || '1.0.0', review_note: row.review_note || '', expect_text: row.expect_text,
     tags_json: [...(row.tags_json || [])], steps: (row.steps_json || []).map((step) => withKey(normalizeUiStep(step))),
-    assertions: (row.assertions_json || []).map((assertion) => withKey(normalizeUiAssertion(assertion)))
+    assertions: (row.assertions_json || []).map((assertion) => withKey(normalizeUiAssertion(assertion))),
+    generation_mode: row.generation_mode || 'manual', ai_goal: row.ai_goal || '', skill_name: row.skill_name || '',
+    skill_version: row.skill_version || '', generation_meta_json: row.generation_meta_json || null
   })
   isEditing.value = true
   editingCaseId.value = row.id
@@ -443,7 +552,8 @@ const saveData = async () => {
       target_url: temp.target_url.trim(), priority: temp.priority, status: temp.status, review_status: temp.review_status,
       version_no: temp.version_no, review_note: temp.review_note.trim() || null, tags_json: temp.tags_json.length ? temp.tags_json : null,
       steps_json: serializeUiSteps(temp.steps), assertions_json: temp.assertions.length ? serializeUiAssertions(temp.assertions) : null,
-      expect_text: temp.expect_text.trim()
+      expect_text: temp.expect_text.trim(), generation_mode: temp.generation_mode || 'manual', ai_goal: temp.ai_goal.trim() || null,
+      skill_name: temp.skill_name || null, skill_version: temp.skill_version || null, generation_meta_json: temp.generation_meta_json
     }
     if (isEditing.value) await api.put(`/ui-cases/${editingCaseId.value}`, payload)
     else await api.post('/ui-cases', payload)
@@ -630,6 +740,8 @@ onUnmounted(() => { stopPolling(); revokePreview() })
 .mobile-cards { display: none; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 18px; }
 .form-grid__wide { grid-column: 1 / -1; }
+.ai-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+.ai-origin { min-height: 38px; margin-bottom: 16px; display: flex; align-items: center; gap: 10px; color: var(--color-text-secondary); font-size: 13px; }
 .editor-tabs :deep(.el-tabs__content) { min-height: 480px; max-height: 62vh; overflow: auto; padding: 4px 2px 12px; }
 .builder-toolbar { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 12px; }
 .builder-toolbar--bordered { padding-top: 14px; border-top: 1px solid var(--el-border-color-lighter); }
@@ -696,6 +808,7 @@ onUnmounted(() => { stopPolling(); revokePreview() })
   .mobile-case__url { margin-bottom: 10px; color: var(--color-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
   .form-grid { grid-template-columns: 1fr; }
   .form-grid__wide { grid-column: auto; }
+  .ai-form-grid { grid-template-columns: 1fr; gap: 0; }
   .builder-row__head { grid-template-columns: 32px minmax(0, 1fr) auto; }
   .builder-row__head > .el-input { grid-column: 2 / -1; }
   .builder-action { width: 100%; }

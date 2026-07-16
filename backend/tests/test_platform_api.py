@@ -93,6 +93,7 @@ def test_case_generation_v2_pipeline_mode_schema_defaults_and_rejects_invalid() 
         markdown_text="# 登录\n- 支持用户名密码登录",
     )
     assert payload.pipeline_mode == "lite"
+    assert payload.generation_density == "balanced"
 
     for mode in ("clone", "trusted_v2", "lite", "trusted"):
         mode_payload = schemas.CaseGenerationV2JobCreate(
@@ -115,6 +116,27 @@ def test_case_generation_v2_pipeline_mode_schema_defaults_and_rejects_invalid() 
     else:
         raise AssertionError("invalid pipeline_mode should fail validation")
 
+    for density in ("concise", "balanced", "exhaustive"):
+        density_payload = schemas.CaseGenerationV2JobCreate(
+            project_id=1,
+            name=f"V2 {density} 密度",
+            generation_density=density,
+            markdown_text="# 登录\n- 支持用户名密码登录",
+        )
+        assert density_payload.generation_density == density
+
+    try:
+        schemas.CaseGenerationV2JobCreate(
+            project_id=1,
+            name="V2 非法密度",
+            generation_density="unlimited",
+            markdown_text="# 登录\n- 支持用户名密码登录",
+        )
+    except Exception as exc:
+        assert "generation_density" in str(exc)
+    else:
+        raise AssertionError("invalid generation_density should fail validation")
+
 
 def test_case_generation_v2_pipeline_mode_normalization_and_dispatch(monkeypatch) -> None:
     import app.tasks.case_generation_v2 as v2
@@ -128,11 +150,11 @@ def test_case_generation_v2_pipeline_mode_normalization_and_dispatch(monkeypatch
     calls: list[str] = []
 
     class FakeDb:
-        def __init__(self, mode: str, resume_from_stage: str = ""):
+        def __init__(self, mode: str, resume_from_stage: str = "", status: str = "PENDING"):
             self.job = SimpleNamespace(input_payload_json={
                 "pipeline_mode": mode,
                 "trusted_resume_from_stage": resume_from_stage,
-            }, id=11, active_attempt_id=91, status="PENDING")
+            }, id=11, active_attempt_id=91, status=status)
 
         def get(self, model, job_id):
             return self.job
@@ -163,6 +185,8 @@ def test_case_generation_v2_pipeline_mode_normalization_and_dispatch(monkeypatch
     v2.run_case_generation_v2_job.run(14)
     monkeypatch.setattr(v2, "SessionLocal", lambda: FakeDb("trusted", "testcase_gate"))
     v2.run_case_generation_v2_job.run(15)
+    monkeypatch.setattr(v2, "SessionLocal", lambda: FakeDb("trusted", status="CANCELLED"))
+    v2.run_case_generation_v2_job.run(16)
 
     assert calls == ["lite:11", "trusted:12", "lite:13", "trusted:14", "resume:15"]
 
@@ -910,6 +934,8 @@ def test_case_generation_v2_testcase_gate_reports_failed_source_shard_before_mis
     assert gate["passed"] is False
     assert "SOURCE_SHARD_FAILED" in codes
     assert "FP_NOT_CONSUMED" not in codes
+    assert "MUST_COVER_NOT_COVERED" not in codes
+    assert "METHOD_NOT_CONSUMED" not in codes
     assert gate["recovery_plan"]["rerun_scope"]["source_ids"] == ["SRC-001"]
     assert gate["recovery_plan"]["rerun_scope"]["fp_ids"] == ["FP-001"]
 
@@ -1519,6 +1545,17 @@ def test_case_generation_v2_reuses_valid_source_shard_on_full_rerun(monkeypatch)
             }
         ]
     }
+    monkeypatch.setattr(v2, "_unified_rules_sha256", lambda: "rules-sha")
+    from app.tasks.case_generation_v2_support.cache import build_shard_cache_metadata
+
+    existing_handoff["testcase_shards"][0]["cache_metadata"] = build_shard_cache_metadata(
+        v2._trusted_scope_source_items(scope_index)[0],
+        requirement_handoff["function_points"],
+        rules_sha256="rules-sha",
+        model="test-model",
+        generation_contract_version=v2._TRUSTED_GENERATION_CONTRACT_VERSION,
+        generation_density="balanced",
+    )
     progress_messages: list[str] = []
 
     result = v2._build_trusted_testcase_handoff(
@@ -1735,7 +1772,16 @@ def test_case_generation_v2_trusted_standard_views_support_quality_and_xmind() -
         semantic_review={"summary": {"release_readiness": "conditional_pass", "ambiguous_step_count": 1, "unverifiable_expectation_count": 1, "duplicate_count": 0, "overall_score": 70}, "method_coverage": {"equivalence": "covered"}, "dimension_matrix": {}, "findings": []},
         quality_summary=quality,
     )
-    xmindmark = _build_xmindmark(Job(), function_points, testcase_package, {"summary": {"source_count": 1, "function_point_count": 2, "testcase_count": 1}, "review_conclusion": "通过", "quality_summary": quality})
+    xmindmark = _build_xmindmark(Job(), function_points, testcase_package, {
+        "summary": {"source_count": 1, "function_point_count": 2, "testcase_count": 1},
+        "review_conclusion": "通过",
+        "quality_summary": quality,
+        "pending_confirmations": [
+            {"id": "PC-001", "topic": "Tooltip 触发方式", "description": "需要确认使用悬浮还是点击触发"},
+            {"id": "PC-002", "question": "名称包含冒号时是否需要转义？", "impact": "影响解析正确性"},
+            {"pending_id": "PC-003", "message": "旧结构仍应正常导出"},
+        ],
+    })
 
     assert function_points["function_points"][0]["module"] == "账户体系"
     assert function_points["function_points"][0]["scene"] == "登录"
@@ -1758,6 +1804,11 @@ def test_case_generation_v2_trusted_standard_views_support_quality_and_xmind() -
     assert "需求测试用例" in xmindmark
     assert "  - 直接测试对象数：1" in xmindmark
     assert "  - 用例总数：1" in xmindmark
+    assert "  - 待确认项数量：3" in xmindmark
+    assert "    - PC-001：Tooltip 触发方式：需要确认使用悬浮还是点击触发" in xmindmark
+    assert "    - PC-002：名称包含冒号时是否需要转义？" in xmindmark
+    assert "    - PC-003：旧结构仍应正常导出" in xmindmark
+    assert "\n    - -\n" not in xmindmark
     assert "    - SRC-001｜2.1 登录模块" in xmindmark
     assert "      - FP-001：用户名密码登录" in xmindmark
     assert "      - FP-002：首次登录验证码" in xmindmark
@@ -2102,6 +2153,151 @@ def test_case_generation_v2_requirement_gate_rejects_current_only_target_claim()
     ) is True
 
 
+def test_case_generation_v2_state_repair_converges_old_position_to_target_evidence() -> None:
+    import app.tasks.case_generation_v2 as v2
+
+    source = {
+        "source_id": "SRC-007",
+        "title": "新建时 More 菜单可见性优化",
+        "source_state_semantics": {
+            "has_state_transition": True,
+            "current_text": "现有效果：More 按钮位置底部靠左",
+            "target_text": "优化效果",
+            "current_image_refs": ["IMG-014"],
+            "target_image_refs": ["IMG-015"],
+        },
+        "image_evidence": [
+            {"image_id": "IMG-014", "evidence_role": "current", "summary": "More 按钮位于底部靠左"},
+            {"image_id": "IMG-015", "evidence_role": "target", "summary": "More 按钮位于底部中央位置"},
+        ],
+    }
+    raw = {
+        "smoke_test_scope_note": "验证 More 菜单可见性",
+        "test_design_profile": {"must_cover": ["More 按钮位于底部靠左"]},
+        "function_points": [{
+            "fp_id": "FP-021",
+            "source_id": "SRC-007",
+            "title": "More 菜单可见性提升",
+            "description": "调整 More 菜单位置和样式",
+            "rules": [
+                "当前问题：More 菜单位置底部靠左",
+                "目标样式以 IMG-015 为准",
+            ],
+            "test_hints": ["验证 More 菜单功能正常"],
+            "source_quotes": ["现有效果：More 按钮位置底部靠左"],
+            "target_evidence_refs": ["IMG-015"],
+        }],
+    }
+
+    repaired = v2._converge_state_repair_output(source, raw)
+    fp = repaired["function_points"][0]
+    candidate = "\n".join([fp["title"], fp["description"], *fp["rules"], *fp["test_hints"]])
+
+    assert all("底部靠左" not in item for item in fp["rules"])
+    assert "目标行为：More 按钮位于底部中央位置" in fp["rules"]
+    assert repaired["test_design_profile"]["must_cover"] == ["More 按钮位于底部中央位置"]
+    assert fp["source_quotes"] == ["现有效果：More 按钮位置底部靠左"]
+    assert v2._state_target_conflicts(source, candidate) == []
+
+
+def test_case_generation_v2_state_repair_does_not_guess_without_target_state() -> None:
+    import app.tasks.case_generation_v2 as v2
+
+    source = {
+        "source_state_semantics": {
+            "has_state_transition": True,
+            "current_text": "现有效果：按钮位于底部靠左",
+            "target_text": "优化效果",
+        },
+        "image_evidence": [],
+    }
+    raw = {
+        "function_points": [{"rules": ["按钮位于底部靠左"]}],
+        "test_design_profile": {"must_cover": ["按钮位于底部靠左"]},
+    }
+
+    assert v2._converge_state_repair_output(source, raw) == raw
+
+
+def test_case_generation_v2_allows_retained_current_behavior_only_for_partial_selection() -> None:
+    import app.tasks.case_generation_v2 as v2
+
+    source = {
+        "source_state_semantics": {
+            "has_state_transition": True,
+            "current_text": "无论是否全选，均展示小标签而不展示大标签",
+            "target_text": "全选时自动收起小标签，仅展示所属的大标签",
+        },
+        "image_evidence": [],
+    }
+    expected = "Source intr_placement 输入框展示实际选中的小标签 tag，不展示大标签名称"
+    current_quote = "无论是否全选，均展示小标签而不展示大标签"
+
+    assert v2._current_state_expectation_is_allowed(
+        source,
+        expected,
+        current_quote,
+        "Manual Select 非全选时展示逻辑正确",
+    ) is True
+    assert v2._current_state_expectation_is_allowed(source, expected, current_quote) is False
+    assert v2._current_state_expectation_is_allowed(
+        source,
+        expected,
+        current_quote,
+        "Manual Select 全选标签",
+    ) is False
+
+
+def test_case_generation_v2_full_requirement_path_converges_state_conflicts() -> None:
+    import app.tasks.case_generation_v2 as v2
+
+    scope = _trusted_scope_fixture(("SRC-007",), method="ui_display", must_cover="提升 More 菜单可见性")
+    scope["source_blocks"][0].update({
+        "title": "新建时 More 菜单可见性优化",
+        "source_state_semantics": {
+            "has_state_transition": True,
+            "current_text": "现有效果：More 按钮位置底部靠左",
+            "target_text": "优化效果",
+            "current_image_refs": ["IMG-014"],
+            "target_image_refs": ["IMG-015"],
+            "image_role_by_id": {"IMG-014": "current", "IMG-015": "target"},
+        },
+        "image_refs": ["IMG-014", "IMG-015"],
+        "image_evidence": [
+            {"image_id": "IMG-014", "evidence_role": "current", "summary": "More 按钮位于底部靠左"},
+            {"image_id": "IMG-015", "evidence_role": "target", "summary": "More 按钮位于底部中央"},
+        ],
+    })
+    source = v2._source_by_id(scope, "SRC-007")
+    requirement = v2._normalize_trusted_requirement_handoff(scope, {
+        "scope_index_consumption": [{
+            "source_id": "SRC-007",
+            "result": "converted_to_function_points",
+            "fp_ids": ["FP-023"],
+        }],
+        "function_points": [{
+            "fp_id": "FP-023",
+            "source_id": "SRC-007",
+            "title": "More 菜单位置优化",
+            "description": "提升 More 菜单可见性",
+            "rules": ["More 菜单从底部靠左调整至更明显位置"],
+            "test_hints": ["验证 More 菜单位置"],
+            "source_quotes": ["现有效果：More 按钮位置底部靠左"],
+            "target_evidence_refs": ["IMG-015"],
+        }],
+        "pending_confirmations": [],
+    })
+
+    repaired, source_ids = v2._converge_requirement_handoff_state_conflicts(scope, requirement)
+    fp = repaired["function_points"][0]
+    candidate = "\n".join([fp["title"], fp["description"], *fp["rules"], *fp["test_hints"]])
+
+    assert source_ids == ["SRC-007"]
+    assert all("底部靠左" not in rule for rule in fp["rules"])
+    assert "目标行为：More 按钮位于底部中央" in fp["rules"]
+    assert v2._state_target_conflicts(source, candidate) == []
+
+
 def test_case_generation_v2_repairs_and_validates_pending_confirmation_fp_refs() -> None:
     import app.tasks.case_generation_v2 as v2
 
@@ -2286,6 +2482,90 @@ def test_case_generation_v2_source_builder_repairs_current_only_assertion_basis(
     assert result["testcases"][0]["assertion_basis"][0]["basis_ref"] == "IMG-002"
 
 
+def test_case_generation_v2_reclassifies_image_derived_text_basis_without_weakening_text_gate() -> None:
+    import app.tasks.case_generation_v2 as v2
+
+    source = {
+        "source_id": "SRC-007",
+        "shard_id": "SHARD-007",
+        "source_doc_id": "DOC-012",
+        "source_excerpt": "+ 现有效果：位置底部靠左\n+ 优化效果",
+        "image_refs": ["IMG-014", "IMG-015"],
+        "image_evidence": [
+            {"image_id": "IMG-014", "evidence_role": "current", "summary": "More 按钮位于底部靠左"},
+            {
+                "image_id": "IMG-015",
+                "evidence_role": "target",
+                "summary": "More 按钮位于底部中央位置",
+                "requirement_hints": ["与旧图相比 More 按钮位置已调整"],
+            },
+        ],
+        "evidence_refs": ["DOC-012", "IMG-014", "IMG-015"],
+        "source_state_semantics": {
+            "has_state_transition": True,
+            "current_text": "+ 现有效果：位置底部靠左",
+            "target_text": "+ 优化效果",
+            "current_image_refs": ["IMG-014"],
+            "target_image_refs": ["IMG-015"],
+            "image_role_by_id": {"IMG-014": "current", "IMG-015": "target"},
+        },
+        "test_design_profile": {"must_cover": [], "applicable_methods": []},
+    }
+    function_points = [{"fp_id": "FP-015", "source_id": "SRC-007"}]
+
+    def raw_shard(claim: str) -> dict:
+        return {
+            "feature_point_consumption": [{
+                "fp_id": "FP-015",
+                "source_id": "SRC-007",
+                "consumption_result": "covered_by_case",
+                "case_refs": ["TC-001"],
+            }],
+            "method_consumption": [],
+            "testcases": [{
+                "case_id": "TC-001",
+                "source_id": "SRC-007",
+                "shard_id": "SHARD-007",
+                "fp_id": "FP-015",
+                "fp_ids": ["FP-015"],
+                "title": "检查 More 按钮目标位置",
+                "steps": [{"step_no": 1, "action": "进入页面并观察 More 按钮"}],
+                "expected_results": [claim],
+                "assertion_basis": [{
+                    "expected_result": claim,
+                    "basis_type": "text",
+                    "basis_ref": "DOC-012",
+                    "source_quote": claim,
+                }],
+                "baseline_candidate": True,
+            }],
+        }
+
+    supported = v2._normalize_trusted_testcase_handoff(
+        raw_shard("More按钮位置调整到底部中央"),
+        "SRC-007",
+        source=source,
+    )
+    supported_basis = supported["testcases"][0]["assertion_basis"][0]
+    assert supported_basis["basis_type"] == "image"
+    assert supported_basis["basis_ref"] == "IMG-015"
+    assert supported_basis["evidence_role"] == "target"
+    v2._validate_trusted_source_shard_contract(source, function_points, supported)
+
+    unsupported = v2._normalize_trusted_testcase_handoff(
+        raw_shard("More按钮颜色改为红色"),
+        "SRC-007",
+        source=source,
+    )
+    assert unsupported["testcases"][0]["assertion_basis"][0]["basis_type"] == "text"
+    try:
+        v2._validate_trusted_source_shard_contract(source, function_points, unsupported)
+    except v2.ModelContractError as exc:
+        assert "文本依据不在需求原文中" in str(exc)
+    else:
+        raise AssertionError("unsupported image claim must remain blocked")
+
+
 def test_case_generation_v2_allows_explicit_retained_non_full_selection_branch() -> None:
     import app.tasks.case_generation_v2 as v2
 
@@ -2427,6 +2707,24 @@ def test_case_generation_v2_semantic_review_blocks_unsupported_assertions(monkey
     assert review["summary"]["unsupported_assertion_count"] == 1
 
 
+def test_case_generation_v2_json_parser_prefers_final_complete_object() -> None:
+    import app.tasks.case_generation_v2 as v2
+
+    assert v2._json_from_model_text.__module__.endswith("case_generation_v2_pipeline.engine")
+    parsed = v2._json_from_model_text(
+        '<thinking>{"draft": true}</thinking>\n'
+        '{"requirements_input_consumption": [], "feature_point_consumption": [], '
+        '"method_consumption": [], "testcases": []}'
+    )
+
+    assert parsed == {
+        "requirements_input_consumption": [],
+        "feature_point_consumption": [],
+        "method_consumption": [],
+        "testcases": [],
+    }
+
+
 def test_case_generation_v2_reuses_stable_scope_and_requirement_only_when_contract_matches() -> None:
     import app.tasks.case_generation_v2 as v2
 
@@ -2445,6 +2743,138 @@ def test_case_generation_v2_reuses_stable_scope_and_requirement_only_when_contra
     assert v2._can_reuse_trusted_scope_index(scope, manifest, changed_manifest, {"passed": True}) is False
     scope["shards"][0]["test_design_profile"]["must_cover"] = ["登录", "验证码"]
     assert v2._can_reuse_trusted_requirement(requirement, scope, {"passed": True}) is False
+
+
+def test_case_generation_v2_source_shard_cache_requires_full_fingerprint() -> None:
+    from app.tasks.case_generation_v2_support.cache import build_shard_cache_metadata, shard_cache_mismatch
+
+    source = {
+        "source_id": "SRC-001",
+        "source_content_sha256": "source-v1",
+        "source_excerpt": "支持用户名密码登录",
+        "title_path": "账户 / 登录",
+        "primary_sections": ["2.1"],
+        "dependency_sections": ["字段表"],
+        "rule_clusters": ["登录规则"],
+        "test_design_profile": {"applicable_methods": ["equivalence"], "must_cover": ["登录"]},
+    }
+    function_points = [{"fp_id": "FP-001", "source_id": "SRC-001", "title": "登录", "rules": ["密码必填"]}]
+    base_kwargs = {
+        "rules_sha256": "rules-v1",
+        "model": "test-model",
+        "generation_contract_version": "contract-v1",
+        "generation_density": "balanced",
+    }
+    metadata = build_shard_cache_metadata(source, function_points, **base_kwargs)
+    assert shard_cache_mismatch({"cache_metadata": metadata}, metadata) == []
+    assert shard_cache_mismatch({}, metadata) == ["missing_cache_metadata"]
+
+    changed_inputs = [
+        ({**source, "source_excerpt": "支持手机号登录"}, function_points, base_kwargs),
+        (source, [{**function_points[0], "rules": ["密码和验证码必填"]}], base_kwargs),
+        (source, function_points, {**base_kwargs, "rules_sha256": "rules-v2"}),
+        (source, function_points, {**base_kwargs, "model": "other-model"}),
+        (source, function_points, {**base_kwargs, "generation_density": "exhaustive"}),
+    ]
+    for changed_source, changed_fps, changed_kwargs in changed_inputs:
+        expected = build_shard_cache_metadata(changed_source, changed_fps, **changed_kwargs)
+        assert shard_cache_mismatch({"cache_metadata": metadata}, expected)
+
+
+def test_case_generation_v2_density_changes_test_design_guidance() -> None:
+    from app.tasks.case_generation_v2_support.density import (
+        apply_generation_density,
+        reset_generation_density,
+        set_generation_density,
+    )
+
+    token = set_generation_density("exhaustive")
+    try:
+        profile = apply_generation_density({"merge_allowed": ["旧规则"], "coverage_budget": {}})
+    finally:
+        reset_generation_density(token)
+    assert profile["generation_density"] == "exhaustive"
+    assert profile["coverage_budget"]["coverage_depth"] == "full_risk_and_method_matrix"
+    assert profile["merge_allowed"] == ["仅允许语义、步骤、预期与风险完全一致的重复用例"]
+
+
+def test_case_generation_v2_async_runtime_reuses_one_event_loop() -> None:
+    from app.tasks.case_generation_v2_support.async_runtime import AsyncRuntime
+
+    runtime = AsyncRuntime()
+
+    async def loop_identity():
+        return id(asyncio.get_running_loop())
+
+    try:
+        assert runtime.run(loop_identity()) == runtime.run(loop_identity())
+    finally:
+        runtime.close()
+
+
+def test_case_generation_metrics_are_derived_from_artifacts_and_model_calls() -> None:
+    from datetime import datetime, timedelta
+
+    from app.tasks.case_generation_v2_support.metrics import build_generation_metrics, compare_generation_metrics
+
+    started = datetime(2026, 7, 15, 10, 0, 0)
+    job = SimpleNamespace(
+        id=7,
+        input_payload_json={"pipeline_mode": "trusted", "generation_density": "balanced"},
+        started_at=started,
+        finished_at=started + timedelta(seconds=30),
+    )
+    attempt = SimpleNamespace(
+        id=9,
+        started_at=started,
+        finished_at=started + timedelta(seconds=30),
+        progress_json={"stages": [{"key": "scope_index", "duration_ms": 5000}]},
+    )
+    artifacts = [
+        SimpleNamespace(id=1, artifact_type="scope_index", content_json={"direct_testcase_sources": [{"source_id": "SRC-001"}]}),
+        SimpleNamespace(id=2, artifact_type="function_points", content_json={"function_points": [{"fp_id": "FP-001"}]}),
+        SimpleNamespace(
+            id=3,
+            artifact_type="testcase_package",
+            content_json={
+                "testcases": [{"case_id": "TC-001"}, {"case_id": "TC-002"}],
+                "source_case_summary": [{"source_id": "SRC-001", "coverage_status": "covered"}],
+                "shard_progress_summary": {"reused_count": 1, "cache_invalidated_count": 2},
+            },
+        ),
+        SimpleNamespace(
+            id=4,
+            artifact_type="trusted_review_report",
+            content_json={
+                "summary": {
+                    "source_count": 1,
+                    "function_point_count": 1,
+                    "covered_function_point_count": 1,
+                    "testcase_count": 2,
+                    "duplicate_count": 1,
+                    "weak_expected_count": 1,
+                },
+                "pending_confirmations": [{"pending_id": "PC-001"}],
+            },
+        ),
+    ]
+    metrics = build_generation_metrics(
+        job=job,
+        attempt=attempt,
+        artifacts=artifacts,
+        model_calls=[{"status": "success", "duration_ms": 1200, "usage": {"total_tokens": 800}}],
+        pipeline_version="v2",
+        status="CONDITIONAL",
+    )
+    assert metrics["duration_ms"] == 30000
+    assert metrics["source_coverage_rate"] == 1.0
+    assert metrics["function_point_coverage_rate"] == 1.0
+    assert metrics["duplicate_rate"] == 0.5
+    assert metrics["weak_expected_rate"] == 0.5
+    assert metrics["total_tokens"] == 800
+    assert metrics["shard_cache_invalidated_count"] == 2
+    comparison = compare_generation_metrics({"testcase_count": 3}, metrics)
+    assert comparison["delta"]["testcase_count"] == -1
 
 
 def test_case_generation_v2_final_delivery_gate_uses_unified_validator(tmp_path, monkeypatch) -> None:
@@ -3700,6 +4130,169 @@ def test_ui_case_rejects_unsupported_workflow_action(client) -> None:
 
     assert response.status_code == 422
     assert "步骤类型不支持" in response.text
+
+
+def test_ui_case_ai_skill_generates_reviewable_draft_and_persists_source(client, monkeypatch) -> None:
+    from app import schemas
+    from app.core.database import SessionLocal
+    from app.models import AIModelConfig, Project
+    import app.api as api_module
+
+    project_id = client.get("/projects").json()[0]["id"]
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        config = AIModelConfig(
+            workspace_id=project.workspace_id,
+            provider="OPENAI",
+            name=f"UI AI 测试配置_{time.time_ns()}",
+            base_url="https://api.openai.com/v1",
+            model="gpt-test-ui",
+            api_key="sk-test-ui-case-designer",
+            is_active=1,
+            created_by=1,
+            updated_by=1,
+        )
+        db.add(config)
+        db.commit()
+        db.refresh(config)
+        config_id = config.id
+
+    async def fake_generate(payload, **kwargs):
+        assert payload.goal == "搜索 OmniTest 并验证结果"
+        assert kwargs["model"] == "gpt-test-ui"
+        return schemas.UICaseAIGenerateResponse(
+            draft=schemas.UICaseCreate(
+                project_id=payload.project_id,
+                name="Google 搜索 OmniTest",
+                folder_path="AI生成/搜索",
+                target_url=payload.target_url,
+                priority="P1",
+                tags_json=["AI生成", "ui-case-designer"],
+                steps_json=[
+                    {"action": "fill", "selector": "textarea[name=q]", "value": "OmniTest"},
+                    {"action": "press", "selector": "textarea[name=q]", "value": "Enter"},
+                ],
+                assertions_json=[{"type": "url_contains", "value": "search"}],
+                expect_text="OmniTest",
+                generation_mode="ai_skill",
+                ai_goal=payload.goal,
+                skill_name="ui-case-designer",
+                skill_version="1.0.0",
+                generation_meta_json={"model": kwargs["model"], "warnings": []},
+            ),
+            skill_name="ui-case-designer",
+            skill_version="1.0.0",
+            model=kwargs["model"],
+        )
+
+    monkeypatch.setattr(api_module, "generate_ui_case_draft", fake_generate)
+    try:
+        generated = client.post(
+            "/ui-cases/ai/generate",
+            json={
+                "project_id": project_id,
+                "target_url": "https://www.google.com",
+                "goal": "搜索 OmniTest 并验证结果",
+                "max_steps": 8,
+            },
+        )
+        assert generated.status_code == 200
+        draft = generated.json()["draft"]
+        assert draft["generation_mode"] == "ai_skill"
+        assert draft["review_status"] == "DRAFT"
+        assert draft["skill_name"] == "ui-case-designer"
+
+        created = client.post("/ui-cases", json=draft)
+        assert created.status_code == 201
+        created_payload = created.json()
+        assert created_payload["ai_goal"] == "搜索 OmniTest 并验证结果"
+        assert created_payload["generation_meta_json"]["model"] == "gpt-test-ui"
+
+        exported = client.get(f"/cases/export?case_type=UI&project_id={project_id}").json()["items"]
+        exported_case = next(item for item in exported if item["case_id"] == created_payload["id"])
+        assert exported_case["generation_mode"] == "ai_skill"
+        assert exported_case["skill_version"] == "1.0.0"
+        client.delete(f"/ui-cases/{created_payload['id']}")
+    finally:
+        with SessionLocal() as db:
+            stored = db.get(AIModelConfig, config_id)
+            if stored is not None:
+                db.delete(stored)
+                db.commit()
+
+
+def test_ui_case_ai_gate_rejects_cross_origin_navigation() -> None:
+    from app import schemas
+    from app.ui_case_ai import _gate_generated_payload
+
+    request = schemas.UICaseAIGenerateRequest(
+        project_id=1,
+        target_url="https://www.google.com",
+        goal="搜索 OmniTest 并验证结果",
+    )
+    payload = {
+        "name": "越权跳转用例",
+        "folder_path": "AI生成",
+        "target_url": "https://www.google.com",
+        "priority": "P1",
+        "expect_text": "OmniTest",
+        "tags_json": [],
+        "steps_json": [{"action": "goto", "value": "https://evil.example/collect"}],
+        "assertions_json": [],
+        "design_notes": [],
+        "warnings": [],
+    }
+    try:
+        _gate_generated_payload(payload, request, project_base_url="https://www.google.com")
+    except ValueError as exc:
+        assert "未授权域名" in str(exc)
+    else:
+        raise AssertionError("cross-origin AI navigation should be rejected")
+
+
+def test_ui_case_ai_skill_cannot_bypass_supported_action_schema(monkeypatch) -> None:
+    from app import schemas
+    import app.ui_case_ai as ui_case_ai
+
+    async def fake_model_call(**kwargs):
+        del kwargs
+        return json.dumps(
+            {
+                "name": "非法模型步骤",
+                "folder_path": "AI生成",
+                "target_url": "https://www.google.com",
+                "priority": "P1",
+                "expect_text": "OmniTest",
+                "tags_json": [],
+                "steps_json": [{"action": "execute_script", "value": "alert(1)"}],
+                "assertions_json": [],
+                "design_notes": [],
+                "warnings": [],
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(ui_case_ai, "call_json_chat_completion", fake_model_call)
+    request = schemas.UICaseAIGenerateRequest(
+        project_id=1,
+        target_url="https://www.google.com",
+        goal="搜索 OmniTest 并验证结果",
+    )
+    try:
+        asyncio.run(
+            ui_case_ai.generate_ui_case_draft(
+                request,
+                project_name="测试项目",
+                project_base_url="https://www.google.com",
+                model="gpt-test",
+                base_url="https://api.openai.com/v1",
+                api_key="sk-test",
+            )
+        )
+    except ValueError as exc:
+        assert "步骤类型不支持" in str(exc)
+    else:
+        raise AssertionError("unsupported AI action should fail the existing UI case schema")
 
 
 def test_ui_case_precheck_includes_assertion_variables(client) -> None:

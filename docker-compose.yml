@@ -59,6 +59,7 @@ services:
       SEED_DEMO_DATA_ON_BOOTSTRAP: "${SEED_DEMO_DATA_ON_BOOTSTRAP:-false}"
       CASE_GENERATION_RULES_DIR: claw_5skill_final
       CASE_GENERATION_UNIFIED_RULES_DIR: claw_5skill_unified
+      UI_CASE_SKILL_DIR: ui_case_skills
       CASE_GEN_MAX_CONCURRENCY: "4"
       CASE_GEN_WATCHDOG_ENABLED: "true"
       CASE_GEN_REQUIREMENT_MAX_TOKENS: "8000"
@@ -82,6 +83,7 @@ services:
       - ./backend/app:/app/app
       - ./backend/claw_5skill_final:/app/claw_5skill_final
       - ./backend/claw_5skill_unified:/app/claw_5skill_unified
+      - ./backend/ui_case_skills:/app/ui_case_skills
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/v1/system/health || exit 1"]
@@ -162,7 +164,7 @@ services:
       context: ./backend
       target: runtime
     container_name: ppptest-case-worker
-    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=solo -Q case_generation -n case-generation@%h'
+    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=prefork --concurrency=1 -Q case_generation -n case-generation@%h'
     environment:
       APP_ENV: docker
       DATABASE_URL: "${DOCKER_DATABASE_URL}"

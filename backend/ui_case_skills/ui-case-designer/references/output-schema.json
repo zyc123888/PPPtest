@@ -1,0 +1,71 @@
+{
+  "type": "object",
+  "required": [
+    "name",
+    "folder_path",
+    "target_url",
+    "priority",
+    "expect_text",
+    "tags_json",
+    "steps_json",
+    "assertions_json",
+    "design_notes",
+    "warnings"
+  ],
+  "properties": {
+    "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+    "folder_path": { "type": ["string", "null"], "maxLength": 255 },
+    "target_url": { "type": "string" },
+    "priority": { "enum": ["P0", "P1", "P2", "P3"] },
+    "expect_text": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "tags_json": { "type": "array", "items": { "type": "string" }, "maxItems": 12 },
+    "steps_json": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["action"],
+        "properties": {
+          "name": { "type": "string" },
+          "action": {
+            "enum": [
+              "goto", "click", "fill", "press", "select_option", "check",
+              "uncheck", "hover", "wait", "wait_for_selector", "wait_for_text",
+              "assert_text", "assert_visible", "assert_hidden", "assert_url_contains",
+              "assert_title_contains", "set_viewport"
+            ]
+          },
+          "selector": { "type": "string" },
+          "value": {},
+          "duration_ms": { "type": "integer", "minimum": 1, "maximum": 60000 },
+          "state": { "enum": ["visible", "hidden", "attached", "detached"] },
+          "wait_until": { "enum": ["domcontentloaded", "load", "networkidle"] },
+          "width": { "type": "integer", "minimum": 320, "maximum": 3840 },
+          "height": { "type": "integer", "minimum": 320, "maximum": 2160 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "assertions_json": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "name": { "type": "string" },
+          "type": {
+            "enum": [
+              "text_present", "text_visible", "text_hidden", "selector_visible",
+              "selector_hidden", "url_contains", "title_contains"
+            ]
+          },
+          "selector": { "type": "string" },
+          "value": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "design_notes": { "type": "array", "items": { "type": "string" }, "maxItems": 10 },
+    "warnings": { "type": "array", "items": { "type": "string" }, "maxItems": 10 }
+  },
+  "additionalProperties": false
+}

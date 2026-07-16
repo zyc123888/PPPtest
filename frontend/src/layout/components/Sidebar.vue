@@ -27,17 +27,17 @@
         <template v-for="item in menuItems" :key="item.path">
           <el-sub-menu v-if="item.children" :index="item.path">
             <template #title>
-              <el-icon v-if="item.icon"><component :is="item.icon" /></el-icon>
+              <el-icon v-if="item.icon" class="sidebar-menu-icon"><component :is="item.icon" /></el-icon>
               <span>{{ item.title }}</span>
             </template>
             <el-menu-item v-for="child in item.children" :key="child.path" :index="child.path">
-              <el-icon v-if="child.icon"><component :is="child.icon" /></el-icon>
+              <el-icon v-if="child.icon" class="sidebar-menu-icon"><component :is="child.icon" /></el-icon>
               <template #title>{{ child.title }}</template>
             </el-menu-item>
           </el-sub-menu>
 
           <el-menu-item v-else :index="item.path" :data-testid="item.testId || null">
-            <el-icon v-if="item.icon"><component :is="item.icon" /></el-icon>
+            <el-icon v-if="item.icon" class="sidebar-menu-icon"><component :is="item.icon" /></el-icon>
             <template #title>{{ item.title }}</template>
           </el-menu-item>
         </template>
@@ -171,6 +171,8 @@ const handleSelect = () => {
 
 .sidebar-root.is-collapsed :deep(.el-menu) {
   padding: 8px 0 12px;
+  width: 100%;
+  min-width: 0;
 }
 
 .sidebar-root.is-collapsed :deep(.el-menu-item),
@@ -185,18 +187,7 @@ const handleSelect = () => {
 .sidebar-root.is-collapsed :deep(.el-menu-item .el-icon),
 .sidebar-root.is-collapsed :deep(.el-sub-menu__title .el-icon) {
   margin: 0;
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  font-size: 18px;
-  line-height: 1;
-  opacity: 1;
-  visibility: visible;
-}
-
-.sidebar-root.is-collapsed :deep(.el-menu--collapse) {
-  padding-top: 6px;
+  flex: 0 0 20px;
 }
 
 .sidebar-root.is-collapsed :deep(.el-menu-item.is-active) {
@@ -236,49 +227,57 @@ const handleSelect = () => {
   color: var(--color-text-secondary);
 }
 
-.sidebar-root :deep(.el-menu-item .el-icon),
-.sidebar-root :deep(.el-sub-menu__title .el-icon) {
+.sidebar-root :deep(.sidebar-menu-icon) {
   color: inherit;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: 18px;
   line-height: 1;
 }
 
-.sidebar-root :deep(.el-menu-item .el-icon svg),
-.sidebar-root :deep(.el-sub-menu__title .el-icon svg) {
+.sidebar-root :deep(.sidebar-menu-icon > svg) {
+  display: block;
   width: 18px;
   height: 18px;
+  min-width: 18px;
+  min-height: 18px;
 }
 
 .sidebar-root :deep(.el-menu--collapse) {
-  padding-top: 8px;
+  width: 100%;
+  min-width: 0;
 }
 
 .sidebar-root :deep(.el-menu--collapse .el-menu-item),
 .sidebar-root :deep(.el-menu--collapse .el-sub-menu__title) {
   display: flex;
+  align-items: center;
   justify-content: center;
   padding: 0 !important;
-  width: 100%;
+  width: calc(100% - 12px);
+  margin-left: auto;
+  margin-right: auto;
   box-sizing: border-box;
 }
 
-.sidebar-root :deep(.el-menu--collapse .el-menu-item .el-icon),
-.sidebar-root :deep(.el-menu--collapse .el-sub-menu__title .el-icon) {
+.sidebar-root :deep(.el-menu--collapse .sidebar-menu-icon) {
   margin-right: 0;
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  font-size: 18px;
-  line-height: 1;
   opacity: 1;
   visibility: visible;
 }
 
-.sidebar-root :deep(.el-menu--collapse .el-menu-item .el-icon svg),
-.sidebar-root :deep(.el-menu--collapse .el-sub-menu__title .el-icon svg) {
-  width: 18px;
-  height: 18px;
+.sidebar-root :deep(.el-menu--collapse .el-menu-tooltip__trigger) {
+  width: 100%;
+  height: 100%;
+  padding: 0 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
 }
 
 .sidebar-root.is-collapsed :deep(.el-sub-menu__icon-arrow),

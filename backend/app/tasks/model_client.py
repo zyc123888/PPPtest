@@ -7,6 +7,7 @@ import time
 import httpx
 
 from app.tasks.case_generation_runtime import record_model_call
+from app.tasks.case_generation_v2_support.async_runtime import shared_http_client
 
 
 async def call_json_chat_completion(
@@ -46,28 +47,37 @@ async def call_json_chat_completion(
         "estimated_cost_usd": None,
     }
     try:
-        async with httpx.AsyncClient() as client:
+        client = await shared_http_client()
+        if client is None:
+            async with httpx.AsyncClient() as transient_client:
+                response = await transient_client.post(
+                    endpoint,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=timeout_seconds,
+                )
+        else:
             response = await client.post(
                 endpoint,
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json=payload,
                 timeout=timeout_seconds,
             )
-            response.raise_for_status()
-            response_payload = response.json()
-            choice = response_payload["choices"][0]
-            record_model_call(
-                {
-                    **trace_base,
-                    "status": "success",
-                    "duration_ms": int((time.perf_counter() - started) * 1000),
-                    "finish_reason": choice.get("finish_reason"),
-                    "provider_request_id": response.headers.get("x-request-id") or response.headers.get("request-id"),
-                    "usage": response_payload.get("usage") or {},
-                    "response_chars": len(str(choice.get("message", {}).get("content") or "")),
-                }
-            )
-            return choice["message"]["content"]
+        response.raise_for_status()
+        response_payload = response.json()
+        choice = response_payload["choices"][0]
+        record_model_call(
+            {
+                **trace_base,
+                "status": "success",
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+                "finish_reason": choice.get("finish_reason"),
+                "provider_request_id": response.headers.get("x-request-id") or response.headers.get("request-id"),
+                "usage": response_payload.get("usage") or {},
+                "response_chars": len(str(choice.get("message", {}).get("content") or "")),
+            }
+        )
+        return choice["message"]["content"]
     except httpx.ReadTimeout as exc:
         record_model_call(
             {

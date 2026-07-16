@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     report_output_dir: str = "reports"
     case_generation_rules_dir: str = ""
     case_generation_unified_rules_dir: str = ""
+    ui_case_skill_dir: str = "ui_case_skills"
+    ui_case_ai_timeout_seconds: float = 120.0
+    ui_case_ai_max_tokens: int = 5000
     auto_bootstrap_on_startup: bool = True
     seed_demo_data_on_bootstrap: bool = False
     bootstrap_max_retries: int = 30

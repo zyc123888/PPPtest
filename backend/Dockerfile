@@ -27,6 +27,7 @@ RUN apt-get update \
 COPY app ./app
 COPY claw_5skill_final ./claw_5skill_final
 COPY claw_5skill_unified ./claw_5skill_unified
+COPY ui_case_skills ./ui_case_skills
 COPY tests ./tests
 COPY pytest.ini ./pytest.ini
 

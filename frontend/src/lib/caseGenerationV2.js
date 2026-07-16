@@ -18,6 +18,11 @@ export function getCaseGenerationV2JobDetail(jobId) {
   return api.get(`/case-generation-v2/jobs/${jobId}`)
 }
 
+export function getCaseGenerationV2MetricsComparison(jobId, baselineJobId = null) {
+  const query = baselineJobId ? `?baseline_job_id=${baselineJobId}` : ''
+  return api.get(`/case-generation-v2/jobs/${jobId}/metrics-comparison${query}`)
+}
+
 export function createCaseGenerationV2Job(payload) {
   return api.post('/case-generation-v2/jobs', payload)
 }
@@ -47,7 +52,7 @@ export function cancelCaseGenerationV2Job(jobId) {
 }
 
 export function downloadCaseGenerationV2Artifact(jobId, artifactId) {
-  return api.getBlob(`/case-generation-v2/jobs/${jobId}/artifacts/${artifactId}/download`)
+  return api.getBlob(`/case-generation-v2/jobs/${jobId}/artifacts/${artifactId}/download?_=${Date.now()}`)
 }
 
 export function getCaseGenerationV2Artifact(jobId, artifactId) {
@@ -81,6 +86,7 @@ const ARTIFACT_LABELS = {
   xmind: 'XMind',
   final_delivery_gate: '交付门禁',
   model_call_trace: '模型调用追踪',
+  generation_metrics: '运行指标',
   xmind_export_log: 'XMind Log'
 }
 
