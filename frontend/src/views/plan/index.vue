@@ -61,10 +61,20 @@
         <el-table-column label="计划名称" prop="name" min-width="200" show-overflow-tooltip />
         <el-table-column label="说明" prop="description" min-width="220" show-overflow-tooltip />
         <el-table-column label="状态" prop="status" width="120" align="center" />
-        <el-table-column label="操作" align="center" width="300">
+        <el-table-column label="定时调度" min-width="170" align="center">
+          <template #default="scope">
+            <template v-if="scope.row.schedule_enabled">
+              <div class="schedule-cron">{{ scope.row.schedule_cron }}</div>
+              <div class="schedule-next">下次：{{ formatDateTime(scope.row.next_run_at) }}</div>
+            </template>
+            <span v-else>—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" align="center" width="360">
           <template #default="scope">
             <el-button v-if="canTest" size="small" @click="openCaseDialog(scope.row)">用例配置</el-button>
             <el-button v-if="canTest" size="small" type="primary" @click="openRunDialog(scope.row)">执行计划</el-button>
+            <el-button v-if="canTest" size="small" @click="openScheduleDialog(scope.row)">定时执行</el-button>
             <el-dropdown v-if="canAdmin" @command="(cmd) => handlePlanCommand(cmd, scope.row)">
               <el-button size="small">
                 更多
@@ -294,6 +304,39 @@
         <el-button type="primary" @click="submitRun">确认执行</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="scheduleDialogVisible" title="定时执行配置" width="560px">
+      <el-form label-position="top">
+        <el-form-item label="启用定时执行">
+          <el-switch v-model="scheduleForm.schedule_enabled" />
+        </el-form-item>
+        <template v-if="scheduleForm.schedule_enabled">
+          <el-form-item label="cron 表达式（5 段，按北京时间）" required>
+            <div class="schedule-cron-row">
+              <el-input v-model="scheduleForm.schedule_cron" placeholder="例如 0 2 * * *" style="width: 240px" />
+              <el-select placeholder="常用预设" style="width: 190px" @change="applyCronPreset">
+                <el-option v-for="item in cronPresets" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+            </div>
+          </el-form-item>
+          <el-form-item label="默认执行环境">
+            <el-select v-model="scheduleForm.schedule_environment_id" clearable placeholder="默认项目基础地址" style="width: 100%">
+              <el-option v-for="item in environments" :key="item.id" :label="item.name" :value="item.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="单用例超时（秒，可选）">
+            <el-input-number v-model="scheduleForm.schedule_timeout_seconds" :min="1" :max="7200" placeholder="默认" />
+          </el-form-item>
+          <el-form-item label="失败重试次数">
+            <el-input-number v-model="scheduleForm.schedule_max_retries" :min="0" :max="3" />
+          </el-form-item>
+        </template>
+      </el-form>
+      <template #footer>
+        <el-button @click="scheduleDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="scheduleSaving" @click="submitSchedule">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -353,6 +396,23 @@ const caseFilter = reactive({
 const runForm = reactive({
   environment_id: undefined
 })
+
+const scheduleDialogVisible = ref(false)
+const scheduleSaving = ref(false)
+const scheduleForm = reactive({
+  schedule_enabled: false,
+  schedule_cron: '',
+  schedule_environment_id: undefined,
+  schedule_timeout_seconds: undefined,
+  schedule_max_retries: 0
+})
+
+const cronPresets = [
+  { label: '每天 02:00', value: '0 2 * * *' },
+  { label: '每小时整点', value: '0 * * * *' },
+  { label: '工作日 09:00', value: '0 9 * * 1-5' },
+  { label: '每分钟（调试）', value: '* * * * *' }
+]
 
 const planCases = ref([])
 const precheckResult = ref(null)
@@ -771,6 +831,54 @@ const handlePlanCommand = async (command, row) => {
   }
 }
 
+const formatDateTime = (value) => {
+  if (!value) return '-'
+  // 后端存 UTC naive，补上 Z 后按本地时区展示
+  const date = new Date(value.endsWith('Z') ? value : `${value}Z`)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
+const applyCronPreset = (value) => {
+  scheduleForm.schedule_cron = value
+}
+
+const openScheduleDialog = async (plan) => {
+  currentPlan.value = plan
+  scheduleForm.schedule_enabled = !!plan.schedule_enabled
+  scheduleForm.schedule_cron = plan.schedule_cron || ''
+  scheduleForm.schedule_environment_id = plan.schedule_environment_id || undefined
+  scheduleForm.schedule_timeout_seconds = plan.schedule_timeout_seconds || undefined
+  scheduleForm.schedule_max_retries = plan.schedule_max_retries || 0
+  await loadCaseAssets(plan.project_id)
+  scheduleDialogVisible.value = true
+}
+
+const submitSchedule = async () => {
+  if (!currentPlan.value) return
+  if (scheduleForm.schedule_enabled && !scheduleForm.schedule_cron.trim()) {
+    ElMessage.warning('请填写 cron 表达式')
+    return
+  }
+  scheduleSaving.value = true
+  try {
+    await api.put(`/test-plans/${currentPlan.value.id}/schedule`, {
+      schedule_enabled: scheduleForm.schedule_enabled,
+      schedule_cron: scheduleForm.schedule_enabled ? scheduleForm.schedule_cron.trim() : null,
+      schedule_environment_id: scheduleForm.schedule_enabled ? scheduleForm.schedule_environment_id || null : null,
+      schedule_timeout_seconds: scheduleForm.schedule_enabled ? scheduleForm.schedule_timeout_seconds || null : null,
+      schedule_max_retries: scheduleForm.schedule_enabled ? scheduleForm.schedule_max_retries : 0
+    })
+    ElMessage.success(scheduleForm.schedule_enabled ? '定时执行已启用' : '定时执行已停用')
+    scheduleDialogVisible.value = false
+    getList()
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    scheduleSaving.value = false
+  }
+}
+
 watch(() => caseForm.case_type, () => {
   caseForm.case_id = undefined
 })
@@ -837,6 +945,22 @@ onMounted(() => {
   align-items: center;
   gap: 12px;
   margin-top: 8px;
+}
+
+.schedule-cron {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+
+.schedule-next {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.schedule-cron-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
 }
 
 .precheck-panel {

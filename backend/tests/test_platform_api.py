@@ -2153,6 +2153,62 @@ def test_case_generation_v2_requirement_gate_rejects_current_only_target_claim()
     ) is True
 
 
+def test_case_generation_v2_requirement_gate_accepts_mixed_quote_with_full_target_text() -> None:
+    import app.tasks.case_generation_v2 as v2
+
+    current_text = "目前交互方式：按钮关闭时会清空历史限制值"
+    target_text = "优化后的交互方式：按钮关闭时不修改限制，保存其他修改且不弹出二次确认框"
+    mixed_quote = f"{current_text}\n{target_text}"
+    scope = _trusted_scope_fixture(("SRC-001",), method="decision_table", must_cover="系统版本限制开关")
+    source_evidence = {
+        "source_doc_id": "DOC-001",
+        "source_excerpt": mixed_quote,
+        "source_content_sha256": "sha",
+        "evidence_refs": ["DOC-001"],
+        "source_state_semantics": {
+            "has_state_transition": True,
+            "current_text": current_text,
+            "target_text": target_text,
+            "current_image_refs": [],
+            "target_image_refs": [],
+            "image_role_by_id": {},
+        },
+    }
+    scope["source_blocks"][0].update(source_evidence)
+    scope["shards"][0].update(source_evidence)
+    requirement = v2._normalize_trusted_requirement_handoff(scope, {
+        "scope_index_consumption": [{
+            "source_id": "SRC-001",
+            "result": "converted_to_function_points",
+            "fp_ids": ["FP-028"],
+        }],
+        "function_points": [{
+            "fp_id": "FP-028",
+            "source_id": "SRC-001",
+            "title": "系统版本限制开关交互优化",
+            "description": target_text,
+            "rules": ["按钮关闭时保存其他修改且不弹出二次确认框"],
+            "test_hints": ["验证关闭分支"],
+            "source_quotes": [mixed_quote],
+            "target_evidence_refs": [],
+        }],
+        "pending_confirmations": [],
+    })
+
+    source = v2._source_by_id(scope, "SRC-001")
+    gate = v2._validate_trusted_requirement_handoff(scope, requirement)
+
+    assert v2._source_evidence_role(source, basis_type="text", source_quote=mixed_quote) == "unspecified"
+    assert v2._source_quote_contains_target_evidence(source, mixed_quote) is True
+    assert gate["passed"] is True
+    assert "FP_TARGET_EVIDENCE_MISSING" not in {item["code"] for item in gate["issues"]}
+
+    requirement["function_points"][0]["source_quotes"] = [current_text]
+    gate = v2._validate_trusted_requirement_handoff(scope, requirement)
+    assert gate["passed"] is False
+    assert "FP_TARGET_EVIDENCE_MISSING" in {item["code"] for item in gate["issues"]}
+
+
 def test_case_generation_v2_state_repair_converges_old_position_to_target_evidence() -> None:
     import app.tasks.case_generation_v2 as v2
 
@@ -2705,6 +2761,69 @@ def test_case_generation_v2_semantic_review_blocks_unsupported_assertions(monkey
 
     assert review["summary"]["release_readiness"] == "fail"
     assert review["summary"]["unsupported_assertion_count"] == 1
+
+
+def test_case_generation_v2_semantic_review_allows_partial_selection_current_branch(monkeypatch) -> None:
+    """回归：改造只针对全选分支时，部分选中用例引用 current 图片证据不应被判为旧状态误作预期。"""
+    import app.tasks.case_generation_v2 as v2
+
+    async def fake_review(**kwargs):
+        return {
+            "summary": {"release_readiness": "pass", "overall_score": 90},
+            "coverage": {"fp_covered": 1, "fp_total": 1, "uncovered_fp_ids": []},
+            "method_coverage": {"ui_display": "covered"},
+            "dimension_matrix": {"functional": "covered"},
+            "semantic_consistency": [{"case_id": "TC-001", "source_id": "SRC-001", "status": "supported"}],
+            # 即便模型误报，交付检测器也应按场景维度放行
+            "findings": [{
+                "finding_id": "F-001", "severity": "critical", "type": "current_state_as_expected",
+                "source_id": "SRC-001", "case_id": "TC-001", "fp_id": "FP-001",
+                "message": "旧状态被写成预期", "suggestion": "改用 target",
+            }],
+            "repair_tasks": [],
+        }
+
+    monkeypatch.setattr(v2, "_call_skill_with_gate_async", fake_review)
+    function_points = {"function_points": [{
+        "fp_id": "FP-001",
+        "source_id": "SRC-001",
+        "source_excerpt": "Manual Select 无论是否全选均展示小标签；全选时应收起小标签仅展示大标签",
+        "source_quotes": [],
+        "source_state_semantics": {
+            "has_state_transition": True,
+            "current_text": "选择 Manual Select 时，无论是否全选，均展示小标签而不展示大标签",
+            "target_text": "全选时自动收起小标签，仅展示所属的大标签",
+            "image_role_by_id": {"IMG-001": "current"},
+        },
+    }]}
+    testcase_package = {"testcases": [{
+        "case_id": "TC-001",
+        "source_id": "SRC-001",
+        "fp_id": "FP-001",
+        "priority": "P1",
+        "title": "Manual Select 部分选中时展示实际选中的小标签",
+        "scenario_dimensions": ["非全选状态"],
+        "expected_results": ["输入框展示实际选中的小标签，不展示大标签名称"],
+        "assertion_basis": [{
+            "expected_result": "输入框展示实际选中的小标签，不展示大标签名称",
+            "basis_type": "image",
+            "basis_ref": "IMG-001",
+            "source_quote": "底部展示实际选中的小标签",
+            "evidence_role": "current",
+        }],
+    }]}
+    review = v2._build_trusted_semantic_review(
+        {"image_link_count": 0, "status": "complete"},
+        function_points,
+        testcase_package,
+        [],
+        api_key="sk-test",
+        model="test-model",
+        base_url="http://example.invalid/v1",
+    )
+
+    assert review["summary"]["current_state_as_expected_count"] == 0
+    assert review["summary"]["release_readiness"] != "fail"
 
 
 def test_case_generation_v2_json_parser_prefers_final_complete_object() -> None:
@@ -3534,7 +3653,166 @@ def test_admin_can_manage_users(client) -> None:
 
     with TestClient(client.app, base_url="http://testserver/api/v1") as anonymous_client:
         disabled_login = anonymous_client.post("/auth/login", json={"username": username, "password": "tester456"})
-        assert disabled_login.status_code == 401
+        assert disabled_login.status_code == 403
+        assert "账号已停用" in disabled_login.json()["detail"]
+
+
+def test_disabled_user_old_token_rejected(client) -> None:
+    username = f"disable_token_{time.time_ns()}"
+    create_response = client.post(
+        "/users",
+        json={"username": username, "password": "token123", "role": "tester"},
+    )
+    assert create_response.status_code == 201
+    user_id = create_response.json()["id"]
+
+    with TestClient(client.app, base_url="http://testserver/api/v1") as user_client:
+        login_response = user_client.post("/auth/login", json={"username": username, "password": "token123"})
+        assert login_response.status_code == 200
+        user_client.headers.update({"Authorization": f"Bearer {login_response.json()['token']}"})
+        assert user_client.get("/auth/me").status_code == 200
+
+        disable_response = client.put(f"/users/{user_id}", json={"status": "DISABLED"})
+        assert disable_response.status_code == 200
+
+        assert user_client.get("/auth/me").status_code == 401
+
+
+def test_create_user_status_and_field_validation(client) -> None:
+    username = f"disabled_create_{time.time_ns()}"
+    create_response = client.post(
+        "/users",
+        json={"username": username, "password": "secret123", "role": "viewer", "status": "DISABLED"},
+    )
+    assert create_response.status_code == 201
+    assert create_response.json()["status"] == "DISABLED"
+
+    with TestClient(client.app, base_url="http://testserver/api/v1") as anonymous_client:
+        login_response = anonymous_client.post("/auth/login", json={"username": username, "password": "secret123"})
+        assert login_response.status_code == 403
+
+    duplicate_response = client.post(
+        "/users",
+        json={"username": username, "password": "secret123", "role": "viewer"},
+    )
+    assert duplicate_response.status_code == 400
+
+    invalid_role = client.post(
+        "/users",
+        json={"username": f"bad_role_{time.time_ns()}", "password": "secret123", "role": "superuser"},
+    )
+    assert invalid_role.status_code == 422
+
+    invalid_status = client.post(
+        "/users",
+        json={"username": f"bad_status_{time.time_ns()}", "password": "secret123", "status": "PAUSED"},
+    )
+    assert invalid_status.status_code == 422
+
+    missing_password = client.post("/users", json={"username": f"no_pwd_{time.time_ns()}"})
+    assert missing_password.status_code == 422
+
+
+def test_admin_cannot_disable_demote_or_delete_self(client) -> None:
+    me = client.get("/auth/me")
+    assert me.status_code == 200
+    admin_id = me.json()["id"]
+
+    disable_self = client.put(f"/users/{admin_id}", json={"status": "DISABLED"})
+    assert disable_self.status_code == 400
+
+    demote_self = client.put(f"/users/{admin_id}", json={"role": "tester"})
+    assert demote_self.status_code == 400
+
+    delete_self = client.delete(f"/users/{admin_id}")
+    assert delete_self.status_code == 400
+
+
+def test_change_password_flow(client) -> None:
+    username = f"chpwd_{time.time_ns()}"
+    create_response = client.post(
+        "/users",
+        json={"username": username, "password": "oldpass123", "role": "tester"},
+    )
+    assert create_response.status_code == 201
+
+    first_client = TestClient(client.app, base_url="http://testserver/api/v1")
+    first_login = first_client.post("/auth/login", json={"username": username, "password": "oldpass123"})
+    assert first_login.status_code == 200
+    first_client.headers.update({"Authorization": f"Bearer {first_login.json()['token']}"})
+
+    second_client = TestClient(client.app, base_url="http://testserver/api/v1")
+    second_login = second_client.post("/auth/login", json={"username": username, "password": "oldpass123"})
+    assert second_login.status_code == 200
+    second_client.headers.update({"Authorization": f"Bearer {second_login.json()['token']}"})
+
+    wrong_old = first_client.post(
+        "/auth/change-password",
+        json={"old_password": "wrongpass", "new_password": "newpass123"},
+    )
+    assert wrong_old.status_code == 400
+
+    change_response = first_client.post(
+        "/auth/change-password",
+        json={"old_password": "oldpass123", "new_password": "newpass123"},
+    )
+    assert change_response.status_code == 204
+
+    # 当前 token 保留，其他 token 被吊销
+    assert first_client.get("/auth/me").status_code == 200
+    assert second_client.get("/auth/me").status_code == 401
+
+    with TestClient(client.app, base_url="http://testserver/api/v1") as anonymous_client:
+        old_login = anonymous_client.post("/auth/login", json={"username": username, "password": "oldpass123"})
+        assert old_login.status_code == 401
+        new_login = anonymous_client.post("/auth/login", json={"username": username, "password": "newpass123"})
+        assert new_login.status_code == 200
+
+
+def test_delete_user_revokes_access_and_requires_admin(client) -> None:
+    username = f"delete_me_{time.time_ns()}"
+    create_response = client.post(
+        "/users",
+        json={"username": username, "password": "delete123", "role": "tester"},
+    )
+    assert create_response.status_code == 201
+    user_id = create_response.json()["id"]
+
+    victim_client = TestClient(client.app, base_url="http://testserver/api/v1")
+    victim_login = victim_client.post("/auth/login", json={"username": username, "password": "delete123"})
+    assert victim_login.status_code == 200
+    victim_client.headers.update({"Authorization": f"Bearer {victim_login.json()['token']}"})
+
+    # 非 admin 无权调用用户管理接口
+    assert victim_client.get("/users").status_code == 403
+    assert victim_client.delete(f"/users/{user_id}").status_code == 403
+
+    # 被删用户创建过业务数据（created_by 外键引用），删除用户后数据应保留且引用置空
+    project_response = victim_client.post(
+        "/projects",
+        json={"name": f"待删用户项目_{time.time_ns()}", "base_url": "http://example.com"},
+    )
+    assert project_response.status_code == 201
+    project_id = project_response.json()["id"]
+    assert project_response.json()["created_by"] == user_id
+
+    delete_response = client.delete(f"/users/{user_id}")
+    assert delete_response.status_code == 204
+
+    projects = client.get("/projects")
+    assert projects.status_code == 200
+    orphan_project = next(item for item in projects.json() if item["id"] == project_id)
+    assert orphan_project["created_by"] is None
+    assert orphan_project["updated_by"] is None
+
+    assert victim_client.get("/auth/me").status_code == 401
+    users = client.get("/users")
+    assert users.status_code == 200
+    assert all(user["id"] != user_id for user in users.json())
+
+    with TestClient(client.app, base_url="http://testserver/api/v1") as anonymous_client:
+        deleted_login = anonymous_client.post("/auth/login", json={"username": username, "password": "delete123"})
+        assert deleted_login.status_code == 401
 
 
 def test_legacy_password_hash_upgrades_on_login(client) -> None:
@@ -4132,6 +4410,143 @@ def test_ui_case_rejects_unsupported_workflow_action(client) -> None:
     assert "步骤类型不支持" in response.text
 
 
+def test_ui_case_schema_accepts_semantic_target_and_execution_modes() -> None:
+    from app import schemas
+
+    for mode in ("stable", "adaptive", "explore", "visual"):
+        payload = schemas.UICaseCreate(
+            project_id=1,
+            name=f"语义 UI 用例 {mode}",
+            target_url="https://example.com",
+            expect_text="完成",
+            execution_mode=mode,
+            self_heal_enabled=mode == "adaptive",
+            steps_json=[
+                {
+                    "action": "click",
+                    "target": "登录按钮",
+                    "role": "button",
+                    "accessible_name": "登录",
+                }
+            ],
+            assertions_json=[
+                {
+                    "type": "visual",
+                    "target": "登录表单",
+                    "value": "表单完整可见且没有遮挡",
+                }
+            ],
+        )
+        assert payload.execution_mode == mode
+
+
+def test_ui_case_runtime_origin_and_prohibited_action_guards() -> None:
+    import pytest
+
+    from app.ui_case_runtime import (
+        build_allowed_origins,
+        ensure_allowed_url,
+        prohibited_candidate,
+    )
+
+    origins = build_allowed_origins(
+        "https://example.com/login",
+        "https://example.com",
+        ["https://static.example.com"],
+    )
+    ensure_allowed_url("https://example.com/dashboard", origins)
+    ensure_allowed_url("https://static.example.com/help", origins)
+    with pytest.raises(ValueError, match="不在允许域名"):
+        ensure_allowed_url("https://evil.example.net", origins)
+    assert prohibited_candidate({"text": "删除账号"}, []) == "删除"
+
+
+def test_ui_case_runtime_rejects_semantically_wrong_healing_candidates() -> None:
+    import pytest
+
+    from app.ui_case_runtime import validate_healing_candidate
+
+    login_candidates = [
+        {
+            "candidate_id": "OMNI-1",
+            "tag": "input",
+            "placeholder": "Username",
+            "text": "",
+            "type": "text",
+        },
+        {
+            "candidate_id": "OMNI-2",
+            "tag": "input",
+            "placeholder": "Password",
+            "text": "",
+            "type": "password",
+        },
+        {
+            "candidate_id": "OMNI-3",
+            "tag": "button",
+            "placeholder": "",
+            "text": "Login",
+            "type": "submit",
+        },
+    ]
+    with pytest.raises(ValueError, match="当前页面看起来是登录页"):
+        validate_healing_candidate(
+            {"action": "fill", "target": "搜索框"},
+            login_candidates[0],
+            candidates=login_candidates,
+        )
+    with pytest.raises(ValueError, match="当前页面看起来是登录页"):
+        validate_healing_candidate(
+            {"action": "click", "target": "查询按钮"},
+            login_candidates[2],
+            candidates=login_candidates,
+        )
+
+    validate_healing_candidate(
+        {"action": "fill", "target": "搜索框"},
+        {
+            "candidate_id": "OMNI-4",
+            "tag": "input",
+            "placeholder": "Search",
+            "text": "",
+            "type": "text",
+        },
+    )
+
+
+def test_ui_case_runtime_rejects_non_text_fill_candidate() -> None:
+    import pytest
+
+    from app.ui_case_runtime import validate_healing_candidate
+
+    with pytest.raises(ValueError, match="不是可输入控件"):
+        validate_healing_candidate(
+            {"action": "fill", "target": "搜索框"},
+            {"candidate_id": "OMNI-1", "tag": "button", "text": "Search"},
+        )
+
+
+def test_ui_case_runtime_rejects_login_page_before_model_call(monkeypatch) -> None:
+    import pytest
+
+    import app.ui_case_runtime as runtime
+
+    def unexpected_model_call(**kwargs):
+        raise AssertionError("login context mismatch should not call the model")
+
+    monkeypatch.setattr(runtime, "call_runtime_model", unexpected_model_call)
+    with pytest.raises(ValueError, match="当前页面看起来是登录页"):
+        runtime.choose_healing_candidate(
+            model_config=SimpleNamespace(api_key="x", model="x", base_url="https://example.com"),
+            step={"action": "fill", "target": "搜索框"},
+            candidates=[
+                {"candidate_id": "OMNI-1", "tag": "input", "placeholder": "Username"},
+                {"candidate_id": "OMNI-2", "tag": "input", "placeholder": "Password"},
+                {"candidate_id": "OMNI-3", "tag": "button", "text": "Login"},
+            ],
+        )
+
+
 def test_ui_case_ai_skill_generates_reviewable_draft_and_persists_source(client, monkeypatch) -> None:
     from app import schemas
     from app.core.database import SessionLocal
@@ -4250,6 +4665,43 @@ def test_ui_case_ai_gate_rejects_cross_origin_navigation() -> None:
         raise AssertionError("cross-origin AI navigation should be rejected")
 
 
+def test_ui_case_ai_gate_fills_missing_text_values_from_expect_text() -> None:
+    from app import schemas
+    from app.ui_case_ai import _gate_generated_payload
+
+    request = schemas.UICaseAIGenerateRequest(
+        project_id=1,
+        target_url="https://example.com",
+        goal="等待并验证成功文案",
+    )
+    payload = {
+        "name": "文本等待补全",
+        "folder_path": "AI生成",
+        "target_url": "https://example.com",
+        "priority": "P2",
+        "expect_text": "操作成功",
+        "tags_json": [],
+        "steps_json": [
+            {"action": "goto", "value": "https://example.com"},
+            {"action": "wait_for_text", "name": "等待结果出现"},
+        ],
+        "assertions_json": [{"type": "text_visible", "name": "结果可见"}],
+        "design_notes": [],
+        "warnings": [],
+    }
+
+    gated, warnings, _ = _gate_generated_payload(
+        payload,
+        request,
+        project_base_url="https://example.com",
+    )
+
+    assert gated["steps_json"][1]["value"] == "操作成功"
+    assert gated["assertions_json"][0]["value"] == "操作成功"
+    assert len([item for item in warnings if "已使用期望文本" in item]) == 2
+    schemas.UICaseCreate(**gated)
+
+
 def test_ui_case_ai_skill_cannot_bypass_supported_action_schema(monkeypatch) -> None:
     from app import schemas
     import app.ui_case_ai as ui_case_ai
@@ -4319,7 +4771,7 @@ def test_ui_case_precheck_includes_assertion_variables(client) -> None:
 def test_ui_case_auto_navigates_executes_assertions_and_filters_runs(client, monkeypatch) -> None:
     from app.tasks import executions
 
-    observed = {"goto": [], "filled": []}
+    observed = {"goto": [], "filled": [], "wait_for_function": []}
 
     class FakeLocator:
         def __init__(self, selector):
@@ -4343,8 +4795,9 @@ def test_ui_case_auto_navigates_executes_assertions_and_filters_runs(client, mon
         def locator(self, selector):
             return FakeLocator(selector)
 
-        def wait_for_function(self, expression, value, timeout=None):
-            assert value in self.url
+        def wait_for_function(self, expression, *, arg=None, timeout=None):
+            observed["wait_for_function"].append((expression, arg, timeout))
+            assert arg in self.url
 
         def screenshot(self, full_page=True, **kwargs):
             return b"fake-image"
@@ -4381,7 +4834,10 @@ def test_ui_case_auto_navigates_executes_assertions_and_filters_runs(client, mon
             "name": f"结构化 UI 用例_{time.time_ns()}",
             "target_url": "http://frontend:3000/login",
             "steps_json": [{"action": "fill", "selector": "#username", "value": "tester"}],
-            "assertions_json": [{"type": "selector_visible", "selector": "#username"}],
+            "assertions_json": [
+                {"type": "selector_visible", "selector": "#username"},
+                {"type": "url_contains", "value": "frontend:3000"},
+            ],
             "expect_text": "登录",
         },
     )
@@ -4394,7 +4850,8 @@ def test_ui_case_auto_navigates_executes_assertions_and_filters_runs(client, mon
         {"action": "fill", "selector": "#username", "value": "tester"}
     ]
     assert exported_case["assertions_json"] == [
-        {"type": "selector_visible", "selector": "#username"}
+        {"type": "selector_visible", "selector": "#username"},
+        {"type": "url_contains", "value": "frontend:3000"},
     ]
     assert exported_case["expect_text"] == "登录"
 
@@ -4404,6 +4861,11 @@ def test_ui_case_auto_navigates_executes_assertions_and_filters_runs(client, mon
     assert run["status"] == "SUCCESS"
     assert observed["goto"] == ["http://frontend:3000/login"]
     assert observed["filled"] == [("#username", "tester")]
+    assert len(observed["wait_for_function"]) == 1
+    expression, argument, timeout = observed["wait_for_function"][0]
+    assert expression == "expected => window.location.href.includes(expected)"
+    assert argument == "frontend:3000"
+    assert timeout > 0
     assert any(step["detail"].get("kind") == "assertion" for step in run["step_results_json"])
 
     filtered = client.get(f"/executions/runs?case_type=UI&case_id={case_id}&limit=10")
@@ -5398,9 +5860,9 @@ def test_api_case_update_bumps_version_and_review_status(client) -> None:
     )
     assert update_response.status_code == 200
     payload = update_response.json()
-    assert payload["review_status"] == "IN_REVIEW"
+    # 评审状态不再允许通过 PUT 直接写入
+    assert payload["review_status"] == "DRAFT"
     assert payload["version_no"] == "1.0.1"
-    assert payload["review_note"] == "接口字段已调整，等待复核"
     assert payload["path"] == "/api/v1/system/info"
 
 
@@ -5440,7 +5902,8 @@ def test_ui_case_update_bumps_version_and_review_status(client) -> None:
     )
     assert update_response.status_code == 200
     payload = update_response.json()
-    assert payload["review_status"] == "APPROVED"
+    # 评审状态不再允许通过 PUT 直接写入
+    assert payload["review_status"] == "DRAFT"
     assert payload["version_no"] == "1.0.1"
     assert payload["target_url"].endswith("/login")
 
@@ -5494,7 +5957,8 @@ def test_performance_case_update_bumps_version_and_review_status(client) -> None
     )
     assert update_response.status_code == 200
     payload = update_response.json()
-    assert payload["review_status"] == "IN_REVIEW"
+    # 评审状态不再允许通过 PUT 直接写入
+    assert payload["review_status"] == "DRAFT"
     assert payload["version_no"] == "1.0.1"
     assert payload["method"] == "POST"
 
@@ -6050,7 +6514,7 @@ def test_execution_retry_result_preserves_ui_error_and_has_complete_shape() -> N
     )
 
     assert result["status"] == "FAILED"
-    assert result["summary"] == "执行异常: 登录按钮未在超时时间内显示"
+    assert result["summary"] == "执行失败: 登录按钮未在超时时间内显示"
     assert result["error_type"] == "ASSERTION"
     assert result["request_payload"] is None
     assert result["response_payload"] is None
@@ -6073,3 +6537,1171 @@ def test_execution_retry_result_preserves_ui_error_and_has_complete_shape() -> N
     assert timeout_result["status"] == "TIMEOUT"
     assert timeout_result["error_type"] == "TIMEOUT"
     assert timeout_result["exit_code"] == 124
+
+def _make_ui_case_payload(project_id: int, name: str, folder_path: str | None = None) -> dict:
+    return {
+        "project_id": project_id,
+        "name": name,
+        "folder_path": folder_path,
+        "target_url": "http://frontend:3000",
+        "expect_text": "自动化测试平台",
+        "steps_json": [{"action": "goto", "value": "http://frontend:3000"}],
+    }
+
+
+def test_ui_case_folder_tree_and_rename(client) -> None:
+    project = client.post(
+        "/projects",
+        json={"name": f"UI目录项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()
+    project_id = project["id"]
+    for name, folder in (
+        ("树用例A", "登录/核心流程"),
+        ("树用例B", "登录/核心流程/边界"),
+        ("树用例C", "商品"),
+        ("树用例D", None),
+    ):
+        response = client.post("/ui-cases", json=_make_ui_case_payload(project_id, f"{name}_{time.time_ns()}", folder))
+        assert response.status_code == 201
+
+    tree = client.get(f"/ui-cases/folders?project_id={project_id}")
+    assert tree.status_code == 200
+    payload = tree.json()
+    assert payload["total"] == 4
+    assert payload["ungrouped"] == 1
+    login_node = next(node for node in payload["folders"] if node["name"] == "登录")
+    assert login_node["case_count"] == 2
+    core_node = next(child for child in login_node["children"] if child["name"] == "核心流程")
+    assert core_node["case_count"] == 2
+    assert core_node["children"][0]["name"] == "边界"
+    assert core_node["children"][0]["case_count"] == 1
+
+    rename = client.post(
+        "/ui-cases/folders/rename",
+        json={"project_id": project_id, "old_path": "登录/核心流程", "new_path": "登录/主流程"},
+    )
+    assert rename.status_code == 200
+    assert rename.json()["affected"] == 2
+    renamed = client.get(
+        f"/ui-cases?project_id={project_id}&page=1&page_size=50&folder=登录/主流程"
+    ).json()
+    assert renamed["total"] == 2
+    assert {item["folder_path"] for item in renamed["items"]} == {"登录/主流程", "登录/主流程/边界"}
+
+
+def test_ui_cases_pagination_and_filters(client) -> None:
+    project_id = client.post(
+        "/projects",
+        json={"name": f"UI分页项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()["id"]
+    marker = f"分页标记{time.time_ns()}"
+    for index in range(3):
+        payload = _make_ui_case_payload(project_id, f"{marker}_用例{index}", "分页/组一" if index < 2 else "分页/组二")
+        if index == 0:
+            payload["priority"] = "P0"
+        response = client.post("/ui-cases", json=payload)
+        assert response.status_code == 201
+
+    paged = client.get(f"/ui-cases?project_id={project_id}&page=1&page_size=2")
+    assert paged.status_code == 200
+    payload = paged.json()
+    assert payload["total"] == 3
+    assert len(payload["items"]) == 2
+
+    page2 = client.get(f"/ui-cases?project_id={project_id}&page=2&page_size=2").json()
+    assert len(page2["items"]) == 1
+
+    folder_filtered = client.get(f"/ui-cases?project_id={project_id}&page=1&page_size=10&folder=分页/组一").json()
+    assert folder_filtered["total"] == 2
+    parent_filtered = client.get(f"/ui-cases?project_id={project_id}&page=1&page_size=10&folder=分页").json()
+    assert parent_filtered["total"] == 3
+
+    priority_filtered = client.get(f"/ui-cases?project_id={project_id}&page=1&page_size=10&priority=P0").json()
+    assert priority_filtered["total"] == 1
+
+    keyword_filtered = client.get(f"/ui-cases?project_id={project_id}&page=1&page_size=10&keyword={marker}_用例0").json()
+    assert keyword_filtered["total"] == 1
+
+    legacy = client.get(f"/ui-cases?project_id={project_id}")
+    assert legacy.status_code == 200
+    assert isinstance(legacy.json(), list)
+    assert len(legacy.json()) == 3
+
+
+def test_ui_case_batch_update_and_delete(client) -> None:
+    project_id = client.post(
+        "/projects",
+        json={"name": f"UI批量属性项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()["id"]
+    case_ids = []
+    for index in range(3):
+        response = client.post("/ui-cases", json=_make_ui_case_payload(project_id, f"批量属性用例{index}_{time.time_ns()}"))
+        assert response.status_code == 201
+        case_ids.append(response.json()["id"])
+
+    empty_patch = client.put("/ui-cases/batch", json={"case_ids": case_ids, "patch": {}})
+    assert empty_patch.status_code == 400
+
+    batch_update = client.put(
+        "/ui-cases/batch",
+        json={"case_ids": case_ids, "patch": {"folder_path": "批量/迁移", "priority": "P0"}},
+    )
+    assert batch_update.status_code == 200
+    assert batch_update.json()["affected"] == 3
+    updated = client.get(f"/ui-cases/{case_ids[0]}").json()
+    assert updated["folder_path"] == "批量/迁移"
+    assert updated["priority"] == "P0"
+
+    batch_delete = client.request("DELETE", "/ui-cases/batch", json={"case_ids": case_ids})
+    assert batch_delete.status_code == 200
+    assert batch_delete.json()["affected"] == 3
+    assert client.get(f"/ui-cases/{case_ids[0]}").status_code == 404
+
+
+def test_ui_case_review_flow_blocks_self_review(client) -> None:
+    username = f"review_tester_{time.time_ns()}"
+    create_user = client.post(
+        "/users",
+        json={"username": username, "password": "review123", "display_name": username, "role": "tester"},
+    )
+    assert create_user.status_code == 201
+
+    tester_client = TestClient(client.app, base_url="http://testserver/api/v1")
+    login_response = tester_client.post("/auth/login", json={"username": username, "password": "review123"})
+    assert login_response.status_code == 200
+    tester_client.headers.update({"Authorization": f"Bearer {login_response.json()['token']}"})
+
+    project_id = tester_client.post(
+        "/projects",
+        json={"name": f"评审项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()["id"]
+    case = tester_client.post(
+        "/ui-cases", json=_make_ui_case_payload(project_id, f"评审用例_{time.time_ns()}")
+    ).json()
+    case_id = case["id"]
+
+    premature_decide = client.post(f"/ui-cases/{case_id}/review/decide", json={"result": "APPROVED"})
+    assert premature_decide.status_code == 400
+
+    submit = tester_client.post(f"/ui-cases/{case_id}/review/submit")
+    assert submit.status_code == 200
+    assert submit.json()["review_status"] == "IN_REVIEW"
+    assert submit.json()["submitted_review_at"]
+
+    self_decide = tester_client.post(f"/ui-cases/{case_id}/review/decide", json={"result": "APPROVED"})
+    assert self_decide.status_code == 403
+    assert "不能评审自己创建的用例" in self_decide.text
+
+    decide = client.post(
+        f"/ui-cases/{case_id}/review/decide", json={"result": "APPROVED", "note": "步骤覆盖完整"}
+    )
+    assert decide.status_code == 200
+    payload = decide.json()
+    assert payload["review_status"] == "APPROVED"
+    assert payload["review_note"] == "步骤覆盖完整"
+    assert payload["reviewed_by"]
+    assert payload["reviewed_at"]
+
+    update = client.put(
+        f"/ui-cases/{case_id}",
+        json={
+            "project_id": project_id,
+            "name": case["name"],
+            "target_url": "http://frontend:3000/changed",
+            "expect_text": case["expect_text"],
+            "steps_json": case["steps_json"],
+        },
+    )
+    assert update.status_code == 200
+    reset_payload = update.json()
+    assert reset_payload["review_status"] == "DRAFT"
+    assert reset_payload["reviewed_by"] is None
+    assert reset_payload["reviewed_at"] is None
+
+    resubmit = client.post(f"/ui-cases/{case_id}/review/submit")
+    assert resubmit.status_code == 200
+    assert resubmit.json()["review_status"] == "IN_REVIEW"
+
+    reject = tester_client.post  # noqa: F841  (作者不可评审，改由 admin 拒绝)
+    rejected = client.post(f"/ui-cases/{case_id}/review/decide", json={"result": "REJECTED", "note": "断言不足"})
+    assert rejected.status_code == 200
+    assert rejected.json()["review_status"] == "REJECTED"
+    tester_client.close()
+
+
+def test_ui_batch_run_and_rerun_failed(client, monkeypatch) -> None:
+    from app.tasks import executions
+
+    def fake_execute_ui_case(db, run, case, project, deadline=None):
+        status = "FAILED" if "失败" in case.name else "SUCCESS"
+        return {
+            "status": status,
+            "summary": "模拟执行",
+            "error_type": None if status == "SUCCESS" else "ASSERTION",
+            "exit_code": 0 if status == "SUCCESS" else 1,
+            "stdout_text": None,
+            "stderr_text": None,
+            "artifacts_json": [],
+            "step_results_json": [],
+            "request_payload": None,
+            "response_payload": None,
+        }
+
+    monkeypatch.setattr(executions, "_execute_ui_case", fake_execute_ui_case)
+
+    project_id = client.post(
+        "/projects",
+        json={"name": f"UI批量执行项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()["id"]
+    ok_case = client.post("/ui-cases", json=_make_ui_case_payload(project_id, f"批量成功用例_{time.time_ns()}")).json()
+    bad_case = client.post("/ui-cases", json=_make_ui_case_payload(project_id, f"批量失败用例_{time.time_ns()}")).json()
+
+    other_project_id = client.post(
+        "/projects",
+        json={"name": f"UI批量他项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()["id"]
+    other_case = client.post("/ui-cases", json=_make_ui_case_payload(other_project_id, f"跨项目用例_{time.time_ns()}")).json()
+    cross_project = client.post(
+        "/executions/ui/batch-run", json={"case_ids": [ok_case["id"], other_case["id"]]}
+    )
+    assert cross_project.status_code == 400
+    assert "同一项目" in cross_project.text
+
+    inactive_patch = client.put(
+        "/ui-cases/batch", json={"case_ids": [other_case["id"]], "patch": {"status": "INACTIVE"}}
+    )
+    assert inactive_patch.status_code == 200
+    inactive_run = client.post("/executions/ui/batch-run", json={"case_ids": [other_case["id"]]})
+    assert inactive_run.status_code == 400
+    assert "未启用" in inactive_run.text
+
+    trigger = client.post(
+        "/executions/ui/batch-run", json={"case_ids": [ok_case["id"], bad_case["id"]]}
+    )
+    assert trigger.status_code == 201
+    batch = trigger.json()
+    assert batch["status"] == "FAILED"
+    assert batch["total_count"] == 2
+    assert batch["pass_count"] == 1
+    assert batch["fail_count"] == 1
+
+    listing = client.get(f"/executions/ui/batch-runs?project_id={project_id}")
+    assert listing.status_code == 200
+    assert any(item["id"] == batch["id"] for item in listing.json())
+
+    detail = client.get(f"/executions/ui/batch-runs/{batch['id']}")
+    assert detail.status_code == 200
+    detail_payload = detail.json()
+    assert len(detail_payload["runs"]) == 2
+    assert {run["status"] for run in detail_payload["runs"]} == {"SUCCESS", "FAILED"}
+    assert all(run["batch_run_id"] == batch["id"] for run in detail_payload["runs"])
+
+    latest = client.get(
+        f"/executions/runs/latest?case_type=UI&case_ids={ok_case['id']},{bad_case['id']}"
+    )
+    assert latest.status_code == 200
+    latest_map = {run["case_id"]: run for run in latest.json()}
+    assert latest_map[ok_case["id"]]["status"] == "SUCCESS"
+    assert latest_map[bad_case["id"]]["status"] == "FAILED"
+
+    rerun = client.post(f"/executions/ui/batch-runs/{batch['id']}/rerun-failed")
+    assert rerun.status_code == 201
+    rerun_payload = rerun.json()
+    assert rerun_payload["total_count"] == 1
+    assert rerun_payload["fail_count"] == 1
+
+    all_success = client.post("/executions/ui/batch-run", json={"case_ids": [ok_case["id"]]})
+    assert all_success.status_code == 201
+    assert all_success.json()["status"] == "SUCCESS"
+    no_failed = client.post(f"/executions/ui/batch-runs/{all_success.json()['id']}/rerun-failed")
+    assert no_failed.status_code == 400
+
+    stats = client.get(f"/ui-cases/stats?project_id={project_id}")
+    assert stats.status_code == 200
+    stats_payload = stats.json()
+    assert stats_payload["total"] == 2
+    assert stats_payload["active"] == 2
+    assert stats_payload["recent_success_rate"] is not None
+
+
+def _make_api_case_payload(project_id: int, name: str, folder_path: str | None = None) -> dict:
+    return {
+        "project_id": project_id,
+        "name": name,
+        "folder_path": folder_path,
+        "method": "GET",
+        "path": "/api/v1/system/health",
+        "expected_status": 200,
+    }
+
+
+def test_api_case_folder_tree_and_rename(client) -> None:
+    project = client.post(
+        "/projects",
+        json={"name": f"API目录项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()
+    project_id = project["id"]
+    for name, folder in (
+        ("树用例A", "登录/核心流程"),
+        ("树用例B", "登录/核心流程/边界"),
+        ("树用例C", "商品"),
+        ("树用例D", None),
+    ):
+        response = client.post("/api-cases", json=_make_api_case_payload(project_id, f"{name}_{time.time_ns()}", folder))
+        assert response.status_code == 201
+
+    tree = client.get(f"/api-cases/folders?project_id={project_id}")
+    assert tree.status_code == 200
+    payload = tree.json()
+    assert payload["total"] == 4
+    assert payload["ungrouped"] == 1
+    login_node = next(node for node in payload["folders"] if node["name"] == "登录")
+    assert login_node["case_count"] == 2
+    core_node = next(child for child in login_node["children"] if child["name"] == "核心流程")
+    assert core_node["case_count"] == 2
+    assert core_node["children"][0]["name"] == "边界"
+    assert core_node["children"][0]["case_count"] == 1
+
+    rename = client.post(
+        "/api-cases/folders/rename",
+        json={"project_id": project_id, "old_path": "登录/核心流程", "new_path": "登录/主流程"},
+    )
+    assert rename.status_code == 200
+    assert rename.json()["affected"] == 2
+    renamed = client.get(
+        f"/api-cases?project_id={project_id}&page=1&page_size=50&folder=登录/主流程"
+    ).json()
+    assert renamed["total"] == 2
+    assert {item["folder_path"] for item in renamed["items"]} == {"登录/主流程", "登录/主流程/边界"}
+
+
+def test_api_cases_pagination_and_filters(client) -> None:
+    project_id = client.post(
+        "/projects",
+        json={"name": f"API分页项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()["id"]
+    marker = f"分页标记{time.time_ns()}"
+    for index in range(3):
+        payload = _make_api_case_payload(project_id, f"{marker}_用例{index}", "分页/组一" if index < 2 else "分页/组二")
+        if index == 0:
+            payload["priority"] = "P0"
+        if index == 1:
+            payload["method"] = "POST"
+        response = client.post("/api-cases", json=payload)
+        assert response.status_code == 201
+
+    paged = client.get(f"/api-cases?project_id={project_id}&page=1&page_size=2")
+    assert paged.status_code == 200
+    payload = paged.json()
+    assert payload["total"] == 3
+    assert len(payload["items"]) == 2
+
+    page2 = client.get(f"/api-cases?project_id={project_id}&page=2&page_size=2").json()
+    assert len(page2["items"]) == 1
+
+    folder_filtered = client.get(f"/api-cases?project_id={project_id}&page=1&page_size=10&folder=分页/组一").json()
+    assert folder_filtered["total"] == 2
+    parent_filtered = client.get(f"/api-cases?project_id={project_id}&page=1&page_size=10&folder=分页").json()
+    assert parent_filtered["total"] == 3
+
+    priority_filtered = client.get(f"/api-cases?project_id={project_id}&page=1&page_size=10&priority=P0").json()
+    assert priority_filtered["total"] == 1
+
+    method_filtered = client.get(f"/api-cases?project_id={project_id}&page=1&page_size=10&method=POST").json()
+    assert method_filtered["total"] == 1
+
+    keyword_filtered = client.get(f"/api-cases?project_id={project_id}&page=1&page_size=10&keyword={marker}_用例0").json()
+    assert keyword_filtered["total"] == 1
+
+    legacy = client.get(f"/api-cases?project_id={project_id}")
+    assert legacy.status_code == 200
+    assert isinstance(legacy.json(), list)
+    assert len(legacy.json()) == 3
+
+
+def test_api_case_batch_update_and_delete(client) -> None:
+    project_id = client.post(
+        "/projects",
+        json={"name": f"API批量属性项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()["id"]
+    case_ids = []
+    for index in range(3):
+        response = client.post("/api-cases", json=_make_api_case_payload(project_id, f"批量属性用例{index}_{time.time_ns()}"))
+        assert response.status_code == 201
+        case_ids.append(response.json()["id"])
+
+    empty_patch = client.put("/api-cases/batch", json={"case_ids": case_ids, "patch": {}})
+    assert empty_patch.status_code == 400
+
+    batch_update = client.put(
+        "/api-cases/batch",
+        json={"case_ids": case_ids, "patch": {"folder_path": "批量/迁移", "priority": "P0"}},
+    )
+    assert batch_update.status_code == 200
+    assert batch_update.json()["affected"] == 3
+    listed = client.get(f"/api-cases?project_id={project_id}&page=1&page_size=10&folder=批量/迁移").json()
+    assert listed["total"] == 3
+    assert all(item["priority"] == "P0" for item in listed["items"])
+
+    batch_delete = client.request("DELETE", "/api-cases/batch", json={"case_ids": case_ids})
+    assert batch_delete.status_code == 200
+    assert batch_delete.json()["affected"] == 3
+    remaining = client.get(f"/api-cases?project_id={project_id}&page=1&page_size=10").json()
+    assert remaining["total"] == 0
+
+
+def test_api_case_review_flow_blocks_self_review(client) -> None:
+    username = f"api_review_tester_{time.time_ns()}"
+    create_user = client.post(
+        "/users",
+        json={"username": username, "password": "review123", "display_name": username, "role": "tester"},
+    )
+    assert create_user.status_code == 201
+
+    tester_client = TestClient(client.app, base_url="http://testserver/api/v1")
+    login_response = tester_client.post("/auth/login", json={"username": username, "password": "review123"})
+    assert login_response.status_code == 200
+    tester_client.headers.update({"Authorization": f"Bearer {login_response.json()['token']}"})
+
+    project_id = tester_client.post(
+        "/projects",
+        json={"name": f"API评审项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()["id"]
+    case = tester_client.post(
+        "/api-cases", json=_make_api_case_payload(project_id, f"评审用例_{time.time_ns()}")
+    ).json()
+    case_id = case["id"]
+
+    premature_decide = client.post(f"/api-cases/{case_id}/review/decide", json={"result": "APPROVED"})
+    assert premature_decide.status_code == 400
+
+    submit = tester_client.post(f"/api-cases/{case_id}/review/submit")
+    assert submit.status_code == 200
+    assert submit.json()["review_status"] == "IN_REVIEW"
+    assert submit.json()["submitted_review_at"]
+
+    self_decide = tester_client.post(f"/api-cases/{case_id}/review/decide", json={"result": "APPROVED"})
+    assert self_decide.status_code == 403
+    assert "不能评审自己创建的用例" in self_decide.text
+
+    decide = client.post(
+        f"/api-cases/{case_id}/review/decide", json={"result": "APPROVED", "note": "断言覆盖完整"}
+    )
+    assert decide.status_code == 200
+    payload = decide.json()
+    assert payload["review_status"] == "APPROVED"
+    assert payload["review_note"] == "断言覆盖完整"
+    assert payload["reviewed_by"]
+    assert payload["reviewed_at"]
+
+    update = client.put(
+        f"/api-cases/{case_id}",
+        json={
+            "project_id": project_id,
+            "name": case["name"],
+            "method": "GET",
+            "path": "/api/v1/system/info",
+            "expected_status": 200,
+        },
+    )
+    assert update.status_code == 200
+    reset_payload = update.json()
+    assert reset_payload["review_status"] == "DRAFT"
+    assert reset_payload["reviewed_by"] is None
+    assert reset_payload["reviewed_at"] is None
+
+    resubmit = client.post(f"/api-cases/{case_id}/review/submit")
+    assert resubmit.status_code == 200
+    assert resubmit.json()["review_status"] == "IN_REVIEW"
+
+    rejected = client.post(f"/api-cases/{case_id}/review/decide", json={"result": "REJECTED", "note": "断言不足"})
+    assert rejected.status_code == 200
+    assert rejected.json()["review_status"] == "REJECTED"
+    tester_client.close()
+
+
+def test_api_batch_run_and_rerun_failed(client, monkeypatch) -> None:
+    from app.tasks import executions
+
+    def fake_execute_api_case(db, run, case, project, deadline=None):
+        status = "FAILED" if "失败" in case.name else "SUCCESS"
+        return {
+            "status": status,
+            "summary": "模拟执行",
+            "error_type": None if status == "SUCCESS" else "ASSERTION",
+            "exit_code": 0 if status == "SUCCESS" else 1,
+            "stdout_text": None,
+            "stderr_text": None,
+            "artifacts_json": [],
+            "step_results_json": [],
+            "request_payload": None,
+            "response_payload": None,
+        }
+
+    monkeypatch.setattr(executions, "_execute_api_case", fake_execute_api_case)
+
+    project_id = client.post(
+        "/projects",
+        json={"name": f"API批量执行项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()["id"]
+    ok_case = client.post("/api-cases", json=_make_api_case_payload(project_id, f"批量成功用例_{time.time_ns()}")).json()
+    bad_case = client.post("/api-cases", json=_make_api_case_payload(project_id, f"批量失败用例_{time.time_ns()}")).json()
+
+    other_project_id = client.post(
+        "/projects",
+        json={"name": f"API批量他项目_{time.time_ns()}", "base_url": "http://example.com"},
+    ).json()["id"]
+    other_case = client.post("/api-cases", json=_make_api_case_payload(other_project_id, f"跨项目用例_{time.time_ns()}")).json()
+    cross_project = client.post(
+        "/executions/api/batch-run", json={"case_ids": [ok_case["id"], other_case["id"]]}
+    )
+    assert cross_project.status_code == 400
+    assert "同一项目" in cross_project.text
+
+    trigger = client.post(
+        "/executions/api/batch-run", json={"case_ids": [ok_case["id"], bad_case["id"]]}
+    )
+    assert trigger.status_code == 201
+    batch = trigger.json()
+    assert batch["case_type"] == "API"
+    assert batch["status"] == "FAILED"
+    assert batch["total_count"] == 2
+    assert batch["pass_count"] == 1
+    assert batch["fail_count"] == 1
+
+    listing = client.get(f"/executions/api/batch-runs?project_id={project_id}")
+    assert listing.status_code == 200
+    assert any(item["id"] == batch["id"] for item in listing.json())
+
+    # API 批次不会出现在 UI 批次列表中
+    ui_listing = client.get(f"/executions/ui/batch-runs?project_id={project_id}")
+    assert all(item["id"] != batch["id"] for item in ui_listing.json())
+
+    detail = client.get(f"/executions/api/batch-runs/{batch['id']}")
+    assert detail.status_code == 200
+    detail_payload = detail.json()
+    assert len(detail_payload["runs"]) == 2
+    assert {run["status"] for run in detail_payload["runs"]} == {"SUCCESS", "FAILED"}
+    assert all(run["case_type"] == "API" for run in detail_payload["runs"])
+
+    rerun = client.post(f"/executions/api/batch-runs/{batch['id']}/rerun-failed")
+    assert rerun.status_code == 201
+    rerun_payload = rerun.json()
+    assert rerun_payload["case_type"] == "API"
+    assert rerun_payload["total_count"] == 1
+    assert rerun_payload["fail_count"] == 1
+
+    stats = client.get(f"/api-cases/stats?project_id={project_id}")
+    assert stats.status_code == 200
+    stats_payload = stats.json()
+    assert stats_payload["total"] == 2
+    assert stats_payload["active"] == 2
+    assert stats_payload["recent_success_rate"] is not None
+
+
+def test_project_workspace_full_flow(client) -> None:
+    project_id = client.get("/projects").json()[0]["id"]
+
+    # --- iteration ---
+    iteration_resp = client.post(
+        f"/projects/{project_id}/iterations",
+        json={"name": f"迭代_{time.time_ns()}", "goal": "首个迭代", "status": "PLANNING"},
+    )
+    assert iteration_resp.status_code == 201, iteration_resp.text
+    iteration_id = iteration_resp.json()["id"]
+
+    # --- requirement CRUD ---
+    req_resp = client.post(
+        f"/projects/{project_id}/requirements",
+        json={"title": f"需求_{time.time_ns()}", "priority": "P1", "iteration_id": iteration_id},
+    )
+    assert req_resp.status_code == 201, req_resp.text
+    requirement = req_resp.json()
+    requirement_id = requirement["id"]
+    assert requirement["status"] == "PENDING"
+
+    # list with pagination
+    list_resp = client.get(f"/projects/{project_id}/requirements?page=1&page_size=10")
+    assert list_resp.status_code == 200
+    assert list_resp.json()["total"] >= 1
+
+    # --- state machine: valid + illegal (422) ---
+    ok_status = client.put(f"/requirements/{requirement_id}/status", json={"status": "PLANNING"})
+    assert ok_status.status_code == 200
+    assert ok_status.json()["status"] == "PLANNING"
+
+    bad_status = client.put(f"/requirements/{requirement_id}/status", json={"status": "DONE"})
+    assert bad_status.status_code == 422, bad_status.text
+
+    # --- rank (kanban move) ---
+    rank_resp = client.put(
+        f"/requirements/{requirement_id}/rank",
+        json={"order_index": 500.0, "status": "IN_PROGRESS"},
+    )
+    assert rank_resp.status_code == 200
+    assert rank_resp.json()["order_index"] == 500.0
+    assert rank_resp.json()["status"] == "IN_PROGRESS"
+
+    # --- link a real API case (traceability) ---
+    case_resp = client.post(
+        "/api-cases",
+        json={
+            "project_id": project_id,
+            "name": f"追溯用例_{time.time_ns()}",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "expected_status": 200,
+        },
+    )
+    assert case_resp.status_code == 201
+    case_id = case_resp.json()["id"]
+
+    link_resp = client.post(
+        f"/requirements/{requirement_id}/cases",
+        json={"case_type": "API", "case_id": case_id},
+    )
+    assert link_resp.status_code in (200, 201), link_resp.text
+    link_id = link_resp.json()["id"]
+
+    cases_resp = client.get(f"/requirements/{requirement_id}/cases")
+    assert cases_resp.status_code == 200
+    assert any(c["case_id"] == case_id for c in cases_resp.json())
+
+    # reverse: case -> requirements
+    reverse_resp = client.get(f"/cases/API/{case_id}/requirements")
+    assert reverse_resp.status_code == 200
+    assert any(r["id"] == requirement_id for r in reverse_resp.json())
+
+    # --- task ---
+    task_resp = client.post(
+        f"/projects/{project_id}/tasks",
+        json={"title": f"任务_{time.time_ns()}", "requirement_id": requirement_id},
+    )
+    assert task_resp.status_code == 201, task_resp.text
+    task_id = task_resp.json()["id"]
+    assert task_resp.json()["status"] == "TODO"
+
+    task_bad = client.put(f"/tasks/{task_id}/status", json={"status": "DONE"})
+    assert task_bad.status_code == 422
+    task_ok = client.put(f"/tasks/{task_id}/status", json={"status": "DOING"})
+    assert task_ok.status_code == 200
+
+    # --- defect ---
+    defect_resp = client.post(
+        f"/projects/{project_id}/defects",
+        json={"title": f"缺陷_{time.time_ns()}", "severity": "CRITICAL", "requirement_id": requirement_id},
+    )
+    assert defect_resp.status_code == 201, defect_resp.text
+    defect_id = defect_resp.json()["id"]
+    assert defect_resp.json()["status"] == "NEW"
+
+    defect_bad = client.put(f"/project-defects/{defect_id}/status", json={"status": "CLOSED"})
+    assert defect_bad.status_code == 422
+    defect_ok = client.put(f"/project-defects/{defect_id}/status", json={"status": "CONFIRMED"})
+    assert defect_ok.status_code == 200
+
+    # --- comment ---
+    comment_resp = client.post(
+        f"/requirement/{requirement_id}/comments",
+        json={"content": "这是一条评论"},
+    )
+    assert comment_resp.status_code in (200, 201), comment_resp.text
+    comments = client.get(f"/requirement/{requirement_id}/comments")
+    assert comments.status_code == 200
+    assert any(c["content"] == "这是一条评论" for c in comments.json())
+
+    # --- activities ---
+    activities = client.get(f"/projects/{project_id}/activities")
+    assert activities.status_code == 200
+    assert isinstance(activities.json(), list)
+
+    # --- overview ---
+    overview = client.get(f"/projects/{project_id}/overview")
+    assert overview.status_code == 200
+    ov = overview.json()
+    assert ov["project_id"] == project_id
+    assert ov["requirement_total"] >= 1
+    assert ov["defect_total"] >= 1
+    assert "case_coverage_rate" in ov
+
+    # --- trace matrix ---
+    trace = client.get(f"/projects/{project_id}/trace")
+    assert trace.status_code == 200
+    trace_payload = trace.json()
+    rows = trace_payload.get("rows", trace_payload if isinstance(trace_payload, list) else [])
+    assert any(row.get("requirement_id") == requirement_id or row.get("id") == requirement_id for row in rows)
+
+    # --- burndown ---
+    burndown = client.get(f"/iterations/{iteration_id}/burndown")
+    assert burndown.status_code == 200
+
+    # --- unlink + delete cleanup ---
+    unlink = client.delete(f"/requirements/{requirement_id}/cases/{link_id}")
+    assert unlink.status_code == 204
+    assert client.delete(f"/project-defects/{defect_id}").status_code == 204
+    assert client.delete(f"/tasks/{task_id}").status_code == 204
+    assert client.delete(f"/requirements/{requirement_id}").status_code == 204
+    assert client.delete(f"/iterations/{iteration_id}").status_code == 204
+
+
+def test_plan_schedule_config_and_validation(client) -> None:
+    project_id = client.get("/projects").json()[0]["id"]
+    plan_resp = client.post("/test-plans", json={"project_id": project_id, "name": f"调度配置计划_{time.time_ns()}"})
+    assert plan_resp.status_code == 201
+    plan_id = plan_resp.json()["id"]
+
+    invalid_cron = client.put(
+        f"/test-plans/{plan_id}/schedule",
+        json={"schedule_enabled": True, "schedule_cron": "not a cron"},
+    )
+    assert invalid_cron.status_code == 422
+
+    missing_cron = client.put(f"/test-plans/{plan_id}/schedule", json={"schedule_enabled": True})
+    assert missing_cron.status_code == 422
+
+    enabled = client.put(
+        f"/test-plans/{plan_id}/schedule",
+        json={"schedule_enabled": True, "schedule_cron": "0 2 * * *", "schedule_max_retries": 1},
+    )
+    assert enabled.status_code == 200
+    payload = enabled.json()
+    assert payload["schedule_enabled"] is True
+    assert payload["schedule_cron"] == "0 2 * * *"
+    assert payload["schedule_max_retries"] == 1
+    assert payload["next_run_at"] is not None
+
+    wrong_env = client.put(
+        f"/test-plans/{plan_id}/schedule",
+        json={"schedule_enabled": True, "schedule_cron": "0 2 * * *", "schedule_environment_id": 999999},
+    )
+    assert wrong_env.status_code == 400
+
+    disabled = client.put(f"/test-plans/{plan_id}/schedule", json={"schedule_enabled": False})
+    assert disabled.status_code == 200
+    assert disabled.json()["schedule_enabled"] is False
+    assert disabled.json()["schedule_cron"] is None
+    assert disabled.json()["next_run_at"] is None
+
+    assert client.delete(f"/test-plans/{plan_id}").status_code == 204
+
+
+def test_scan_scheduled_plans_triggers_and_defers(client, monkeypatch) -> None:
+    from datetime import timedelta
+
+    from sqlalchemy import select as sa_select
+
+    from app.core.database import SessionLocal
+    from app.models import TestPlan, TestPlanRun
+    from app.tasks import executions
+    from app.timeutil import utc_now_naive
+
+    project_id = client.get("/projects").json()[0]["id"]
+    case_resp = client.post(
+        "/api-cases",
+        json={
+            "project_id": project_id,
+            "name": f"定时触发用例_{time.time_ns()}",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "priority": "P1",
+            "status": "ACTIVE",
+            "review_status": "APPROVED",
+            "expected_status": 200,
+        },
+    )
+    assert case_resp.status_code == 201
+    case_id = case_resp.json()["id"]
+
+    plan_resp = client.post("/test-plans", json={"project_id": project_id, "name": f"定时触发计划_{time.time_ns()}"})
+    assert plan_resp.status_code == 201
+    plan_id = plan_resp.json()["id"]
+    added = client.post(
+        f"/test-plans/{plan_id}/cases",
+        json={"case_type": "API", "case_id": case_id, "order_index": 1},
+    )
+    assert added.status_code == 201
+
+    enabled = client.put(
+        f"/test-plans/{plan_id}/schedule",
+        json={"schedule_enabled": True, "schedule_cron": "*/5 * * * *"},
+    )
+    assert enabled.status_code == 200
+
+    delayed: list[int] = []
+    monkeypatch.setattr(executions.run_test_plan, "delay", lambda run_id: delayed.append(run_id))
+
+    with SessionLocal() as db:
+        db_plan = db.get(TestPlan, plan_id)
+        db_plan.next_run_at = utc_now_naive() - timedelta(minutes=1)
+        db.commit()
+
+    result = executions.scan_scheduled_plans()
+    assert plan_id in result["triggered"]
+    assert len(delayed) == 1
+
+    with SessionLocal() as db:
+        runs = db.scalars(sa_select(TestPlanRun).where(TestPlanRun.plan_id == plan_id)).all()
+        assert len(runs) == 1
+        assert runs[0].status == "PENDING"
+        db_plan = db.get(TestPlan, plan_id)
+        assert db_plan.next_run_at is not None
+        assert db_plan.next_run_at > utc_now_naive()
+        assert db_plan.last_triggered_at is not None
+        # 再次到期：已有 PENDING run，只顺延不重复触发
+        db_plan.next_run_at = utc_now_naive() - timedelta(minutes=1)
+        db.commit()
+
+    result_again = executions.scan_scheduled_plans()
+    assert plan_id in result_again["skipped"]
+    assert len(delayed) == 1
+
+    with SessionLocal() as db:
+        runs = db.scalars(sa_select(TestPlanRun).where(TestPlanRun.plan_id == plan_id)).all()
+        assert len(runs) == 1
+        db_plan = db.get(TestPlan, plan_id)
+        assert db_plan.next_run_at > utc_now_naive()
+        # 清理：关闭调度并结束 run，避免影响其它用例
+        db_plan.schedule_enabled = False
+        db_plan.next_run_at = None
+        runs[0].status = "SUCCESS"
+        db.commit()
+
+
+def test_notification_setting_crud_and_test_endpoint(client, monkeypatch) -> None:
+    from app import notifications
+
+    project_id = client.get("/projects").json()[0]["id"]
+
+    default = client.get(f"/projects/{project_id}/notification-setting")
+    assert default.status_code == 200
+    assert default.json()["enabled"] is False
+
+    invalid_url = client.put(
+        f"/projects/{project_id}/notification-setting",
+        json={"enabled": True, "channel_type": "FEISHU", "webhook_url": "not-a-url", "notify_on": "ALL"},
+    )
+    assert invalid_url.status_code == 422
+
+    invalid_channel = client.put(
+        f"/projects/{project_id}/notification-setting",
+        json={"enabled": False, "channel_type": "SMS", "notify_on": "ALL"},
+    )
+    assert invalid_channel.status_code == 422
+
+    saved = client.put(
+        f"/projects/{project_id}/notification-setting",
+        json={
+            "enabled": True,
+            "channel_type": "DINGTALK",
+            "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=x",
+            "secret": "SEC123",
+            "notify_on": "FAIL_ONLY",
+        },
+    )
+    assert saved.status_code == 200
+    payload = saved.json()
+    assert payload["channel_type"] == "DINGTALK"
+    assert payload["notify_on"] == "FAIL_ONLY"
+
+    fetched = client.get(f"/projects/{project_id}/notification-setting")
+    assert fetched.json()["enabled"] is True
+
+    captured = {}
+
+    class _FakeResponse:
+        status_code = 200
+        text = "ok"
+
+    def fake_post(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return _FakeResponse()
+
+    monkeypatch.setattr(notifications.httpx, "post", fake_post)
+
+    test_resp = client.post(
+        f"/projects/{project_id}/notification-setting/test",
+        json={
+            "enabled": True,
+            "channel_type": "DINGTALK",
+            "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=x",
+            "secret": "SEC123",
+            "notify_on": "ALL",
+        },
+    )
+    assert test_resp.status_code == 200
+    assert test_resp.json()["success"] is True
+    # 钉钉加签：URL 带 timestamp/sign，payload 为 text 格式
+    assert "timestamp=" in captured["url"] and "sign=" in captured["url"]
+    assert captured["json"]["msgtype"] == "text"
+
+    missing_url = client.post(
+        f"/projects/{project_id}/notification-setting/test",
+        json={"enabled": False, "channel_type": "CUSTOM", "notify_on": "ALL"},
+    )
+    assert missing_url.status_code == 400
+
+    # 还原：关闭通知，避免影响其它执行用例
+    restore = client.put(
+        f"/projects/{project_id}/notification-setting",
+        json={"enabled": False, "channel_type": "FEISHU", "notify_on": "ALL"},
+    )
+    assert restore.status_code == 200
+
+
+def test_notification_channel_payload_formats(monkeypatch) -> None:
+    from app import notifications
+    from app.models import ProjectNotificationSetting
+
+    calls = []
+
+    class _FakeResponse:
+        status_code = 200
+        text = "ok"
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append((url, json))
+        return _FakeResponse()
+
+    monkeypatch.setattr(notifications.httpx, "post", fake_post)
+
+    feishu = ProjectNotificationSetting(
+        project_id=1, enabled=True, channel_type="FEISHU", webhook_url="https://open.feishu.cn/hook/x"
+    )
+    assert notifications.send_webhook_message(feishu, "hello") is True
+    assert calls[-1][1] == {"msg_type": "text", "content": {"text": "hello"}}
+
+    wecom = ProjectNotificationSetting(
+        project_id=1, enabled=True, channel_type="WECOM", webhook_url="https://qyapi.weixin.qq.com/hook/x"
+    )
+    assert notifications.send_webhook_message(wecom, "hello") is True
+    assert calls[-1][1] == {"msgtype": "text", "text": {"content": "hello"}}
+
+    custom = ProjectNotificationSetting(
+        project_id=1, enabled=True, channel_type="CUSTOM", webhook_url="https://example.com/hook"
+    )
+    assert notifications.send_webhook_message(custom, "hello") is True
+    assert calls[-1][1] == {"source": "test-platform", "event": "plan_run_finished", "text": "hello"}
+
+    empty = ProjectNotificationSetting(project_id=1, enabled=True, channel_type="FEISHU", webhook_url=None)
+    assert notifications.send_webhook_message(empty, "hello") is False
+
+    class _ErrorResponse:
+        status_code = 500
+        text = "boom"
+
+    monkeypatch.setattr(notifications.httpx, "post", lambda *args, **kwargs: _ErrorResponse())
+    assert notifications.send_webhook_message(feishu, "hello") is False
+
+
+def test_plan_run_notification_fail_only_filter(client, monkeypatch) -> None:
+    from sqlalchemy import select as sa_select
+
+    from app import notifications
+    from app.core.database import SessionLocal
+    from app.models import ProjectNotificationSetting, TestPlan, TestPlanRun
+
+    calls = []
+    monkeypatch.setattr(notifications, "send_webhook_message", lambda setting, text: calls.append(text) or True)
+
+    with SessionLocal() as db:
+        plan = db.scalars(sa_select(TestPlan)).first()
+        setting = db.scalar(
+            sa_select(ProjectNotificationSetting).where(ProjectNotificationSetting.project_id == plan.project_id)
+        )
+        if setting is None:
+            setting = ProjectNotificationSetting(project_id=plan.project_id)
+            db.add(setting)
+        setting.enabled = True
+        setting.channel_type = "CUSTOM"
+        setting.webhook_url = "https://example.com/hook"
+        setting.notify_on = "FAIL_ONLY"
+        success_run = TestPlanRun(plan_id=plan.id, project_id=plan.project_id, status="SUCCESS", total_count=1, pass_count=1)
+        failed_run = TestPlanRun(plan_id=plan.id, project_id=plan.project_id, status="FAILED", total_count=1, fail_count=1)
+        db.add_all([success_run, failed_run])
+        db.commit()
+        success_id, failed_id = success_run.id, failed_run.id
+
+        notifications.send_plan_run_notification(db, success_id)
+        assert calls == []
+        notifications.send_plan_run_notification(db, failed_id)
+        assert len(calls) == 1
+        assert "失败" in calls[0]
+
+        setting.notify_on = "ALL"
+        db.commit()
+        notifications.send_plan_run_notification(db, success_id)
+        assert len(calls) == 2
+
+        # 清理：关闭通知并删除临时 run
+        setting.enabled = False
+        db.delete(db.get(TestPlanRun, success_id))
+        db.delete(db.get(TestPlanRun, failed_id))
+        db.commit()
+
+
+def test_api_token_lifecycle(client) -> None:
+    created = client.post("/api-tokens", json={"name": "ci-token", "expires_days": 30})
+    assert created.status_code == 201
+    token_payload = created.json()
+    full_token = token_payload["token"]
+    assert full_token.startswith("pt_")
+    assert token_payload["expires_at"] is not None
+    token_id = token_payload["id"]
+
+    with TestClient(client.app, base_url="http://testserver/api/v1") as token_client:
+        token_client.headers.update({"Authorization": f"Bearer {full_token}"})
+        me = token_client.get("/auth/me")
+        assert me.status_code == 200
+
+        listing = client.get("/api-tokens")
+        assert listing.status_code == 200
+        item = next(entry for entry in listing.json() if entry["id"] == token_id)
+        assert item["token_prefix"].endswith("****")
+        assert "token" not in item
+        assert full_token not in json.dumps(listing.json())
+
+        deleted = client.delete(f"/api-tokens/{token_id}")
+        assert deleted.status_code == 204
+        assert token_client.get("/auth/me").status_code == 401
+
+    assert client.delete(f"/api-tokens/{token_id}").status_code == 404
+
+
+def test_api_token_expiry_and_disabled_user(client) -> None:
+    from datetime import timedelta
+
+    from sqlalchemy import select as sa_select
+
+    from app.core.database import SessionLocal
+    from app.models import ApiToken
+    from app.timeutil import utc_now_naive
+
+    username = f"citok_{time.time_ns()}"
+    create_user = client.post("/users", json={"username": username, "password": "secret123", "role": "tester"})
+    assert create_user.status_code == 201
+    user_id = create_user.json()["id"]
+
+    user_client = TestClient(client.app, base_url="http://testserver/api/v1")
+    login = user_client.post("/auth/login", json={"username": username, "password": "secret123"})
+    assert login.status_code == 200
+    user_client.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+
+    created = user_client.post("/api-tokens", json={"name": "expiring"})
+    assert created.status_code == 201
+    assert created.json()["expires_at"] is None
+    token_value = created.json()["token"]
+
+    api_client = TestClient(client.app, base_url="http://testserver/api/v1")
+    api_client.headers.update({"Authorization": f"Bearer {token_value}"})
+    assert api_client.get("/auth/me").status_code == 200
+
+    with SessionLocal() as db:
+        record = db.scalar(sa_select(ApiToken).where(ApiToken.token == token_value))
+        record.expires_at = utc_now_naive() - timedelta(minutes=1)
+        db.commit()
+    assert api_client.get("/auth/me").status_code == 401
+
+    with SessionLocal() as db:
+        record = db.scalar(sa_select(ApiToken).where(ApiToken.token == token_value))
+        record.expires_at = None
+        db.commit()
+    assert api_client.get("/auth/me").status_code == 200
+
+    disable = client.put(f"/users/{user_id}", json={"status": "DISABLED"})
+    assert disable.status_code == 200
+    assert api_client.get("/auth/me").status_code == 401
+
+    # 非本人不可删除对方 token：管理员删除属于 tester 的 token 应 404
+    with SessionLocal() as db:
+        record = db.scalar(sa_select(ApiToken).where(ApiToken.token == token_value))
+        token_id = record.id
+    assert client.delete(f"/api-tokens/{token_id}").status_code == 404
+
+
+def test_list_runs_server_side_filter_and_pagination(client) -> None:
+    from app.core.database import SessionLocal
+    from app.models import APICase
+    from app.services import create_test_run
+
+    api_cases = client.get("/api-cases").json()
+    case = next(item for item in api_cases if item["name"] == "示例健康检查接口")
+    case_id = case["id"]
+
+    created_ids: list[int] = []
+    specs = [
+        {"status": "SUCCESS", "error_type": None, "case_name": "分页用例甲", "summary": "关键字命中ALPHA"},
+        {"status": "FAILED", "error_type": "ASSERTION", "case_name": "分页用例乙", "summary": "断言失败"},
+        {"status": "ERROR", "error_type": "RUNTIME", "case_name": "分页用例丙", "summary": "运行异常"},
+        {"status": "RUNNING", "error_type": None, "case_name": "分页用例丁", "summary": "执行中"},
+    ]
+    with SessionLocal() as db:
+        db_case = db.get(APICase, case_id)
+        project_id = db_case.project_id
+        for spec in specs:
+            run = create_test_run(
+                db,
+                project_id=project_id,
+                environment_id=None,
+                case_type="API",
+                case_id=db_case.id,
+                case_name=spec["case_name"],
+            )
+            run.status = spec["status"]
+            run.error_type = spec["error_type"]
+            run.summary = spec["summary"]
+            db.add(run)
+            db.flush()
+            created_ids.append(run.id)
+        db.commit()
+
+    # 兼容模式：不带 page 参数仍返回裸列表
+    legacy = client.get("/executions/runs")
+    assert legacy.status_code == 200
+    assert isinstance(legacy.json(), list)
+
+    # 分页模式：返回带 total 与统计的对象
+    paged = client.get("/executions/runs", params={"page": 1, "page_size": 2})
+    assert paged.status_code == 200
+    body = paged.json()
+    assert set(["items", "total", "running", "failed", "retryable"]).issubset(body.keys())
+    assert len(body["items"]) == 2
+    assert body["total"] >= 4
+    assert body["items"][0]["id"] > body["items"][1]["id"]  # 按 id 倒序
+
+    # 状态过滤
+    failed_only = client.get("/executions/runs", params={"page": 1, "page_size": 50, "status": "FAILED"}).json()
+    assert all(item["status"] == "FAILED" for item in failed_only["items"])
+    assert any(item["id"] in created_ids for item in failed_only["items"])
+
+    # 失败原因过滤
+    assertion_only = client.get(
+        "/executions/runs", params={"page": 1, "page_size": 50, "error_type": "ASSERTION"}
+    ).json()
+    assert all(item["error_type"] == "ASSERTION" for item in assertion_only["items"])
+
+    # 关键字过滤（命中 summary）
+    keyword_hit = client.get(
+        "/executions/runs", params={"page": 1, "page_size": 50, "keyword": "ALPHA"}
+    ).json()
+    assert keyword_hit["total"] >= 1
+    assert all("ALPHA" in (item["summary"] or "") or "ALPHA" in (item["case_name"] or "") for item in keyword_hit["items"])
+
+    # 统计口径：全量（不受当前 status 过滤影响）
+    stats = client.get("/executions/runs", params={"page": 1, "page_size": 1, "status": "SUCCESS"}).json()
+    assert stats["failed"] >= 2  # FAILED + ERROR
+    assert stats["running"] >= 1  # RUNNING
+
+    # 非法状态 400
+    assert client.get("/executions/runs", params={"status": "NOPE"}).status_code == 400
+
+    # 清理
+    with SessionLocal() as db:
+        from app.models import TestRun
+
+        for run_id in created_ids:
+            obj = db.get(TestRun, run_id)
+            if obj is not None:
+                db.delete(obj)
+        db.commit()
+

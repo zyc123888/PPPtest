@@ -72,12 +72,18 @@
             {{ workspaceMap[scope.row.workspace_id] || scope.row.workspace_id }}
           </template>
         </el-table-column>
-        <el-table-column label="项目名称" prop="name" min-width="180" show-overflow-tooltip />
+        <el-table-column label="项目名称" prop="name" min-width="180" show-overflow-tooltip>
+          <template #default="scope">
+            <el-button type="primary" link @click="enterWorkspace(scope.row)">{{ scope.row.name }}</el-button>
+          </template>
+        </el-table-column>
+        <el-table-column label="短码" prop="code" width="110" show-overflow-tooltip />
         <el-table-column label="基础地址" prop="base_url" min-width="200" show-overflow-tooltip />
         <el-table-column label="说明" prop="description" min-width="220" show-overflow-tooltip />
-        <el-table-column v-if="canAdmin" label="操作" align="center" width="140">
+        <el-table-column label="操作" align="center" width="200">
           <template #default="scope">
-            <el-button size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
+            <el-button size="small" type="primary" @click="enterWorkspace(scope.row)">进入工作台</el-button>
+            <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -88,8 +94,9 @@
           <div class="mobile-card-meta">工作空间：{{ workspaceMap[item.workspace_id] || item.workspace_id }}</div>
           <div class="mobile-card-meta">基础地址：{{ item.base_url }}</div>
           <div class="mobile-card-desc">{{ item.description || '-' }}</div>
-          <div v-if="canAdmin" class="mobile-card-actions">
-            <el-button size="small" type="danger" @click="handleDelete(item)">删除</el-button>
+          <div class="mobile-card-actions">
+            <el-button size="small" type="primary" @click="enterWorkspace(item)">进入工作台</el-button>
+            <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(item)">删除</el-button>
           </div>
         </div>
       </div>
@@ -132,11 +139,14 @@
 
 <script setup>
 import { computed, onMounted, nextTick, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
+
+const router = useRouter()
 
 const list = ref([])
 const workspaces = ref([])
@@ -227,6 +237,10 @@ const handleCreate = () => {
 
 const handleSearch = () => {
   page.value = 1
+}
+
+const enterWorkspace = (row) => {
+  router.push(`/project/${row.id}/overview`)
 }
 
 const handleReset = () => {

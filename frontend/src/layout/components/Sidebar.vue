@@ -73,6 +73,7 @@ function normalizeMenuItems(routes, basePath, role) {
   for (const routeRecord of routes || []) {
     const fullPath = joinPaths(basePath, routeRecord.path)
     if (routeRecord.meta?.public) continue
+    if (routeRecord.meta?.hideInMenu) continue
     if (routeRecord.path === '/:pathMatch(.*)*') continue
 
     const allowedRoles = routeRecord.meta?.roles || null

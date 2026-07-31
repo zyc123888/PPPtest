@@ -7,6 +7,7 @@ import secrets
 import socket
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import redis
 from sqlalchemy import delete, func, select, text
@@ -17,6 +18,7 @@ from app.core.database import SessionLocal, engine, init_db
 from app.models import (
     APICase,
     AIModelConfig,
+    ApiToken,
     Environment,
     ExecutionArtifact,
     ExecutionLog,
@@ -35,8 +37,10 @@ from app.models import (
 )
 from app.timeutil import utc_now_naive, to_utc_naive
 
-DEFAULT_USER_PASSWORD = "tester123"
 TOKEN_TTL_HOURS = 12
+API_TOKEN_PREFIX = "pt_"
+API_TOKEN_LAST_USED_THROTTLE_SECONDS = 60
+SCHEDULE_TIMEZONE = "Asia/Shanghai"
 PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
 SUMMARY_MAX_LENGTH = 255
 
@@ -551,12 +555,18 @@ def password_hash_needs_upgrade(password_hash: str | None) -> bool:
         return True
 
 
+class AccountDisabledError(Exception):
+    """Credentials are correct but the account has been disabled."""
+
+
 def authenticate_user(db: Session, username: str, password: str) -> User | None:
     user = db.scalar(select(User).where(User.username == username))
-    if user is None or user.status != "ACTIVE":
+    if user is None:
         return None
     if not verify_password(password, user.password_hash):
         return None
+    if user.status != "ACTIVE":
+        raise AccountDisabledError()
     if password_hash_needs_upgrade(user.password_hash):
         user.password_hash = hash_password(password)
     user.last_login_at = utc_now_naive()
@@ -579,12 +589,71 @@ def revoke_user_token(db: Session, token: str) -> None:
         db.commit()
 
 
+def revoke_all_user_tokens(db: Session, user_id: int, keep_token: str | None = None) -> None:
+    stmt = select(UserToken).where(UserToken.user_id == user_id)
+    for record in db.scalars(stmt).all():
+        if keep_token and record.token == keep_token:
+            continue
+        db.delete(record)
+    db.commit()
+
+
 def get_user_by_token(db: Session, token: str) -> User | None:
     now = utc_now_naive()
     token_record = db.scalar(select(UserToken).where(UserToken.token == token, UserToken.expires_at > now))
-    if token_record is None:
+    if token_record is not None:
+        user = token_record.user
+        if user is None or user.status != "ACTIVE":
+            return None
+        return user
+    return _get_user_by_api_token(db, token, now)
+
+
+def _get_user_by_api_token(db: Session, token: str, now: datetime) -> User | None:
+    if not token.startswith(API_TOKEN_PREFIX):
         return None
-    return token_record.user
+    record = db.scalar(select(ApiToken).where(ApiToken.token == token))
+    if record is None:
+        return None
+    if record.expires_at is not None and record.expires_at <= now:
+        return None
+    user = record.user
+    if user is None or user.status != "ACTIVE":
+        return None
+    if (
+        record.last_used_at is None
+        or (now - record.last_used_at).total_seconds() > API_TOKEN_LAST_USED_THROTTLE_SECONDS
+    ):
+        record.last_used_at = now
+        db.commit()
+    return user
+
+
+def create_api_token(db: Session, user: User, *, name: str, expires_days: int | None = None) -> ApiToken:
+    expires_at = utc_now_naive() + timedelta(days=expires_days) if expires_days else None
+    record = ApiToken(
+        user_id=user.id,
+        name=name,
+        token=API_TOKEN_PREFIX + secrets.token_urlsafe(36),
+        expires_at=expires_at,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def compute_next_run_at(cron: str, *, base_time: datetime | None = None) -> datetime:
+    """按北京时间解释 cron，返回下一次触发时刻（UTC naive，与库内时间口径一致）。"""
+    from croniter import croniter
+
+    tz = ZoneInfo(SCHEDULE_TIMEZONE)
+    if base_time is None:
+        local_base = datetime.now(tz)
+    else:
+        local_base = base_time.replace(tzinfo=timezone.utc).astimezone(tz)
+    next_local = croniter(cron, local_base).get_next(datetime)
+    return next_local.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def create_test_run(
@@ -593,6 +662,7 @@ def create_test_run(
     project_id: int,
     environment_id: int | None = None,
     plan_run_id: int | None = None,
+    batch_run_id: int | None = None,
     case_type: str,
     case_id: int,
     case_name: str,
@@ -603,6 +673,7 @@ def create_test_run(
         project_id=project_id,
         environment_id=environment_id,
         plan_run_id=plan_run_id,
+        batch_run_id=batch_run_id,
         case_type=case_type,
         case_id=case_id,
         case_name=case_name,
@@ -616,6 +687,52 @@ def create_test_run(
     db.commit()
     db.refresh(run)
     return run
+
+
+def create_plan_run_with_cases(
+    db: Session,
+    plan: TestPlan,
+    *,
+    environment_id: int | None = None,
+    timeout_seconds: int | None = None,
+    max_retries: int = 0,
+) -> TestPlanRun:
+    cases = list(
+        db.scalars(
+            select(TestPlanCase)
+            .where(TestPlanCase.plan_id == plan.id)
+            .order_by(TestPlanCase.order_index.asc(), TestPlanCase.id.asc())
+        ).all()
+    )
+    if not cases:
+        raise ValueError("测试计划未配置用例")
+
+    plan_run = TestPlanRun(
+        plan_id=plan.id,
+        project_id=plan.project_id,
+        environment_id=environment_id,
+        status="PENDING",
+        summary="任务已提交，等待执行",
+        retry_count=0,
+        total_count=len(cases),
+    )
+    db.add(plan_run)
+    db.commit()
+    db.refresh(plan_run)
+
+    for plan_case in cases:
+        create_test_run(
+            db,
+            project_id=plan.project_id,
+            environment_id=environment_id,
+            plan_run_id=plan_run.id,
+            case_type=plan_case.case_type,
+            case_id=plan_case.case_id,
+            case_name=plan_case.case_name,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
+    return plan_run
 
 
 def mark_run_started(db: Session, run: TestRun) -> bool:

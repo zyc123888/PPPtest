@@ -6,12 +6,16 @@
     "dev": "vite --host 0.0.0.0 --port 3000",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 3000",
-    "lint": "eslint src/router/index.js src/views/case/generator/index.vue src/views/case/generator2/index.vue src/views/case/generator2/presentation.js src/views/case/generator2/components/*.vue src/views/case/generator2/__tests__/*.test.js src/views/case/ui/index.vue src/lib/caseGeneration.js src/lib/caseGenerationV2.js src/lib/caseGenerationUi.js src/lib/uiCase.js src/components/CaseGenerationModeBadge.vue src/lib/__tests__/caseGenerationUi.test.js src/lib/__tests__/uiCase.test.js src/components/__tests__/CaseGenerationModeBadge.test.js --max-warnings=0",
+    "lint": "eslint src/router/index.js src/views/case/generator/index.vue src/views/case/generator2/index.vue src/views/case/generator2/presentation.js src/views/case/generator2/components/*.vue src/views/case/generator2/__tests__/*.test.js src/views/case/ui/index.vue src/views/case/ui/components/*.vue src/lib/caseGeneration.js src/lib/caseGenerationV2.js src/lib/caseGenerationUi.js src/lib/uiCase.js src/components/CaseGenerationModeBadge.vue src/lib/__tests__/caseGenerationUi.test.js src/lib/__tests__/uiCase.test.js src/components/__tests__/CaseGenerationModeBadge.test.js --max-warnings=0",
     "typecheck": "vue-tsc --noEmit -p tsconfig.app.json",
     "test": "vitest run"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@tiptap/extension-image": "^3.29.2",
+    "@tiptap/extension-placeholder": "^3.29.2",
+    "@tiptap/starter-kit": "^3.29.2",
+    "@tiptap/vue-3": "^3.29.2",
     "element-plus": "^2.13.5",
     "pinia": "^3.0.4",
     "sass": "^1.98.0",

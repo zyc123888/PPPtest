@@ -24,7 +24,8 @@ export const UI_ASSERTION_OPTIONS = [
   { value: 'selector_visible', label: '元素可见', selector: true },
   { value: 'selector_hidden', label: '元素隐藏', selector: true },
   { value: 'url_contains', label: '地址包含', needsValue: true, valueLabel: '地址片段' },
-  { value: 'title_contains', label: '标题包含', needsValue: true, valueLabel: '标题片段' }
+  { value: 'title_contains', label: '标题包含', needsValue: true, valueLabel: '标题片段' },
+  { value: 'visual', label: 'AI 视觉检查', needsValue: true, optionalSelector: true, semanticTarget: true, valueLabel: '视觉期望' }
 ]
 
 const stepMap = new Map(UI_STEP_OPTIONS.map((item) => [item.value, item]))
@@ -36,6 +37,13 @@ export const getAssertionDefinition = (type) => assertionMap.get(type) || UI_ASS
 export const createUiStep = (action = 'click') => ({
   action,
   name: '',
+  target: '',
+  test_id: '',
+  role: '',
+  accessible_name: '',
+  label: '',
+  placeholder: '',
+  text: '',
   selector: '',
   value: '',
   duration_ms: 1000,
@@ -48,6 +56,13 @@ export const createUiStep = (action = 'click') => ({
 export const createUiAssertion = (type = 'text_visible') => ({
   type,
   name: '',
+  target: '',
+  test_id: '',
+  role: '',
+  accessible_name: '',
+  label: '',
+  placeholder: '',
+  text: '',
   selector: '',
   value: ''
 })
@@ -78,6 +93,9 @@ export const serializeUiSteps = (steps = []) => steps.map((step) => {
   const definition = getStepDefinition(step.action)
   const payload = { action: step.action }
   if (step.name?.trim()) payload.name = step.name.trim()
+  for (const key of ['target', 'test_id', 'role', 'accessible_name', 'label', 'placeholder', 'text']) {
+    if (step[key]?.trim()) payload[key] = step[key].trim()
+  }
   if (definition.selector || definition.optionalSelector) payload.selector = step.selector?.trim() || undefined
   if (definition.needsValue) payload.value = step.value
   if (definition.duration) payload.duration_ms = Number(step.duration_ms)
@@ -94,6 +112,9 @@ export const serializeUiAssertions = (assertions = []) => assertions.map((assert
   const definition = getAssertionDefinition(assertion.type)
   const payload = { type: assertion.type }
   if (assertion.name?.trim()) payload.name = assertion.name.trim()
+  for (const key of ['target', 'test_id', 'role', 'accessible_name', 'label', 'placeholder', 'text']) {
+    if (assertion[key]?.trim()) payload[key] = assertion[key].trim()
+  }
   if (definition.selector || definition.optionalSelector) payload.selector = assertion.selector?.trim() || undefined
   if (definition.needsValue) payload.value = assertion.value
   return compact(payload)
@@ -101,9 +122,11 @@ export const serializeUiAssertions = (assertions = []) => assertions.map((assert
 
 export const validateUiWorkflow = (steps = [], assertions = []) => {
   const errors = []
+  const hasTarget = (item) => ['target', 'test_id', 'role', 'accessible_name', 'label', 'placeholder', 'text', 'selector']
+    .some((key) => String(item?.[key] || '').trim())
   steps.forEach((step, index) => {
     const definition = getStepDefinition(step.action)
-    if (definition.selector && !step.selector?.trim()) errors.push(`步骤 ${index + 1} 缺少选择器`)
+    if (definition.selector && !hasTarget(step)) errors.push(`步骤 ${index + 1} 缺少语义目标或选择器`)
     if (definition.needsValue && String(step.value ?? '').trim() === '') errors.push(`步骤 ${index + 1} 缺少值`)
     if (definition.duration && !(Number(step.duration_ms) >= 1 && Number(step.duration_ms) <= 60000)) {
       errors.push(`步骤 ${index + 1} 的等待时间应为 1 到 60000 毫秒`)
@@ -111,7 +134,7 @@ export const validateUiWorkflow = (steps = [], assertions = []) => {
   })
   assertions.forEach((assertion, index) => {
     const definition = getAssertionDefinition(assertion.type)
-    if (definition.selector && !assertion.selector?.trim()) errors.push(`断言 ${index + 1} 缺少选择器`)
+    if (definition.selector && !hasTarget(assertion)) errors.push(`断言 ${index + 1} 缺少语义目标或选择器`)
     if (definition.needsValue && !String(assertion.value ?? '').trim()) errors.push(`断言 ${index + 1} 缺少期望值`)
   })
   return errors

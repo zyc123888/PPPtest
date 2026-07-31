@@ -63,17 +63,18 @@ function formatErrorPayload(payload, status) {
 
 async function request(path, options = {}) {
   const token = localStorage.getItem(TOKEN_KEY)
+  const isForm = options.body instanceof FormData
   const config = {
     method: options.method || 'GET',
     headers: {
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.body && !isForm ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.headers || {})
     }
   }
 
   if (options.body) {
-    config.body = JSON.stringify(options.body)
+    config.body = isForm ? options.body : JSON.stringify(options.body)
   }
 
   const response = await fetch(`${API_PREFIX}${path}`, config)
@@ -121,8 +122,14 @@ export const api = {
     }
     return request(path, { method: 'POST', body })
   },
-  delete(path) {
-    return request(path, { method: 'DELETE' })
+  postForm(path, formData) {
+    return request(path, { method: 'POST', body: formData })
+  },
+  delete(path, body) {
+    if (body === undefined) {
+      return request(path, { method: 'DELETE' })
+    }
+    return request(path, { method: 'DELETE', body })
   },
   put(path, body) {
     return request(path, { method: 'PUT', body })

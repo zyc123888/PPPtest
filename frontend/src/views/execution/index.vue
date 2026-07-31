@@ -15,30 +15,35 @@
         </div>
       </el-card>
       <el-card class="page-card execution-hero__stat" shadow="never">
-        <el-statistic title="当前可见执行" :value="filteredList.length" />
+        <el-statistic title="执行总数" :value="total" />
       </el-card>
       <el-card class="page-card execution-hero__stat" shadow="never">
-        <el-statistic title="运行中" :value="runningCount" />
+        <el-statistic title="运行中/排队" :value="stats.running" />
       </el-card>
       <el-card class="page-card execution-hero__stat" shadow="never">
-        <el-statistic title="失败/异常" :value="failedCount" />
+        <el-statistic title="失败/异常" :value="stats.failed" />
       </el-card>
       <el-card class="page-card execution-hero__stat" shadow="never">
-        <el-statistic title="可重跑" :value="retryableCount" />
+        <el-statistic title="可重跑" :value="stats.retryable" />
       </el-card>
     </div>
 
     <el-card class="page-card section-gap" shadow="never">
       <el-form :inline="true" class="query-form" label-position="top" :model="filters">
+        <el-form-item label="项目">
+          <el-select v-model="filters.projectId" clearable filterable placeholder="全部" style="width: 200px" @change="handleSearch">
+            <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="类型">
-          <el-select v-model="filters.caseType" clearable placeholder="全部" style="width: 160px">
+          <el-select v-model="filters.caseType" clearable placeholder="全部" style="width: 160px" @change="handleSearch">
             <el-option label="API" value="API" />
             <el-option label="UI" value="UI" />
             <el-option label="PERF" value="PERF" />
           </el-select>
         </el-form-item>
         <el-form-item label="状态">
-          <el-select v-model="filters.status" clearable placeholder="全部" style="width: 180px">
+          <el-select v-model="filters.status" clearable placeholder="全部" style="width: 180px" @change="handleSearch">
             <el-option label="排队中" value="PENDING" />
             <el-option label="执行中" value="RUNNING" />
             <el-option label="成功" value="SUCCESS" />
@@ -49,7 +54,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="失败原因">
-          <el-select v-model="filters.errorType" clearable placeholder="全部" style="width: 180px">
+          <el-select v-model="filters.errorType" clearable placeholder="全部" style="width: 180px" @change="handleSearch">
             <el-option
               v-for="item in EXECUTION_ERROR_TYPE_OPTIONS"
               :key="item.value"
@@ -59,7 +64,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="关键字">
-          <el-input v-model="filters.keyword" clearable placeholder="用例名称/摘要" style="width: 280px" />
+          <el-input v-model="filters.keyword" clearable placeholder="用例名称/摘要" style="width: 280px" @keyup.enter="handleSearch" @clear="handleSearch" />
         </el-form-item>
         <el-form-item label=" " class="query-actions">
           <el-button type="primary" @click="handleSearch">查询</el-button>
@@ -69,9 +74,14 @@
     </el-card>
 
     <el-card class="page-card" shadow="never">
-      <el-table v-loading="listLoading" :data="pagedList" border>
+      <el-table v-loading="listLoading" :data="list" border>
         <el-table-column label="ID" prop="id" align="center" width="80" />
         <el-table-column label="类型" prop="case_type" width="90" align="center" />
+        <el-table-column label="项目" min-width="130" show-overflow-tooltip>
+          <template #default="scope">
+            {{ projectName(scope.row.project_id) }}
+          </template>
+        </el-table-column>
         <el-table-column label="用例名称" prop="case_name" min-width="180" show-overflow-tooltip />
         <el-table-column label="状态" prop="status" width="110" align="center">
           <template #default="scope">
@@ -109,9 +119,9 @@
       </el-table>
 
       <div class="mobile-cards">
-        <div v-for="item in pagedList" :key="item.id" class="mobile-card">
+        <div v-for="item in list" :key="item.id" class="mobile-card">
           <div class="mobile-card-title">{{ item.case_name }}</div>
-          <div class="mobile-card-meta">类型：{{ item.case_type }} · 状态：{{ statusText(item.status) }}</div>
+          <div class="mobile-card-meta">项目：{{ projectName(item.project_id) }} · 类型：{{ item.case_type }} · 状态：{{ statusText(item.status) }}</div>
           <div class="mobile-card-meta">错误：{{ errorTypeText(item.error_type) }} · 耗时：{{ item.duration_ms ? item.duration_ms + 'ms' : '-' }}</div>
           <div class="mobile-card-desc">{{ item.summary || '-' }}</div>
           <div class="mobile-card-actions">
@@ -127,7 +137,7 @@
       <div class="table-pagination">
         <el-pagination
           layout="total, sizes, prev, pager, next"
-          :total="filteredList.length"
+          :total="total"
           :page-sizes="[10, 20, 30]"
           v-model:page-size="pageSize"
           v-model:current-page="page"
@@ -188,9 +198,15 @@
     <el-dialog v-model="logDialogVisible" title="执行日志" width="960px">
       <el-tabs>
         <el-tab-pane label="标准输出">
+          <div class="log-toolbar">
+            <el-button size="small" @click="copyText(logData.stdout_text)">复制</el-button>
+          </div>
           <el-input :model-value="logData.stdout_text || ''" type="textarea" :rows="16" readonly />
         </el-tab-pane>
         <el-tab-pane label="错误输出">
+          <div class="log-toolbar">
+            <el-button size="small" @click="copyText(logData.stderr_text)">复制</el-button>
+          </div>
           <el-input :model-value="logData.stderr_text || ''" type="textarea" :rows="16" readonly />
         </el-tab-pane>
         <el-tab-pane v-if="isPrecheckFailure(logData)" label="预检摘要">
@@ -241,7 +257,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
@@ -255,6 +271,9 @@ import {
 } from '@/lib/execution'
 
 const list = ref([])
+const total = ref(0)
+const stats = reactive({ running: 0, failed: 0, retryable: 0 })
+const projects = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
 const logDialogVisible = ref(false)
@@ -267,6 +286,7 @@ const { canTest } = usePermissions()
 let timer = null
 
 const filters = reactive({
+  projectId: '',
   status: '',
   caseType: '',
   errorType: '',
@@ -274,7 +294,7 @@ const filters = reactive({
 })
 
 const page = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(20)
 
 const statusText = executionStatusText
 const statusType = executionStatusTag
@@ -297,8 +317,11 @@ const canCancel = (row) => {
 
 const formatTime = (val) => {
   if (!val) return '-'
-  return new Date(val).toLocaleString()
+  const normalized = /(Z|[+-]\d{2}:?\d{2})$/.test(val) ? val : `${val}Z`
+  return new Date(normalized).toLocaleString('zh-CN', { hour12: false })
 }
+
+const projectName = (id) => projects.value.find((item) => item.id === id)?.name || `#${id}`
 
 const formatJson = (val) => {
   if (!val) return '[]'
@@ -334,9 +357,20 @@ const currentSteps = computed(() => normalizeSteps(currentRun.value.step_results
 const logSteps = computed(() => normalizeSteps(logData.value.step_results_json))
 
 const getList = async () => {
+  listLoading.value = true
   try {
-    const data = await api.get('/executions/runs')
-    list.value = data
+    const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value) })
+    if (filters.projectId) params.set('project_id', String(filters.projectId))
+    if (filters.caseType) params.set('case_type', filters.caseType)
+    if (filters.status) params.set('status', filters.status)
+    if (filters.errorType) params.set('error_type', filters.errorType)
+    if (filters.keyword.trim()) params.set('keyword', filters.keyword.trim())
+    const data = await api.get(`/executions/runs?${params.toString()}`)
+    list.value = data.items || []
+    total.value = data.total || 0
+    stats.running = data.running || 0
+    stats.failed = data.failed || 0
+    stats.retryable = data.retryable || 0
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
@@ -344,39 +378,40 @@ const getList = async () => {
   }
 }
 
-const filteredList = computed(() => {
-  const keyword = filters.keyword.trim().toLowerCase()
-  return list.value.filter((r) => {
-    if (filters.status && r.status !== filters.status) return false
-    if (filters.caseType && r.case_type !== filters.caseType) return false
-    if (filters.errorType && r.error_type !== filters.errorType) return false
-    if (!keyword) return true
-    return (
-      String(r.case_name || '').toLowerCase().includes(keyword) ||
-      String(r.summary || '').toLowerCase().includes(keyword)
-    )
-  })
-})
+const fetchProjects = async () => {
+  try {
+    projects.value = await api.get('/projects')
+  } catch (error) {
+    projects.value = []
+  }
+}
 
-const pagedList = computed(() => {
-  const start = (page.value - 1) * pageSize.value
-  return filteredList.value.slice(start, start + pageSize.value)
-})
+const hasActiveRuns = computed(() => list.value.some((item) => ['PENDING', 'RUNNING'].includes(item.status)))
 
-const runningCount = computed(() => list.value.filter((item) => item.status === 'RUNNING').length)
-const failedCount = computed(() => list.value.filter((item) => ['FAILED', 'ERROR', 'TIMEOUT'].includes(item.status)).length)
-const retryableCount = computed(() => list.value.filter((item) => item.status !== 'SUCCESS').length)
+const restartTimer = () => {
+  if (timer) clearInterval(timer)
+  timer = setInterval(getList, hasActiveRuns.value ? 5000 : 30000)
+}
+
+watch([page, pageSize], () => {
+  getList()
+})
 
 const handleSearch = () => {
-  page.value = 1
+  if (page.value === 1) {
+    getList()
+  } else {
+    page.value = 1
+  }
 }
 
 const handleReset = () => {
+  filters.projectId = ''
   filters.status = ''
   filters.caseType = ''
   filters.errorType = ''
   filters.keyword = ''
-  page.value = 1
+  handleSearch()
 }
 
 const handleDetail = async (row) => {
@@ -411,10 +446,16 @@ const openArtifacts = async (row) => {
 
 const handleRerun = async (row) => {
   try {
+    await ElMessageBox.confirm(`确认重跑执行 #${row.id}（${row.case_name}）？`, '重跑执行', {
+      type: 'warning',
+      confirmButtonText: '确认重跑',
+      cancelButtonText: '取消'
+    })
     await api.post(`/executions/runs/${row.id}/rerun`, {})
     ElMessage.success('重跑任务已提交')
     getList()
   } catch (error) {
+    if (error === 'cancel' || error === 'close') return
     ElMessage.error(error.message)
   }
 }
@@ -432,6 +473,19 @@ const handleCancel = async (row) => {
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     ElMessage.error(error.message)
+  }
+}
+
+const copyText = async (text) => {
+  if (!text) {
+    ElMessage.info('无可复制内容')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制')
+  } catch (error) {
+    ElMessage.error('复制失败')
   }
 }
 
@@ -472,8 +526,13 @@ const downloadArtifact = async (artifactIndex, artifact) => {
 }
 
 onMounted(() => {
+  fetchProjects()
   getList()
-  timer = setInterval(getList, 5000)
+  restartTimer()
+})
+
+watch(hasActiveRuns, () => {
+  restartTimer()
 })
 
 onBeforeUnmount(() => {
@@ -572,6 +631,12 @@ onBeforeUnmount(() => {
 
 .raw-json-collapse {
   margin-top: 12px;
+}
+
+.log-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
 }
 
 .precheck-callout {

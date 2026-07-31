@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     request_timeout_seconds: int = 30
     execution_engine: str = "pytest"
     report_output_dir: str = "reports"
+    # —— 富文本图片上传 ——
+    # 上传目录（相对容器工作目录 /app），静态资源挂载在 {api_v1_prefix}/uploads 下对外访问。
+    upload_dir: str = "uploads"
+    max_image_upload_bytes: int = 10 * 1024 * 1024
     case_generation_rules_dir: str = ""
     case_generation_unified_rules_dir: str = ""
     ui_case_skill_dir: str = "ui_case_skills"

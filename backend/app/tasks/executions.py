@@ -11,6 +11,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from types import SimpleNamespace
 from urllib.parse import urljoin, urlparse
 from xml.sax.saxutils import escape
 
@@ -18,12 +19,26 @@ import httpx
 from fastapi.testclient import TestClient
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
-from app.models import APICase, Environment, PerformanceCase, Project, TestPlanRun, TestRun, UICase
+from app.models import (
+    AIModelConfig,
+    APICase,
+    Environment,
+    PerformanceCase,
+    Project,
+    TestPlan,
+    TestPlanRun,
+    TestRun,
+    UIBatchRun,
+    UICase,
+)
+from app.notifications import send_plan_run_notification
+from app.tasks.case_generation import _normalize_model_base_url
 from app.execution_runtime import (
     MissingTemplateVariableError,
     build_request_kwargs,
@@ -32,8 +47,20 @@ from app.execution_runtime import (
     render_data,
     render_template,
 )
-from app.services import finalize_run, mark_run_started
+from app.services import compute_next_run_at, create_plan_run_with_cases, finalize_run, mark_run_started
 from app.timeutil import utc_now_naive
+from app.ui_case_runtime import (
+    build_allowed_origins,
+    choose_exploration_action,
+    choose_healing_candidate,
+    collect_interactive_candidates,
+    ensure_allowed_url,
+    normalize_execution_mode,
+    prohibited_candidate,
+    resolve_semantic_locator,
+    review_visual_checkpoint,
+    semantic_target,
+)
 
 
 # Backward-compatible aliases: old private names now delegate to the shared module.
@@ -181,9 +208,14 @@ def _execute_case_with_retries(db: Session, run: TestRun, execute_once) -> dict:
             if status not in {"FAILED", "ERROR", "TIMEOUT"}:
                 status = "ERROR"
             artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
+            summary_prefix = {
+                "FAILED": "执行失败",
+                "TIMEOUT": "执行超时",
+                "ERROR": "执行异常",
+            }[status]
             last_result = {
                 "status": status,
-                "summary": f"执行异常: {_exception_message(exc)}",
+                "summary": f"{summary_prefix}: {_exception_message(exc)}",
                 "error_type": exception_payload.get("error_type") or "SYSTEM",
                 "stderr_text": traceback.format_exc(),
                 "artifacts_json": artifacts,
@@ -267,6 +299,7 @@ def _ui_step_detail(
     value: str | None = None,
     error: str | None = None,
     screenshot: str | None = None,
+    resolution: dict | None = None,
 ) -> dict:
     detail = {
         "action": step.get("action"),
@@ -274,6 +307,7 @@ def _ui_step_detail(
         "selector": selector,
         "value": value,
         "page_url": page_url,
+        "target": semantic_target(step).get("target") or None,
     }
     for key in ("duration_ms", "width", "height", "state", "wait_until"):
         if step.get(key) is not None:
@@ -282,6 +316,8 @@ def _ui_step_detail(
         detail["error"] = error
     if screenshot:
         detail["screenshot"] = screenshot
+    if resolution:
+        detail["resolution"] = resolution
     return detail
 
 
@@ -296,6 +332,7 @@ def _ui_assertion_as_step(assertion: dict) -> dict:
         "selector_hidden": "assert_hidden",
         "url_contains": "assert_url_contains",
         "title_contains": "assert_title_contains",
+        "visual": "visual_assert",
     }
     return {
         **assertion,
@@ -306,10 +343,31 @@ def _ui_assertion_as_step(assertion: dict) -> dict:
     }
 
 
-def _execute_ui_step(page, step: dict, timeout_ms: int) -> None:
+def _execute_ui_step(page, step: dict, timeout_ms: int, resolved_locator=None) -> dict:
     action = step.get("action")
     selector = step.get("selector")
     value = step.get("value")
+    resolution = None
+    target_actions = {
+        "click",
+        "fill",
+        "press",
+        "select_option",
+        "check",
+        "uncheck",
+        "hover",
+        "wait_for_selector",
+        "assert_visible",
+        "assert_hidden",
+    }
+    if action in target_actions and resolved_locator is None:
+        resolved_locator, resolution = resolve_semantic_locator(
+            page,
+            step,
+            require_visible=action not in {"assert_hidden"},
+        )
+    elif resolved_locator is not None:
+        resolution = {"method": "ai_healing", "used_ai": True}
 
     if action == "goto":
         page.goto(
@@ -318,30 +376,37 @@ def _execute_ui_step(page, step: dict, timeout_ms: int) -> None:
             timeout=timeout_ms,
         )
     elif action == "wait_for_text":
-        if selector:
-            page.locator(selector).filter(has_text=str(value)).first.wait_for(
-                state="visible", timeout=timeout_ms
-            )
-        else:
-            page.locator(f"text={value}").first.wait_for(timeout=timeout_ms)
+        try:
+            if selector or semantic_target(step)["target"]:
+                locator, resolution = resolve_semantic_locator(page, step)
+                locator.filter(has_text=str(value)).first.wait_for(
+                    state="visible", timeout=timeout_ms
+                )
+            else:
+                page.locator(f"text={value}").first.wait_for(timeout=timeout_ms)
+        except PlaywrightTimeoutError as exc:
+            raise AssertionError(
+                f"页面在 {timeout_ms / 1000:g} 秒内未出现文本“{value}”"
+                f"（当前地址：{getattr(page, 'url', '') or '未知'}）"
+            ) from exc
     elif action == "wait_for_selector":
-        page.locator(selector).first.wait_for(
+        resolved_locator.wait_for(
             state=step.get("state") or "visible", timeout=timeout_ms
         )
     elif action == "click":
-        page.locator(selector).first.click(timeout=timeout_ms)
+        resolved_locator.click(timeout=timeout_ms)
     elif action == "fill":
-        page.locator(selector).first.fill(str(value or ""), timeout=timeout_ms)
+        resolved_locator.fill(str(value or ""), timeout=timeout_ms)
     elif action == "press":
-        page.locator(selector).first.press(str(value), timeout=timeout_ms)
+        resolved_locator.press(str(value), timeout=timeout_ms)
     elif action == "select_option":
-        page.locator(selector).first.select_option(value, timeout=timeout_ms)
+        resolved_locator.select_option(value, timeout=timeout_ms)
     elif action == "check":
-        page.locator(selector).first.check(timeout=timeout_ms)
+        resolved_locator.check(timeout=timeout_ms)
     elif action == "uncheck":
-        page.locator(selector).first.uncheck(timeout=timeout_ms)
+        resolved_locator.uncheck(timeout=timeout_ms)
     elif action == "hover":
-        page.locator(selector).first.hover(timeout=timeout_ms)
+        resolved_locator.hover(timeout=timeout_ms)
     elif action == "wait":
         duration_ms = int(step.get("duration_ms") or 0)
         if duration_ms > timeout_ms:
@@ -350,36 +415,45 @@ def _execute_ui_step(page, step: dict, timeout_ms: int) -> None:
     elif action == "set_viewport":
         page.set_viewport_size({"width": int(step["width"]), "height": int(step["height"])})
     elif action == "assert_text":
-        if selector:
-            locator = page.locator(selector).filter(has_text=str(value)).first
-            locator.wait_for(state="visible", timeout=timeout_ms)
-        else:
-            page.locator(f"text={value}").first.wait_for(timeout=timeout_ms)
+        try:
+            if selector or semantic_target(step)["target"]:
+                locator, resolution = resolve_semantic_locator(page, step)
+                locator = locator.filter(has_text=str(value)).first
+                locator.wait_for(state="visible", timeout=timeout_ms)
+            else:
+                page.locator(f"text={value}").first.wait_for(timeout=timeout_ms)
+        except PlaywrightTimeoutError as exc:
+            raise AssertionError(
+                f"断言失败：页面未显示文本“{value}”"
+                f"（当前地址：{getattr(page, 'url', '') or '未知'}）"
+            ) from exc
     elif action == "assert_text_hidden":
-        if selector:
-            page.locator(selector).filter(has_text=str(value)).first.wait_for(
+        if selector or semantic_target(step)["target"]:
+            locator, resolution = resolve_semantic_locator(page, step, require_visible=False)
+            locator.filter(has_text=str(value)).first.wait_for(
                 state="hidden", timeout=timeout_ms
             )
         else:
             page.locator(f"text={value}").first.wait_for(state="hidden", timeout=timeout_ms)
     elif action == "assert_visible":
-        page.locator(selector).first.wait_for(state="visible", timeout=timeout_ms)
+        resolved_locator.wait_for(state="visible", timeout=timeout_ms)
     elif action == "assert_hidden":
-        page.locator(selector).first.wait_for(state="hidden", timeout=timeout_ms)
+        resolved_locator.wait_for(state="hidden", timeout=timeout_ms)
     elif action == "assert_url_contains":
         page.wait_for_function(
             "expected => window.location.href.includes(expected)",
-            str(value),
+            arg=str(value),
             timeout=timeout_ms,
         )
     elif action == "assert_title_contains":
         page.wait_for_function(
             "expected => document.title.includes(expected)",
-            str(value),
+            arg=str(value),
             timeout=timeout_ms,
         )
     else:
         raise ValueError(f"不支持的步骤类型: {action}")
+    return resolution or {"method": "not_applicable", "used_ai": False}
 
 
 def _execute_api_case_httpx(
@@ -783,9 +857,42 @@ def _execute_ui_case(
     steps = _render_data(case.steps_json or [], variables, "case.steps_json")
     assertions = _render_data(case.assertions_json or [], variables, "case.assertions_json")
     expect_text = _render_template(case.expect_text, variables, "case.expect_text")
+    execution_mode = normalize_execution_mode(getattr(case, "execution_mode", None))
+    self_heal_enabled = bool(getattr(case, "self_heal_enabled", False))
+    max_agent_steps = max(1, min(int(getattr(case, "max_agent_steps", 10) or 10), 30))
+    allowed_origins = build_allowed_origins(
+        target_url,
+        project.base_url,
+        getattr(case, "allowed_origins_json", None),
+    )
+    ensure_allowed_url(target_url, allowed_origins)
+    model_config = None
+    needs_model = (
+        execution_mode in {"explore", "visual"}
+        or self_heal_enabled
+        or execution_mode == "adaptive"
+        or any(item.get("type") == "visual" for item in assertions)
+    )
+    if needs_model:
+        model_config = db.scalar(
+            select(AIModelConfig)
+            .where(AIModelConfig.workspace_id == project.workspace_id, AIModelConfig.is_active == 1)
+            .order_by(AIModelConfig.id.desc())
+        )
+        if model_config is None or not model_config.api_key:
+            raise ValueError("当前执行模式需要 AI，请先配置工作空间模型")
+        model_config = SimpleNamespace(
+            api_key=model_config.api_key,
+            model=(model_config.model or settings.case_gen_default_model).strip(),
+            base_url=_normalize_model_base_url(
+                model_config.model,
+                model_config.base_url,
+                model_config.api_key,
+            ),
+        )
 
     checkpoints: list[dict] = []
-    if not steps or steps[0].get("action") != "goto":
+    if execution_mode == "explore" or not steps or steps[0].get("action") != "goto":
         checkpoints.append(
             {
                 "action": "goto",
@@ -794,16 +901,17 @@ def _execute_ui_case(
                 "_kind": "navigation",
             }
         )
-    checkpoints.extend({**step, "_kind": "step"} for step in steps)
-    checkpoints.extend(_ui_assertion_as_step(assertion) for assertion in assertions)
-    checkpoints.append(
-        {
-            "action": "assert_text",
-            "value": expect_text,
-            "name": "最终文本断言",
-            "_kind": "final_assertion",
-        }
-    )
+    if execution_mode != "explore":
+        checkpoints.extend({**step, "_kind": "step"} for step in steps)
+        checkpoints.extend(_ui_assertion_as_step(assertion) for assertion in assertions)
+        checkpoints.append(
+            {
+                "action": "assert_text",
+                "value": expect_text,
+                "name": "最终文本断言",
+                "_kind": "final_assertion",
+            }
+        )
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -815,6 +923,9 @@ def _execute_ui_case(
         step_results = []
         artifacts: list[dict] = []
         screenshot_warnings: list[dict] = []
+        healing_records: list[dict] = []
+        visual_records: list[dict] = []
+        exploration_trajectory: list[dict] = []
         trace_path = os.path.join(_ensure_run_dir(run.id), "ui-trace.zip")
 
         def step_timeout(seconds: int) -> int:
@@ -857,7 +968,122 @@ def _execute_ui_case(
                 selector = step.get("selector")
                 value = step.get("value")
                 try:
-                    _execute_ui_step(page, step, step_timeout(30 if action == "goto" else 20))
+                    resolution = None
+                    if action == "goto":
+                        destination = urljoin(target_url, str(value))
+                        ensure_allowed_url(destination, allowed_origins)
+                        step = {**step, "value": destination}
+                    if action == "visual_assert":
+                        screenshot = page.screenshot(
+                            full_page=True,
+                            timeout=step_timeout(10),
+                            animations="disabled",
+                            caret="hide",
+                        )
+                        screenshot_artifact = _write_run_artifact(
+                            run.id,
+                            f"visual-{index + 1:02d}.png",
+                            screenshot,
+                            binary=True,
+                        )
+                        artifacts.append(screenshot_artifact)
+                        report = review_visual_checkpoint(
+                            model_config=model_config,
+                            expectation=str(value),
+                            screenshot_base64=base64.b64encode(screenshot).decode("ascii"),
+                            page_url=page.url,
+                        )
+                        report.update(
+                            {
+                                "checkpoint": index + 1,
+                                "expectation": value,
+                                "screenshot": screenshot_artifact["name"],
+                            }
+                        )
+                        visual_records.append(report)
+                        artifacts.append(
+                            _write_run_artifact(
+                                run.id,
+                                f"visual-review-{index + 1:02d}.json",
+                                report,
+                            )
+                        )
+                        resolution = {
+                            "method": "visual_model",
+                            "used_ai": True,
+                            "verdict": report["verdict"],
+                            "confidence": report.get("confidence"),
+                        }
+                        if report["verdict"] != "PASS":
+                            raise AssertionError(
+                                f"视觉断言{report['verdict']}：{report.get('reason') or '需要人工复核'}"
+                            )
+                    else:
+                        try:
+                            resolution = _execute_ui_step(
+                                page,
+                                step,
+                                step_timeout(30 if action == "goto" else 20),
+                            )
+                        except Exception as initial_exc:
+                            can_heal = (
+                                action
+                                in {
+                                    "click",
+                                    "fill",
+                                    "press",
+                                    "select_option",
+                                    "check",
+                                    "uncheck",
+                                    "hover",
+                                    "wait_for_selector",
+                                    "assert_visible",
+                                }
+                                and model_config is not None
+                                and (self_heal_enabled or execution_mode == "adaptive")
+                            )
+                            if not can_heal:
+                                raise
+                            candidates = collect_interactive_candidates(page)
+                            healed = choose_healing_candidate(
+                                model_config=model_config,
+                                step=step,
+                                candidates=candidates,
+                            )
+                            blocked_term = prohibited_candidate(
+                                healed["candidate"],
+                                getattr(case, "prohibited_actions_json", None),
+                            )
+                            if blocked_term:
+                                raise ValueError(f"AI 自愈候选命中禁止操作：{blocked_term}")
+                            if healed["candidate"].get("href"):
+                                ensure_allowed_url(healed["candidate"]["href"], allowed_origins)
+                            healed_locator = page.locator(
+                                f'[data-omnitest-agent-ref="{healed["candidate_id"]}"]'
+                            )
+                            resolution = _execute_ui_step(
+                                page,
+                                step,
+                                step_timeout(20),
+                                resolved_locator=healed_locator,
+                            )
+                            resolution.update(
+                                {
+                                    "candidate_id": healed["candidate_id"],
+                                    "candidate": healed["candidate"],
+                                    "confidence": healed.get("confidence"),
+                                    "reason": healed.get("reason"),
+                                    "initial_error": str(initial_exc),
+                                }
+                            )
+                            healing_records.append(
+                                {
+                                    "checkpoint": index + 1,
+                                    "target": semantic_target(step),
+                                    **resolution,
+                                }
+                            )
+                    ensure_allowed_url(page.url, allowed_origins)
                     screenshot_artifact = capture_step_screenshot(index, action or "step")
                     step_results.append(
                         {
@@ -870,6 +1096,7 @@ def _execute_ui_case(
                                 selector=selector,
                                 value=value if isinstance(value, str) else None,
                                 screenshot=screenshot_artifact["name"] if screenshot_artifact else None,
+                                resolution=resolution,
                             ),
                         }
                     )
@@ -891,6 +1118,123 @@ def _execute_ui_case(
                         }
                     )
                     raise
+            if execution_mode == "explore":
+                goal = str(case.ai_goal or case.expect_text or case.name)
+                for agent_index in range(max_agent_steps):
+                    candidates = collect_interactive_candidates(page)
+                    decision = choose_exploration_action(
+                        model_config=model_config,
+                        goal=goal,
+                        history=exploration_trajectory,
+                        candidates=candidates,
+                    )
+                    action = str(decision.get("action") or "finish").strip().lower()
+                    record = {
+                        "agent_step": agent_index + 1,
+                        "action": action,
+                        "candidate_id": decision.get("candidate_id"),
+                        "value": decision.get("value"),
+                        "finding": decision.get("finding"),
+                        "reason": decision.get("reason"),
+                        "page_url": page.url,
+                    }
+                    if action == "finish":
+                        exploration_trajectory.append(record)
+                        step_results.append(
+                            {
+                                "name": f"探索决策 {agent_index + 1}",
+                                "status": "SUCCESS",
+                                "duration_ms": 0,
+                                "detail": {**record, "resolution": {"method": "ai_exploration", "used_ai": True}},
+                            }
+                        )
+                        break
+                    if action not in {"click", "fill", "press"}:
+                        raise ValueError(f"探索模型返回了不支持的动作：{action}")
+                    candidate_id = str(decision.get("candidate_id") or "")
+                    candidate = next(
+                        (item for item in candidates if item["candidate_id"] == candidate_id),
+                        None,
+                    )
+                    if candidate is None:
+                        raise ValueError("探索模型选择了不存在的候选元素")
+                    blocked_term = prohibited_candidate(
+                        candidate,
+                        getattr(case, "prohibited_actions_json", None),
+                    )
+                    if blocked_term:
+                        record["blocked"] = blocked_term
+                        exploration_trajectory.append(record)
+                        step_results.append(
+                            {
+                                "name": f"探索决策 {agent_index + 1}",
+                                "status": "SUCCESS",
+                                "duration_ms": 0,
+                                "detail": record,
+                            }
+                        )
+                        continue
+                    if candidate.get("href"):
+                        ensure_allowed_url(candidate["href"], allowed_origins)
+                    started_at = time.perf_counter()
+                    dynamic_step = {
+                        "action": action,
+                        "value": decision.get("value"),
+                        "target": candidate.get("text") or candidate.get("aria_label") or candidate_id,
+                        "_kind": "exploration",
+                    }
+                    locator = page.locator(f'[data-omnitest-agent-ref="{candidate_id}"]')
+                    resolution = _execute_ui_step(
+                        page,
+                        dynamic_step,
+                        step_timeout(20),
+                        resolved_locator=locator,
+                    )
+                    ensure_allowed_url(page.url, allowed_origins)
+                    screenshot_artifact = capture_step_screenshot(
+                        len(step_results),
+                        f"explore-{action}",
+                    )
+                    record.update({"candidate": candidate, "screenshot": screenshot_artifact["name"] if screenshot_artifact else None})
+                    exploration_trajectory.append(record)
+                    step_results.append(
+                        {
+                            "name": f"探索 {agent_index + 1}：{action}",
+                            "status": "SUCCESS",
+                            "duration_ms": int((time.perf_counter() - started_at) * 1000),
+                            "detail": _ui_step_detail(
+                                dynamic_step,
+                                page_url=page.url,
+                                value=str(decision.get("value") or "") or None,
+                                screenshot=screenshot_artifact["name"] if screenshot_artifact else None,
+                                resolution={
+                                    **resolution,
+                                    "candidate_id": candidate_id,
+                                    "candidate": candidate,
+                                },
+                            ),
+                        }
+                    )
+                artifacts.append(
+                    _write_run_artifact(
+                        run.id,
+                        "exploration-trajectory.json",
+                        {
+                            "goal": goal,
+                            "max_agent_steps": max_agent_steps,
+                            "release_gate_eligible": False,
+                            "trajectory": exploration_trajectory,
+                        },
+                    )
+                )
+            if healing_records:
+                artifacts.append(
+                    _write_run_artifact(
+                        run.id,
+                        "locator-healing.json",
+                        {"records": healing_records},
+                    )
+                )
             summary_screenshot = page.screenshot(
                 full_page=True,
                 timeout=step_timeout(10),
@@ -906,7 +1250,11 @@ def _execute_ui_case(
                     artifacts.append({"name": "ui-trace.zip", "path": trace_path, "type": "zip"})
             return {
                 "status": "SUCCESS",
-                "summary": f"UI 用例执行成功，共 {len(step_results)} 个检查点",
+                "summary": (
+                    f"UI 探索完成，共 {len(step_results)} 个决策点"
+                    if execution_mode == "explore"
+                    else f"UI 用例执行成功，共 {len(step_results)} 个检查点"
+                ),
                 "error_type": None,
                 "exit_code": 0,
                 "stdout_text": f"UI case visited {target_url}\nfinal_url={page.url}",
@@ -916,11 +1264,22 @@ def _execute_ui_case(
                     "target_url": target_url,
                     "steps": steps,
                     "assertions": assertions,
+                    "execution_mode": execution_mode,
+                    "self_heal_enabled": self_heal_enabled,
                 },
                 "response_payload": {
                     "expect_text": expect_text,
                     "final_url": page.url,
                     "checkpoint_count": len(step_results),
+                    "execution_mode": execution_mode,
+                    "healing_count": len(healing_records),
+                    "visual_reviews": visual_records,
+                    "exploration_findings": [
+                        item.get("finding")
+                        for item in exploration_trajectory
+                        if item.get("finding")
+                    ],
+                    "release_gate_eligible": execution_mode != "explore",
                 },
                 "step_results_json": step_results,
             }
@@ -1349,6 +1708,7 @@ def run_test_plan(plan_run_id: int) -> dict:
         db.commit()
         db.refresh(plan_run)
 
+        send_plan_run_notification(db, plan_run.id)
         return {"status": plan_status, "summary": plan_run.summary}
     except Exception as exc:
         plan_run = db.get(TestPlanRun, plan_run_id)
@@ -1358,6 +1718,197 @@ def run_test_plan(plan_run_id: int) -> dict:
             plan_run.summary = f"测试计划执行异常: {exc}"
             plan_run.finished_at = utc_now_naive()
             plan_run.duration_ms = int((time.perf_counter() - started_at) * 1000)
+            db.commit()
+            send_plan_run_notification(db, plan_run.id)
+        return {"status": "FAILED", "summary": str(exc)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.scan_scheduled_plans")
+def scan_scheduled_plans() -> dict:
+    """Beat 周期任务：扫描到期的定时测试计划并触发执行。
+
+    单实例 beat + next_run_at 顺延保证幂等：已有 PENDING/RUNNING 的 run
+    或计划无用例时仅顺延不重复触发，防止任务堆积。
+    """
+    db = _open_db()
+    triggered: list[int] = []
+    skipped: list[int] = []
+    try:
+        now = utc_now_naive()
+        plans = list(
+            db.scalars(
+                select(TestPlan).where(
+                    TestPlan.schedule_enabled.is_(True),
+                    TestPlan.next_run_at.is_not(None),
+                    TestPlan.next_run_at <= now,
+                )
+            ).all()
+        )
+        for plan in plans:
+            if not plan.schedule_cron:
+                plan.schedule_enabled = False
+                plan.next_run_at = None
+                db.commit()
+                continue
+            try:
+                next_run_at = compute_next_run_at(plan.schedule_cron)
+            except Exception:
+                plan.schedule_enabled = False
+                plan.next_run_at = None
+                db.commit()
+                continue
+
+            has_active_run = db.scalar(
+                select(TestPlanRun.id)
+                .where(
+                    TestPlanRun.plan_id == plan.id,
+                    TestPlanRun.status.in_(["PENDING", "RUNNING"]),
+                )
+                .limit(1)
+            )
+            if has_active_run is not None:
+                plan.next_run_at = next_run_at
+                db.commit()
+                skipped.append(plan.id)
+                continue
+
+            try:
+                plan_run = create_plan_run_with_cases(
+                    db,
+                    plan,
+                    environment_id=plan.schedule_environment_id,
+                    timeout_seconds=plan.schedule_timeout_seconds,
+                    max_retries=plan.schedule_max_retries or 0,
+                )
+            except ValueError:
+                # 计划未配置用例：仅顺延，不视为错误
+                plan.next_run_at = next_run_at
+                db.commit()
+                skipped.append(plan.id)
+                continue
+
+            plan.last_triggered_at = now
+            plan.next_run_at = next_run_at
+            db.commit()
+            run_test_plan.delay(plan_run.id)
+            triggered.append(plan.id)
+        return {"triggered": triggered, "skipped": skipped}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.run_ui_batch")
+def run_ui_batch(batch_run_id: int) -> dict:
+    db = _open_db()
+    started_at = time.perf_counter()
+    try:
+        batch_run = db.get(UIBatchRun, batch_run_id)
+        if batch_run is None:
+            return {"status": "FAILED", "summary": f"批量执行 {batch_run_id} 不存在"}
+
+        batch_run.status = "RUNNING"
+        batch_run.summary = "批量执行中"
+        batch_run.started_at = utc_now_naive()
+        db.commit()
+        db.refresh(batch_run)
+
+        runs = db.query(TestRun).filter(TestRun.batch_run_id == batch_run.id).order_by(TestRun.id.asc()).all()
+        total = len(runs)
+        pass_count = 0
+        fail_count = 0
+
+        for run in runs:
+            case_started_at = time.perf_counter()
+            try:
+                project = db.get(Project, run.project_id)
+                if project is None:
+                    finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
+                    fail_count += 1
+                    continue
+
+                case_type = (run.case_type or "UI").upper()
+                if case_type == "API":
+                    case = db.get(APICase, run.case_id)
+                elif case_type == "PERF":
+                    case = db.get(PerformanceCase, run.case_id)
+                else:
+                    case = db.get(UICase, run.case_id)
+                if case is None:
+                    finalize_run(db, run, status="FAILED", summary="用例不存在", error_type="SYSTEM")
+                    fail_count += 1
+                    continue
+                if not mark_run_started(db, run):
+                    fail_count += 1
+                    continue
+                if case_type == "API":
+                    result = _execute_case_with_retries(
+                        db, run, lambda deadline: _execute_api_case(db, run, case, project, deadline=deadline)
+                    )
+                elif case_type == "PERF":
+                    result = _execute_case_with_retries(
+                        db, run, lambda deadline: _execute_performance_case(db, run, case, project, deadline=deadline)
+                    )
+                else:
+                    result = _execute_case_with_retries(
+                        db, run, lambda deadline: _execute_ui_case(db, run, case, project, deadline=deadline)
+                    )
+
+                finalize_run(
+                    db,
+                    run,
+                    status=result["status"],
+                    summary=result["summary"],
+                    error_type=result.get("error_type"),
+                    exit_code=result.get("exit_code"),
+                    stdout_text=result.get("stdout_text"),
+                    stderr_text=result.get("stderr_text"),
+                    artifacts_json=result.get("artifacts_json"),
+                    step_results_json=result.get("step_results_json"),
+                    duration_ms=int((time.perf_counter() - case_started_at) * 1000),
+                    request_payload=result["request_payload"],
+                    response_payload=result["response_payload"],
+                )
+                if result["status"] == "SUCCESS":
+                    pass_count += 1
+                else:
+                    fail_count += 1
+            except Exception as exc:
+                artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
+                finalize_run(
+                    db,
+                    run,
+                    status="ERROR",
+                    summary=f"执行异常: {exc}",
+                    error_type="SYSTEM",
+                    stderr_text=traceback.format_exc(),
+                    artifacts_json=artifacts,
+                    step_results_json=step_results,
+                    duration_ms=int((time.perf_counter() - case_started_at) * 1000),
+                )
+                fail_count += 1
+
+        batch_status = "SUCCESS" if fail_count == 0 else "FAILED"
+        batch_run.status = batch_status
+        batch_run.summary = f"总计 {total}，成功 {pass_count}，失败 {fail_count}"
+        batch_run.total_count = total
+        batch_run.pass_count = pass_count
+        batch_run.fail_count = fail_count
+        batch_run.finished_at = utc_now_naive()
+        batch_run.duration_ms = int((time.perf_counter() - started_at) * 1000)
+        db.commit()
+        db.refresh(batch_run)
+
+        return {"status": batch_status, "summary": batch_run.summary}
+    except Exception as exc:
+        batch_run = db.get(UIBatchRun, batch_run_id)
+        if batch_run is not None:
+            batch_run.status = "FAILED"
+            batch_run.error_type = "SYSTEM"
+            batch_run.summary = f"批量执行异常: {exc}"
+            batch_run.finished_at = utc_now_naive()
+            batch_run.duration_ms = int((time.perf_counter() - started_at) * 1000)
             db.commit()
         return {"status": "FAILED", "summary": str(exc)}
     finally:

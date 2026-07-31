@@ -677,6 +677,23 @@ def _trusted_evidence_trace(
     }
 
 
+def _case_scenario_text(case: dict | None) -> str:
+    """Build the scenario text used to judge current-state allowances.
+
+    Mirrors the generation-stage contract (see testcase_impl) so the delivery
+    detector recognises the same partial-selection signals (e.g. 非全选状态)
+    carried in title/preconditions/steps/scenario_dimensions instead of only
+    the expected_result text.
+    """
+    case = case or {}
+    return _compact_case_text([
+        case.get("title"),
+        case.get("preconditions"),
+        case.get("steps"),
+        case.get("scenario_dimensions"),
+    ])
+
+
 def _build_trusted_semantic_review(
     evidence_trace: dict,
     function_points: dict,
@@ -788,6 +805,7 @@ def _build_trusted_semantic_review(
             continue
         case = case_by_id.get(str(finding.get("case_id") or "").strip())
         source = source_bundles.get(str((case or {}).get("source_id") or finding.get("source_id") or "").strip()) or {}
+        scenario_text = _case_scenario_text(case)
         current_bases = []
         for basis in (case or {}).get("assertion_basis") or []:
             if not isinstance(basis, dict):
@@ -804,6 +822,7 @@ def _build_trusted_semantic_review(
                 source,
                 str(basis.get("expected_result") or "").strip(),
                 str(basis.get("source_quote") or "").strip(),
+                scenario_text,
             )
             for basis in current_bases
         ):
@@ -821,6 +840,7 @@ def _build_trusted_semantic_review(
         source = source_bundles.get(source_id) or {}
         if not (source.get("source_state_semantics") or {}).get("has_state_transition"):
             continue
+        scenario_text = _case_scenario_text(case)
         for basis in case.get("assertion_basis") or []:
             if not isinstance(basis, dict):
                 continue
@@ -835,6 +855,7 @@ def _build_trusted_semantic_review(
                 source,
                 expected_result,
                 str(basis.get("source_quote") or "").strip(),
+                scenario_text,
             ):
                 continue
             if case_id not in existing_current_state_cases:

@@ -4989,6 +4989,7 @@ from app.tasks.case_generation_v2_pipeline.stages.scope_impl import (
     _requirement_state_semantics,
     _is_state_label_only,
     _source_evidence_role,
+    _source_quote_contains_target_evidence,
     _current_state_basis_is_allowed,
     _current_state_positive_expectation_is_retained,
     _current_state_expectation_is_allowed,

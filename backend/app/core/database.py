@@ -141,6 +141,48 @@ def ensure_schema(db_engine) -> list[str]:
         )
         add_column_if_missing(
             connection,
+            "test_plans",
+            "schedule_enabled",
+            "ALTER TABLE test_plans ADD COLUMN schedule_enabled BOOLEAN NOT NULL DEFAULT 0",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "schedule_cron",
+            "ALTER TABLE test_plans ADD COLUMN schedule_cron VARCHAR(120) NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "schedule_environment_id",
+            "ALTER TABLE test_plans ADD COLUMN schedule_environment_id INTEGER NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "schedule_timeout_seconds",
+            "ALTER TABLE test_plans ADD COLUMN schedule_timeout_seconds INTEGER NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "schedule_max_retries",
+            "ALTER TABLE test_plans ADD COLUMN schedule_max_retries INTEGER NOT NULL DEFAULT 0",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "next_run_at",
+            "ALTER TABLE test_plans ADD COLUMN next_run_at DATETIME NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "last_triggered_at",
+            "ALTER TABLE test_plans ADD COLUMN last_triggered_at DATETIME NULL",
+        )
+        add_column_if_missing(
+            connection,
             "users",
             "password_hash",
             "ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NULL",
@@ -161,6 +203,10 @@ def ensure_schema(db_engine) -> list[str]:
         extra_columns = [
             ("projects", "created_by", "ALTER TABLE projects ADD COLUMN created_by INTEGER NULL"),
             ("projects", "updated_by", "ALTER TABLE projects ADD COLUMN updated_by INTEGER NULL"),
+            ("projects", "status", "ALTER TABLE projects ADD COLUMN status VARCHAR(20) NULL DEFAULT 'ACTIVE'"),
+            ("projects", "code", "ALTER TABLE projects ADD COLUMN code VARCHAR(40) NULL"),
+            ("projects", "start_date", "ALTER TABLE projects ADD COLUMN start_date DATETIME NULL"),
+            ("projects", "end_date", "ALTER TABLE projects ADD COLUMN end_date DATETIME NULL"),
             ("api_cases", "priority", "ALTER TABLE api_cases ADD COLUMN priority VARCHAR(20) NULL"),
             ("api_cases", "status", "ALTER TABLE api_cases ADD COLUMN status VARCHAR(20) NULL"),
             ("api_cases", "review_status", "ALTER TABLE api_cases ADD COLUMN review_status VARCHAR(20) NULL"),
@@ -181,6 +227,11 @@ def ensure_schema(db_engine) -> list[str]:
             ("ui_cases", "tags_json", "ALTER TABLE ui_cases ADD COLUMN tags_json JSON NULL"),
             ("ui_cases", "assertions_json", "ALTER TABLE ui_cases ADD COLUMN assertions_json JSON NULL"),
             ("ui_cases", "generation_mode", "ALTER TABLE ui_cases ADD COLUMN generation_mode VARCHAR(30) NULL"),
+            ("ui_cases", "execution_mode", "ALTER TABLE ui_cases ADD COLUMN execution_mode VARCHAR(30) NULL DEFAULT 'stable'"),
+            ("ui_cases", "self_heal_enabled", "ALTER TABLE ui_cases ADD COLUMN self_heal_enabled INTEGER NULL DEFAULT 0"),
+            ("ui_cases", "max_agent_steps", "ALTER TABLE ui_cases ADD COLUMN max_agent_steps INTEGER NULL DEFAULT 10"),
+            ("ui_cases", "allowed_origins_json", "ALTER TABLE ui_cases ADD COLUMN allowed_origins_json JSON NULL"),
+            ("ui_cases", "prohibited_actions_json", "ALTER TABLE ui_cases ADD COLUMN prohibited_actions_json JSON NULL"),
             ("ui_cases", "ai_goal", "ALTER TABLE ui_cases ADD COLUMN ai_goal TEXT NULL"),
             ("ui_cases", "skill_name", "ALTER TABLE ui_cases ADD COLUMN skill_name VARCHAR(120) NULL"),
             ("ui_cases", "skill_version", "ALTER TABLE ui_cases ADD COLUMN skill_version VARCHAR(30) NULL"),
@@ -239,6 +290,17 @@ def ensure_schema(db_engine) -> list[str]:
             ("test_runs", "stderr_text", "ALTER TABLE test_runs ADD COLUMN stderr_text TEXT NULL"),
             ("test_runs", "artifacts_json", "ALTER TABLE test_runs ADD COLUMN artifacts_json JSON NULL"),
             ("test_runs", "step_results_json", "ALTER TABLE test_runs ADD COLUMN step_results_json JSON NULL"),
+            ("test_runs", "batch_run_id", "ALTER TABLE test_runs ADD COLUMN batch_run_id INTEGER NULL"),
+            ("ui_cases", "submitted_review_at", "ALTER TABLE ui_cases ADD COLUMN submitted_review_at DATETIME NULL"),
+            ("ui_cases", "reviewed_by", "ALTER TABLE ui_cases ADD COLUMN reviewed_by INTEGER NULL"),
+            ("ui_cases", "reviewed_at", "ALTER TABLE ui_cases ADD COLUMN reviewed_at DATETIME NULL"),
+            ("api_cases", "submitted_review_at", "ALTER TABLE api_cases ADD COLUMN submitted_review_at DATETIME NULL"),
+            ("api_cases", "reviewed_by", "ALTER TABLE api_cases ADD COLUMN reviewed_by INTEGER NULL"),
+            ("api_cases", "reviewed_at", "ALTER TABLE api_cases ADD COLUMN reviewed_at DATETIME NULL"),
+            ("performance_cases", "submitted_review_at", "ALTER TABLE performance_cases ADD COLUMN submitted_review_at DATETIME NULL"),
+            ("performance_cases", "reviewed_by", "ALTER TABLE performance_cases ADD COLUMN reviewed_by INTEGER NULL"),
+            ("performance_cases", "reviewed_at", "ALTER TABLE performance_cases ADD COLUMN reviewed_at DATETIME NULL"),
+            ("ui_batch_runs", "case_type", "ALTER TABLE ui_batch_runs ADD COLUMN case_type VARCHAR(20) NULL DEFAULT 'UI'"),
             ("case_generation_jobs", "task_id", "ALTER TABLE case_generation_jobs ADD COLUMN task_id VARCHAR(120) NULL"),
             ("case_generation_jobs", "active_attempt_id", "ALTER TABLE case_generation_jobs ADD COLUMN active_attempt_id INTEGER NULL"),
             ("case_generation_artifacts", "attempt_id", "ALTER TABLE case_generation_artifacts ADD COLUMN attempt_id INTEGER NULL"),
@@ -259,6 +321,11 @@ def ensure_schema(db_engine) -> list[str]:
             connection,
             "idx_test_runs_plan_run_id",
             "CREATE INDEX IF NOT EXISTS idx_test_runs_plan_run_id ON test_runs(plan_run_id)",
+        )
+        create_index_if_missing(
+            connection,
+            "idx_test_runs_batch_run_id",
+            "CREATE INDEX IF NOT EXISTS idx_test_runs_batch_run_id ON test_runs(batch_run_id)",
         )
         create_index_if_missing(
             connection,

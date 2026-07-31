@@ -26,6 +26,13 @@
         "required": ["action"],
         "properties": {
           "name": { "type": "string" },
+          "target": { "type": "string" },
+          "test_id": { "type": "string" },
+          "role": { "type": "string" },
+          "accessible_name": { "type": "string" },
+          "label": { "type": "string" },
+          "placeholder": { "type": "string" },
+          "text": { "type": "string" },
           "action": {
             "enum": [
               "goto", "click", "fill", "press", "select_option", "check",
@@ -35,13 +42,19 @@
             ]
           },
           "selector": { "type": "string" },
-          "value": {},
+          "value": { "description": "Required for goto, fill, press, select_option, wait_for_text, and assert_text." },
           "duration_ms": { "type": "integer", "minimum": 1, "maximum": 60000 },
           "state": { "enum": ["visible", "hidden", "attached", "detached"] },
           "wait_until": { "enum": ["domcontentloaded", "load", "networkidle"] },
           "width": { "type": "integer", "minimum": 320, "maximum": 3840 },
           "height": { "type": "integer", "minimum": 320, "maximum": 2160 }
         },
+        "allOf": [
+          {
+            "if": { "properties": { "action": { "enum": ["goto", "fill", "press", "select_option", "wait_for_text", "assert_text"] } } },
+            "then": { "required": ["value"] }
+          }
+        ],
         "additionalProperties": false
       }
     },
@@ -52,15 +65,28 @@
         "required": ["type"],
         "properties": {
           "name": { "type": "string" },
+          "target": { "type": "string" },
+          "test_id": { "type": "string" },
+          "role": { "type": "string" },
+          "accessible_name": { "type": "string" },
+          "label": { "type": "string" },
+          "placeholder": { "type": "string" },
+          "text": { "type": "string" },
           "type": {
             "enum": [
               "text_present", "text_visible", "text_hidden", "selector_visible",
-              "selector_hidden", "url_contains", "title_contains"
+              "selector_hidden", "url_contains", "title_contains", "visual"
             ]
           },
           "selector": { "type": "string" },
-          "value": { "type": "string" }
+          "value": { "type": "string", "description": "Required for text, URL, title, and visual assertions." }
         },
+        "allOf": [
+          {
+            "if": { "properties": { "type": { "enum": ["text_present", "text_visible", "text_hidden", "url_contains", "title_contains", "visual"] } } },
+            "then": { "required": ["value"] }
+          }
+        ],
         "additionalProperties": false
       }
     },
