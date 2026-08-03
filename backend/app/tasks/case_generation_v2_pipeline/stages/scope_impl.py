@@ -159,6 +159,20 @@ def _source_evidence_role(source: dict, *, basis_type: str, basis_ref: str = "",
     return "unspecified"
 
 
+def _source_quote_contains_target_evidence(source: dict, source_quote: str) -> bool:
+    """Accept target-only quotes and exact mixed current/target source excerpts."""
+    quote = _normalize_requirement_quote(source_quote)
+    if not quote or _is_state_label_only(source_quote):
+        return False
+    if _source_evidence_role(source, basis_type="text", source_quote=source_quote) == "target":
+        return True
+    semantics = source.get("source_state_semantics") if isinstance(source.get("source_state_semantics"), dict) else {}
+    target_text = _normalize_requirement_quote(semantics.get("target_text") or "")
+    if not target_text or len(target_text) < 8 or _is_state_label_only(target_text):
+        return False
+    return target_text in quote
+
+
 def _current_state_basis_is_allowed(expected_result: str) -> bool:
     return bool(_CURRENT_STATE_NEGATION_PATTERN.search(str(expected_result or "")))
 

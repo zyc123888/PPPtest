@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import secrets
 import shutil
 import time
 from datetime import datetime
@@ -9,19 +10,24 @@ from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree as ET
 
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import String, cast, delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import schemas, services
+from app import notifications
+from app import spec_import
 from app.core.config import settings
 from app.core.celery_app import celery_app
 from app.core.database import get_db
 from app.models import (
     APICase,
     AIModelConfig,
+    Activity,
+    ApiToken,
     CaseGenerationArtifact,
     CaseGenerationAttempt,
     CaseGenerationJob,
@@ -29,17 +35,28 @@ from app.models import (
     CaseGenerationV2Attempt,
     CaseGenerationV2Job,
     CaseChangeHistory,
+    Comment,
+    Defect,
+    DefectCaseLink,
     DefectRecord,
+    DefectRunLink,
     Environment,
     ExecutionArtifact,
     ExecutionLog,
     ExecutionStep,
+    Iteration,
     PerformanceCase,
     Project,
+    ProjectMember,
+    ProjectNotificationSetting,
+    ProjectTask,
+    Requirement,
+    RequirementCaseLink,
     TestPlan,
     TestPlanCase,
     TestPlanRun,
     TestRun,
+    UIBatchRun,
     UICase,
     User,
     Workspace,
@@ -47,8 +64,10 @@ from app.models import (
 )
 from app.execution_runtime import (
     MissingTemplateVariableError,
+    build_variable_context,
     prepare_http_request,
 )
+from app.assertion_engine import ResponseFacts, evaluate_assertions, run_extractors
 from app.model_registry import case_generation_model_options
 from app.tasks.case_generation import (
     _normalize_model_base_url,
@@ -68,6 +87,7 @@ from app.tasks.executions import (
     run_api_case,
     run_performance_case,
     run_test_plan,
+    run_ui_batch,
     run_ui_case,
 )
 from app.timeutil import utc_now_naive
@@ -128,20 +148,65 @@ def _require_workspace_access(db: Session, user: User, workspace_id: int) -> Non
         raise HTTPException(status_code=403, detail="无权访问该工作空间")
 
 
+def _project_has_members(db: Session, project_id: int) -> bool:
+    """项目是否配置了显式成员（一旦配置即进入项目级隔离模式）。"""
+    return db.scalar(
+        select(ProjectMember.id).where(ProjectMember.project_id == project_id).limit(1)
+    ) is not None
+
+
+def _is_project_member(db: Session, user: User, project_id: int) -> bool:
+    return db.scalar(
+        select(ProjectMember.id).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user.id,
+        )
+    ) is not None
+
+
+def _can_access_project(db: Session, user: User, project: Project) -> bool:
+    """项目级数据隔离判定。
+
+    - admin 拥有全部权限；
+    - 显式项目成员始终可访问；
+    - 项目一旦配置显式成员则仅成员可访问（隔离模式）；
+    - 未配置成员时回退到工作空间级可见性（向后兼容旧行为）。
+    """
+    if user.role == "admin":
+        return True
+    if _is_project_member(db, user, project.id):
+        return True
+    if _project_has_members(db, project.id):
+        return False
+    return _can_access_workspace(db, user, project.workspace_id)
+
+
 def _require_project_access(db: Session, user: User, project: Project | None) -> Project:
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
-    _require_workspace_access(db, user, project.workspace_id)
+    if not _can_access_project(db, user, project):
+        raise HTTPException(status_code=403, detail="无权访问该项目")
     return project
 
 
 def _accessible_project_ids(db: Session, user: User) -> list[int]:
     if user.role == "admin":
         return list(db.scalars(select(Project.id)).all())
+    # 用户显式加入的项目（隔离授权）
+    member_project_ids = set(
+        db.scalars(select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)).all()
+    )
+    # 所有配置了显式成员的项目（处于隔离模式，非成员不可见）
+    restricted_project_ids = set(db.scalars(select(ProjectMember.project_id).distinct()).all())
+    # 用户所在工作空间下的项目
     workspace_ids = _workspace_ids_for_user(db, user)
-    if not workspace_ids:
-        return []
-    return list(db.scalars(select(Project.id).where(Project.workspace_id.in_(workspace_ids))).all())
+    workspace_project_ids: set[int] = set()
+    if workspace_ids:
+        workspace_project_ids = set(
+            db.scalars(select(Project.id).where(Project.workspace_id.in_(workspace_ids))).all()
+        )
+    accessible = member_project_ids | (workspace_project_ids - restricted_project_ids)
+    return list(accessible)
 
 
 def _workspace_names_for_user(db: Session, user_id: int) -> list[str]:
@@ -157,18 +222,19 @@ def _workspace_names_for_user(db: Session, user_id: int) -> list[str]:
 
 def _workspace_memberships_for_user(db: Session, user_id: int) -> list[schemas.UserWorkspaceMembership]:
     rows = db.execute(
-        select(WorkspaceMember.workspace_id, Workspace.name, WorkspaceMember.role)
+        select(WorkspaceMember.id, WorkspaceMember.workspace_id, Workspace.name, WorkspaceMember.role)
         .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
         .where(WorkspaceMember.user_id == user_id)
         .order_by(Workspace.name.asc())
     ).all()
     return [
         schemas.UserWorkspaceMembership(
+            member_id=member_id,
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             role=role,
         )
-        for workspace_id, workspace_name, role in rows
+        for member_id, workspace_id, workspace_name, role in rows
     ]
 
 
@@ -493,6 +559,24 @@ def _build_report_insights(
 def _validation_issues_for_api_case(case: APICase, variables: dict | None) -> list[schemas.EnvironmentValidationIssue]:
     case_scope = f"api_case:{case.name}"
     issues: list[schemas.EnvironmentValidationIssue] = []
+    if case.steps_json:
+        # 场景模式：前序步骤提取的变量在执行时才产生，预检时视为已知变量
+        known = dict(variables or {})
+        for index, step in enumerate(case.steps_json):
+            if not isinstance(step, dict):
+                continue
+            step_scope = f"{case_scope}#step{index + 1}"
+            issues.extend(_collect_missing_template_issues(step.get("path"), known, scope=step_scope, field="path"))
+            issues.extend(
+                _collect_missing_template_issues(step.get("headers_json"), known, scope=step_scope, field="headers_json")
+            )
+            issues.extend(
+                _collect_missing_template_issues(step.get("body_json"), known, scope=step_scope, field="body_json")
+            )
+            for extractor in step.get("extractors") or []:
+                if isinstance(extractor, dict) and str(extractor.get("name") or "").strip():
+                    known[str(extractor["name"]).strip()] = "__extracted__"
+        return issues
     issues.extend(_collect_missing_template_issues(case.path, variables, scope=case_scope, field="path"))
     issues.extend(_collect_missing_template_issues(case.headers_json, variables, scope=case_scope, field="headers_json"))
     issues.extend(_collect_missing_template_issues(case.body_json, variables, scope=case_scope, field="body_json"))
@@ -766,6 +850,12 @@ def _serialize_unified_case(case_type: str, case) -> schemas.UnifiedCaseRead:
         "body_json": getattr(case, "body_json", None),
         "assertions_json": getattr(case, "assertions_json", None),
         "generation_mode": getattr(case, "generation_mode", None),
+        "execution_mode": getattr(case, "execution_mode", None),
+        "engine": getattr(case, "engine", "native") or "native",
+        "self_heal_enabled": bool(getattr(case, "self_heal_enabled", False)),
+        "max_agent_steps": getattr(case, "max_agent_steps", None),
+        "allowed_origins_json": getattr(case, "allowed_origins_json", None),
+        "prohibited_actions_json": getattr(case, "prohibited_actions_json", None),
         "ai_goal": getattr(case, "ai_goal", None),
         "skill_name": getattr(case, "skill_name", None),
         "skill_version": getattr(case, "skill_version", None),
@@ -820,6 +910,12 @@ def _case_snapshot(case) -> dict:
         "version_no",
         "review_note",
         "generation_mode",
+        "execution_mode",
+        "engine",
+        "self_heal_enabled",
+        "max_agent_steps",
+        "allowed_origins_json",
+        "prohibited_actions_json",
         "ai_goal",
         "skill_name",
         "skill_version",
@@ -836,6 +932,12 @@ def _ensure_case_defaults(case) -> None:
         case.version_no = "1.0.0"
     if hasattr(case, "generation_mode") and not getattr(case, "generation_mode", None):
         case.generation_mode = "manual"
+    if hasattr(case, "execution_mode") and not getattr(case, "execution_mode", None):
+        case.execution_mode = "stable"
+    if hasattr(case, "engine") and not getattr(case, "engine", None):
+        case.engine = "native"
+    if hasattr(case, "max_agent_steps") and not getattr(case, "max_agent_steps", None):
+        case.max_agent_steps = 10
 
 
 def _record_case_history(
@@ -897,6 +999,54 @@ public_router = APIRouter()
 protected_router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
+def _normalize_mock_path(value: str | None) -> str:
+    """去除查询串并规范化为以 / 开头的路径。"""
+    raw = (value or "").split("?", 1)[0]
+    raw = raw.strip()
+    if not raw:
+        return "/"
+    return "/" + raw.strip("/")
+
+
+@public_router.api_route(
+    "/mock/{project_id}/{mock_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+)
+def mock_service(
+    project_id: int,
+    mock_path: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    """轻量 Mock 服务：按 method+path 匹配已启用 Mock 的接口用例，返回其预设响应。
+
+    mock_config_json 结构：{status_code, headers, body, delay_ms}。无匹配时返回 404。
+    """
+    method = request.method.upper()
+    target = _normalize_mock_path(mock_path)
+    candidates = db.scalars(
+        select(APICase).where(
+            APICase.project_id == project_id,
+            APICase.mock_enabled.is_(True),
+            func.upper(APICase.method) == method,
+        )
+    ).all()
+    matched = next((c for c in candidates if _normalize_mock_path(c.path) == target), None)
+    if matched is None:
+        raise HTTPException(status_code=404, detail="未找到匹配的 Mock 用例")
+
+    config = matched.mock_config_json or {}
+    status_code = int(config.get("status_code") or 200)
+    headers = {str(k): str(v) for k, v in (config.get("headers") or {}).items()}
+    delay_ms = int(config.get("delay_ms") or 0)
+    if delay_ms > 0:
+        time.sleep(min(delay_ms, 10000) / 1000)
+    body = config.get("body")
+    if isinstance(body, (dict, list)):
+        return JSONResponse(content=body, status_code=status_code, headers=headers)
+    return Response(content="" if body is None else str(body), status_code=status_code, headers=headers)
+
+
 def _dispatch_task_or_run_inline(
     task_func, record_id: int, *task_args, background_inline: bool = False
 ) -> tuple[str | None, bool]:
@@ -937,7 +1087,10 @@ def system_bootstrap(
 
 @public_router.post("/auth/login", response_model=schemas.AuthLoginResponse)
 def login(payload: schemas.AuthLoginRequest, db: Session = Depends(get_db)) -> schemas.AuthLoginResponse:
-    user = services.authenticate_user(db, payload.username, payload.password)
+    try:
+        user = services.authenticate_user(db, payload.username, payload.password)
+    except services.AccountDisabledError:
+        raise HTTPException(status_code=403, detail="账号已停用，请联系管理员")
     if user is None:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = services.issue_user_token(db, user)
@@ -956,6 +1109,21 @@ def logout(
 @protected_router.get("/auth/me", response_model=schemas.UserRead)
 def get_profile(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> schemas.UserRead:
     return _serialize_user(db, current_user)
+
+
+@protected_router.post("/auth/change-password", status_code=204)
+def change_password(
+    payload: schemas.PasswordChangeRequest,
+    credentials: HTTPAuthorizationCredentials | None = Depends(auth_scheme),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    if not services.verify_password(payload.old_password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="原密码不正确")
+    current_user.password_hash = services.hash_password(payload.new_password)
+    db.commit()
+    keep = credentials.credentials if credentials else None
+    services.revoke_all_user_tokens(db, current_user.id, keep_token=keep)
 
 
 @protected_router.get("/dashboard/summary", response_model=schemas.DashboardSummary)
@@ -1101,6 +1269,100 @@ def update_workspace_member(
     )
 
 
+def _project_member_to_read(db: Session, member: ProjectMember) -> schemas.ProjectMemberRead:
+    user = db.get(User, member.user_id)
+    return schemas.ProjectMemberRead(
+        id=member.id,
+        project_id=member.project_id,
+        user_id=member.user_id,
+        username=user.username if user else None,
+        display_name=user.display_name if user else None,
+        role=member.role,
+        created_at=member.created_at,
+    )
+
+
+@protected_router.get(
+    "/projects/{project_id}/members",
+    response_model=list[schemas.ProjectMemberRead],
+)
+def list_project_members(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[schemas.ProjectMemberRead]:
+    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    members = list(
+        db.scalars(
+            select(ProjectMember)
+            .where(ProjectMember.project_id == project.id)
+            .order_by(ProjectMember.id.asc())
+        ).all()
+    )
+    return [_project_member_to_read(db, member) for member in members]
+
+
+@protected_router.post(
+    "/projects/{project_id}/members",
+    response_model=schemas.ProjectMemberRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
+def add_project_member(
+    project_id: int,
+    payload: schemas.ProjectMemberCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ProjectMemberRead:
+    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    user = db.get(User, payload.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    member = services.ensure_project_member(db, project.id, payload.user_id, payload.role)
+    return _project_member_to_read(db, member)
+
+
+@protected_router.put(
+    "/projects/{project_id}/members/{member_id}",
+    response_model=schemas.ProjectMemberRead,
+    dependencies=[Depends(require_tester)],
+)
+def update_project_member(
+    project_id: int,
+    member_id: int,
+    payload: schemas.ProjectMemberUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ProjectMemberRead:
+    _require_project_access(db, current_user, db.get(Project, project_id))
+    member = db.get(ProjectMember, member_id)
+    if member is None or member.project_id != project_id:
+        raise HTTPException(status_code=404, detail="成员不存在")
+    member.role = payload.role
+    db.commit()
+    db.refresh(member)
+    return _project_member_to_read(db, member)
+
+
+@protected_router.delete(
+    "/projects/{project_id}/members/{member_id}",
+    status_code=204,
+    dependencies=[Depends(require_tester)],
+)
+def delete_project_member(
+    project_id: int,
+    member_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    _require_project_access(db, current_user, db.get(Project, project_id))
+    member = db.get(ProjectMember, member_id)
+    if member is None or member.project_id != project_id:
+        raise HTTPException(status_code=404, detail="成员不存在")
+    db.delete(member)
+    db.commit()
+
+
 @protected_router.get("/projects", response_model=list[schemas.ProjectRead])
 def list_projects(
     workspace_id: int | None = None,
@@ -1172,12 +1434,52 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> None:
     db.commit()
 
 
-@protected_router.get("/api-cases", response_model=list[schemas.APICaseRead])
-def list_api_cases(
-    project_id: int | None = None,
+@protected_router.get(
+    "/projects/{project_id}/variables",
+    dependencies=[Depends(require_tester)],
+)
+def get_project_variables(
+    project_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> list[APICase]:
+) -> dict:
+    """获取项目级全局变量池。"""
+    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    return {"project_id": project.id, "variables_json": project.variables_json or {}}
+
+
+@protected_router.put(
+    "/projects/{project_id}/variables",
+    dependencies=[Depends(require_tester)],
+)
+def update_project_variables(
+    project_id: int,
+    payload: schemas.ProjectVariablesUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """更新项目级全局变量池。"""
+    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    project.variables_json = payload.variables_json or {}
+    project.updated_by = current_user.id
+    db.commit()
+    return {"project_id": project.id, "variables_json": project.variables_json or {}}
+
+
+@protected_router.get("/api-cases", response_model=schemas.APICasePage | list[schemas.APICaseRead])
+def list_api_cases(
+    project_id: int | None = None,
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    status: str | None = None,
+    priority: str | None = None,
+    review_status: str | None = None,
+    method: str | None = None,
+    folder: str | None = None,
+    keyword: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.APICasePage | list[APICase]:
     stmt = select(APICase).order_by(APICase.id.asc())
     if project_id:
         _require_project_access(db, current_user, db.get(Project, project_id))
@@ -1185,8 +1487,43 @@ def list_api_cases(
     elif current_user.role != "admin":
         project_ids = _accessible_project_ids(db, current_user)
         if not project_ids:
-            return []
+            return schemas.APICasePage(items=[], total=0) if page is not None else []
         stmt = stmt.where(APICase.project_id.in_(project_ids))
+    if status:
+        stmt = stmt.where(APICase.status == status.strip().upper())
+    if priority:
+        stmt = stmt.where(APICase.priority == priority.strip().upper())
+    if review_status:
+        stmt = stmt.where(APICase.review_status == review_status.strip().upper())
+    if method:
+        stmt = stmt.where(APICase.method == method.strip().upper())
+    if folder:
+        normalized_folder = folder.strip().strip("/")
+        if normalized_folder == "__ungrouped__":
+            stmt = stmt.where(or_(APICase.folder_path.is_(None), APICase.folder_path == ""))
+        elif normalized_folder:
+            stmt = stmt.where(
+                or_(APICase.folder_path == normalized_folder, APICase.folder_path.like(f"{normalized_folder}/%"))
+            )
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        stmt = stmt.where(
+            or_(
+                APICase.name.like(pattern),
+                APICase.folder_path.like(pattern),
+                APICase.path.like(pattern),
+                cast(APICase.tags_json, String).like(pattern),
+            )
+        )
+    if page is not None:
+        total = db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
+        items = list(db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all())
+        for item in items:
+            _ensure_case_defaults(item)
+        return schemas.APICasePage(
+            items=[schemas.APICaseRead.model_validate(item) for item in items],
+            total=total,
+        )
     items = list(db.scalars(stmt).all())
     for item in items:
         _ensure_case_defaults(item)
@@ -1446,6 +1783,8 @@ def import_cases(
                 headers_json=item.headers_json,
                 body_json=item.body_json,
                 assertions_json=item.assertions_json,
+                extractors_json=item.extractors_json,
+                steps_json=item.steps_json,
                 expected_status=item.expected_status or 200,
                 created_by=current_user.id,
                 updated_by=current_user.id,
@@ -1469,6 +1808,12 @@ def import_cases(
                 assertions_json=item.assertions_json,
                 expect_text=item.expect_text or "ok",
                 generation_mode=item.generation_mode,
+                execution_mode=item.execution_mode,
+                engine=item.engine,
+                self_heal_enabled=item.self_heal_enabled,
+                max_agent_steps=item.max_agent_steps,
+                allowed_origins_json=item.allowed_origins_json,
+                prohibited_actions_json=item.prohibited_actions_json,
                 ai_goal=item.ai_goal,
                 skill_name=item.skill_name,
                 skill_version=item.skill_version,
@@ -1513,6 +1858,80 @@ def import_cases(
 
     db.commit()
     return schemas.BatchActionResult(success=True, affected_count=affected_count, message=f"已导入 {affected_count} 条用例")
+
+
+@protected_router.post(
+    "/api-cases/import-spec",
+    response_model=schemas.ApiSpecImportResult,
+    dependencies=[Depends(require_tester)],
+)
+def import_api_spec(
+    payload: schemas.ApiSpecImportPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ApiSpecImportResult:
+    """从 OpenAPI/Swagger 或 Postman Collection 导入接口用例。
+
+    dry_run=True 时仅解析预览、不落库；否则逐条创建 APICase 并记录导入历史。
+    """
+    project = _require_project_access(db, current_user, db.get(Project, payload.project_id))
+    try:
+        drafts, warnings = spec_import.parse_spec(payload.source_type, payload.content)
+    except spec_import.SpecParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    base_folder = (payload.folder_path or "").strip().strip("/") or None
+    preview_items: list[schemas.ApiSpecImportPreviewItem] = []
+    created_count = 0
+    for draft in drafts:
+        folder = draft.get("folder_path")
+        if base_folder:
+            folder = f"{base_folder}/{folder}" if folder else base_folder
+        folder = folder[:255] if folder else None
+        preview_items.append(
+            schemas.ApiSpecImportPreviewItem(
+                name=draft["name"],
+                method=draft["method"],
+                path=draft["path"],
+                folder_path=folder,
+            )
+        )
+        if payload.dry_run:
+            continue
+        case = APICase(
+            project_id=project.id,
+            name=draft["name"],
+            folder_path=folder,
+            method=draft["method"],
+            path=draft["path"] or "/",
+            headers_json=draft.get("headers_json"),
+            body_json=draft.get("body_json"),
+            expected_status=200,
+            created_by=current_user.id,
+            updated_by=current_user.id,
+        )
+        db.add(case)
+        db.flush()
+        _record_case_history(
+            db,
+            case_type="API",
+            case=case,
+            action="IMPORT",
+            changed_by=current_user.id,
+            summary=f"从 {payload.source_type} 导入接口用例",
+        )
+        created_count += 1
+
+    if not payload.dry_run and created_count:
+        db.commit()
+    return schemas.ApiSpecImportResult(
+        source_type=payload.source_type,
+        detected_count=len(drafts),
+        created_count=created_count,
+        dry_run=payload.dry_run,
+        items=preview_items,
+        warnings=warnings,
+    )
 
 
 @protected_router.get("/cases/folders", response_model=list[schemas.CaseFolderNode])
@@ -2745,7 +3164,7 @@ def debug_api_case(
         environment = db.get(Environment, payload.environment_id)
         if environment is None or environment.project_id != project.id:
             raise HTTPException(status_code=404, detail="执行环境不存在")
-    variables = environment.variables_json if environment and environment.variables_json else None
+    variables = build_variable_context(project, environment)
     try:
         prepared = prepare_http_request(
             method=payload.method,
@@ -2788,6 +3207,16 @@ def debug_api_case(
         response_body = response_text[:5000]
         body_type = "text"
 
+    facts = ResponseFacts(
+        status_code=response.status_code,
+        headers=response_headers,
+        body_text=response_text or "",
+        body_json=response_body if body_type == "json" else None,
+        duration_ms=duration_ms,
+    )
+    outcome = evaluate_assertions(payload.assertions_json, facts, expected_status=payload.expected_status)
+    extracted, extractor_results = run_extractors(payload.extractors_json, facts)
+
     return schemas.APICaseDebugResponse(
         request={
             "method": prepared.method,
@@ -2803,7 +3232,228 @@ def debug_api_case(
             "size": len(response.content),
         },
         duration_ms=duration_ms,
+        assertion_passed=outcome.passed,
+        assertion_results=outcome.results,
+        extracted_variables={key: str(value) for key, value in extracted.items()},
+        extractor_results=extractor_results,
     )
+
+
+def _api_case_scope_conditions(db: Session, current_user: User, project_id: int | None) -> list | None:
+    conditions: list = []
+    if project_id:
+        _require_project_access(db, current_user, db.get(Project, project_id))
+        conditions.append(APICase.project_id == project_id)
+    elif current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return None
+        conditions.append(APICase.project_id.in_(project_ids))
+    return conditions
+
+
+@protected_router.get("/api-cases/folders", response_model=schemas.APICaseFolderTree)
+def get_api_case_folder_tree(
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.APICaseFolderTree:
+    conditions = _api_case_scope_conditions(db, current_user, project_id)
+    if conditions is None:
+        return schemas.APICaseFolderTree()
+    stmt = select(APICase.folder_path, func.count(APICase.id)).group_by(APICase.folder_path)
+    for condition in conditions:
+        stmt = stmt.where(condition)
+    rows = db.execute(stmt).all()
+
+    total = 0
+    ungrouped = 0
+    nodes: dict[str, schemas.APICaseFolderNode] = {}
+    roots: list[schemas.APICaseFolderNode] = []
+
+    def ensure_node(path: str) -> schemas.APICaseFolderNode:
+        node = nodes.get(path)
+        if node is not None:
+            return node
+        node = schemas.APICaseFolderNode(path=path, name=path.rsplit("/", 1)[-1])
+        nodes[path] = node
+        if "/" in path:
+            ensure_node(path.rsplit("/", 1)[0]).children.append(node)
+        else:
+            roots.append(node)
+        return node
+
+    for folder_path, count in rows:
+        total += count
+        normalized = (folder_path or "").strip().strip("/")
+        if not normalized:
+            ungrouped += count
+            continue
+        ensure_node(normalized)
+        parts = normalized.split("/")
+        for index in range(1, len(parts) + 1):
+            ensure_node("/".join(parts[:index])).case_count += count
+
+    def sort_nodes(items: list[schemas.APICaseFolderNode]) -> None:
+        items.sort(key=lambda node: node.name)
+        for child in items:
+            sort_nodes(child.children)
+
+    sort_nodes(roots)
+    return schemas.APICaseFolderTree(total=total, ungrouped=ungrouped, folders=roots)
+
+
+@protected_router.post(
+    "/api-cases/folders/rename",
+    response_model=schemas.APICaseBatchResult,
+    dependencies=[Depends(require_tester)],
+)
+def rename_api_case_folder(
+    payload: schemas.APICaseFolderRename,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.APICaseBatchResult:
+    _require_project_access(db, current_user, db.get(Project, payload.project_id))
+    old_path = payload.old_path.strip().strip("/")
+    new_path = payload.new_path.strip().strip("/")
+    if not old_path or not new_path:
+        raise HTTPException(status_code=400, detail="目录路径不能为空")
+    if old_path == new_path:
+        return schemas.APICaseBatchResult(affected=0)
+    cases = list(
+        db.scalars(
+            select(APICase).where(
+                APICase.project_id == payload.project_id,
+                or_(APICase.folder_path == old_path, APICase.folder_path.like(f"{old_path}/%")),
+            )
+        ).all()
+    )
+    for case in cases:
+        current = case.folder_path or ""
+        case.folder_path = new_path + current[len(old_path):]
+        case.updated_by = current_user.id
+        _record_case_history(
+            db,
+            case_type="API",
+            case=case,
+            action="UPDATE",
+            changed_by=current_user.id,
+            summary=f"目录重命名 {old_path} → {new_path}",
+        )
+    db.commit()
+    return schemas.APICaseBatchResult(affected=len(cases))
+
+
+@protected_router.get("/api-cases/stats", response_model=schemas.APICaseStats)
+def get_api_case_stats(
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.APICaseStats:
+    conditions = _api_case_scope_conditions(db, current_user, project_id)
+    if conditions is None:
+        return schemas.APICaseStats()
+    base = select(func.count(APICase.id))
+    for condition in conditions:
+        base = base.where(condition)
+    total = db.scalar(base) or 0
+    active = db.scalar(base.where(APICase.status == "ACTIVE")) or 0
+    approved = db.scalar(base.where(APICase.review_status == "APPROVED")) or 0
+
+    runs_stmt = select(TestRun.status).where(TestRun.case_type == "API")
+    if project_id:
+        runs_stmt = runs_stmt.where(TestRun.project_id == project_id)
+    elif current_user.role != "admin":
+        runs_stmt = runs_stmt.where(TestRun.project_id.in_(_accessible_project_ids(db, current_user)))
+    statuses = list(db.scalars(runs_stmt.order_by(TestRun.id.desc()).limit(50)).all())
+    finished = [item for item in statuses if item in {"SUCCESS", "FAILED", "ERROR", "TIMEOUT"}]
+    rate = None
+    if finished:
+        rate = round(sum(1 for item in finished if item == "SUCCESS") / len(finished), 4)
+    return schemas.APICaseStats(total=total, active=active, approved=approved, recent_success_rate=rate)
+
+
+@protected_router.put(
+    "/api-cases/batch",
+    response_model=schemas.APICaseBatchResult,
+    dependencies=[Depends(require_tester)],
+)
+def batch_update_api_cases(
+    payload: schemas.APICaseBatchUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.APICaseBatchResult:
+    patch = payload.patch.model_dump(exclude_unset=True)
+    if not patch:
+        raise HTTPException(status_code=400, detail="没有可更新的字段")
+    case_ids = list(dict.fromkeys(payload.case_ids))
+    cases = list(db.scalars(select(APICase).where(APICase.id.in_(case_ids))).all())
+    if len(cases) != len(case_ids):
+        raise HTTPException(status_code=404, detail="部分用例不存在")
+    checked_projects: set[int] = set()
+    for case in cases:
+        if case.project_id not in checked_projects:
+            _require_project_access(db, current_user, db.get(Project, case.project_id))
+            checked_projects.add(case.project_id)
+    for case in cases:
+        for key, value in patch.items():
+            setattr(case, key, value)
+        case.updated_by = current_user.id
+        _record_case_history(
+            db,
+            case_type="API",
+            case=case,
+            action="UPDATE",
+            changed_by=current_user.id,
+            summary=f"批量更新属性：{', '.join(sorted(patch.keys()))}",
+        )
+    db.commit()
+    return schemas.APICaseBatchResult(affected=len(cases))
+
+
+@protected_router.delete(
+    "/api-cases/batch",
+    response_model=schemas.APICaseBatchResult,
+    dependencies=[Depends(require_admin)],
+)
+def batch_delete_api_cases(
+    payload: schemas.APICaseBatchDelete,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.APICaseBatchResult:
+    case_ids = list(dict.fromkeys(payload.case_ids))
+    cases = list(db.scalars(select(APICase).where(APICase.id.in_(case_ids))).all())
+    if len(cases) != len(case_ids):
+        raise HTTPException(status_code=404, detail="部分用例不存在")
+    for case in cases:
+        _record_case_history(
+            db,
+            case_type="API",
+            case=case,
+            action="DELETE",
+            changed_by=current_user.id,
+            summary="批量删除接口用例",
+        )
+        db.execute(
+            delete(TestPlanCase).where(TestPlanCase.case_type == "API", TestPlanCase.case_id == case.id)
+        )
+        db.delete(case)
+    db.commit()
+    return schemas.APICaseBatchResult(affected=len(cases))
+
+
+@protected_router.get("/api-cases/{case_id}", response_model=schemas.APICaseRead)
+def get_api_case(
+    case_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> APICase:
+    api_case = db.get(APICase, case_id)
+    if api_case is None:
+        raise HTTPException(status_code=404, detail="接口用例不存在")
+    _require_project_access(db, current_user, db.get(Project, api_case.project_id))
+    _ensure_case_defaults(api_case)
+    return api_case
 
 
 @protected_router.put(
@@ -2821,6 +3471,7 @@ def update_api_case(
     if api_case is None:
         raise HTTPException(status_code=404, detail="接口用例不存在")
     _require_project_access(db, current_user, db.get(Project, api_case.project_id))
+    original_review_status = (api_case.review_status or "DRAFT").upper()
     original_signature = (
         api_case.name,
         api_case.folder_path,
@@ -2828,15 +3479,15 @@ def update_api_case(
         api_case.path,
         api_case.priority,
         api_case.status,
-        api_case.review_status,
         tuple(api_case.tags_json or []),
-        api_case.review_note,
         api_case.expected_status,
         api_case.headers_json,
         api_case.body_json,
         api_case.assertions_json,
+        api_case.extractors_json,
+        api_case.steps_json,
     )
-    data = payload.model_dump()
+    data = payload.model_dump(exclude={"review_status", "review_note"})
     data["method"] = data["method"].upper()
     for key, value in data.items():
         setattr(api_case, key, value)
@@ -2847,16 +3498,21 @@ def update_api_case(
         api_case.path,
         api_case.priority,
         api_case.status,
-        api_case.review_status,
         tuple(api_case.tags_json or []),
-        api_case.review_note,
         api_case.expected_status,
         api_case.headers_json,
         api_case.body_json,
         api_case.assertions_json,
+        api_case.extractors_json,
+        api_case.steps_json,
     )
     if new_signature != original_signature:
         api_case.version_no = _bump_version(api_case.version_no)
+        if original_review_status in {"APPROVED", "IN_REVIEW"}:
+            api_case.review_status = "DRAFT"
+            api_case.reviewed_by = None
+            api_case.reviewed_at = None
+            api_case.submitted_review_at = None
     api_case.updated_by = current_user.id
     _record_case_history(db, case_type="API", case=api_case, action="UPDATE", changed_by=current_user.id, summary="更新接口用例")
     db.commit()
@@ -2877,13 +3533,88 @@ def delete_api_case(case_id: int, db: Session = Depends(get_db)) -> None:
     db.commit()
 
 
-
-@protected_router.get("/ui-cases", response_model=list[schemas.UICaseRead])
-def list_ui_cases(
-    project_id: int | None = None,
+@protected_router.post(
+    "/api-cases/{case_id}/review/submit",
+    response_model=schemas.APICaseRead,
+    dependencies=[Depends(require_tester)],
+)
+def submit_api_case_review(
+    case_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> list[UICase]:
+) -> APICase:
+    api_case = db.get(APICase, case_id)
+    if api_case is None:
+        raise HTTPException(status_code=404, detail="接口用例不存在")
+    _require_project_access(db, current_user, db.get(Project, api_case.project_id))
+    _ensure_case_defaults(api_case)
+    current_status = (api_case.review_status or "DRAFT").upper()
+    if current_status not in {"DRAFT", "REJECTED"}:
+        raise HTTPException(status_code=400, detail=f"当前评审状态为 {current_status}，不能提交评审")
+    api_case.review_status = "IN_REVIEW"
+    api_case.submitted_review_at = utc_now_naive()
+    api_case.reviewed_by = None
+    api_case.reviewed_at = None
+    api_case.updated_by = current_user.id
+    _record_case_history(db, case_type="API", case=api_case, action="REVIEW", changed_by=current_user.id, summary="提交评审")
+    db.commit()
+    db.refresh(api_case)
+    return api_case
+
+
+@protected_router.post(
+    "/api-cases/{case_id}/review/decide",
+    response_model=schemas.APICaseRead,
+    dependencies=[Depends(require_tester)],
+)
+def decide_api_case_review(
+    case_id: int,
+    payload: schemas.APICaseReviewDecision,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> APICase:
+    api_case = db.get(APICase, case_id)
+    if api_case is None:
+        raise HTTPException(status_code=404, detail="接口用例不存在")
+    _require_project_access(db, current_user, db.get(Project, api_case.project_id))
+    if api_case.created_by is not None and api_case.created_by == current_user.id:
+        raise HTTPException(status_code=403, detail="不能评审自己创建的用例")
+    _ensure_case_defaults(api_case)
+    current_status = (api_case.review_status or "DRAFT").upper()
+    if current_status != "IN_REVIEW":
+        raise HTTPException(status_code=400, detail=f"当前评审状态为 {current_status}，不在评审中")
+    api_case.review_status = payload.result
+    api_case.review_note = payload.note
+    api_case.reviewed_by = current_user.id
+    api_case.reviewed_at = utc_now_naive()
+    api_case.updated_by = current_user.id
+    _record_case_history(
+        db,
+        case_type="API",
+        case=api_case,
+        action="REVIEW",
+        changed_by=current_user.id,
+        summary="评审通过" if payload.result == "APPROVED" else "评审拒绝",
+    )
+    db.commit()
+    db.refresh(api_case)
+    return api_case
+
+
+
+@protected_router.get("/ui-cases", response_model=schemas.UICasePage | list[schemas.UICaseRead])
+def list_ui_cases(
+    project_id: int | None = None,
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    status: str | None = None,
+    priority: str | None = None,
+    review_status: str | None = None,
+    folder: str | None = None,
+    keyword: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.UICasePage | list[UICase]:
     stmt = select(UICase).order_by(UICase.id.asc())
     if project_id:
         _require_project_access(db, current_user, db.get(Project, project_id))
@@ -2891,8 +3622,41 @@ def list_ui_cases(
     elif current_user.role != "admin":
         project_ids = _accessible_project_ids(db, current_user)
         if not project_ids:
-            return []
+            return schemas.UICasePage(items=[], total=0) if page is not None else []
         stmt = stmt.where(UICase.project_id.in_(project_ids))
+    if status:
+        stmt = stmt.where(UICase.status == status.strip().upper())
+    if priority:
+        stmt = stmt.where(UICase.priority == priority.strip().upper())
+    if review_status:
+        stmt = stmt.where(UICase.review_status == review_status.strip().upper())
+    if folder:
+        normalized_folder = folder.strip().strip("/")
+        if normalized_folder == "__ungrouped__":
+            stmt = stmt.where(or_(UICase.folder_path.is_(None), UICase.folder_path == ""))
+        elif normalized_folder:
+            stmt = stmt.where(
+                or_(UICase.folder_path == normalized_folder, UICase.folder_path.like(f"{normalized_folder}/%"))
+            )
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        stmt = stmt.where(
+            or_(
+                UICase.name.like(pattern),
+                UICase.folder_path.like(pattern),
+                UICase.target_url.like(pattern),
+                cast(UICase.tags_json, String).like(pattern),
+            )
+        )
+    if page is not None:
+        total = db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
+        items = list(db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all())
+        for item in items:
+            _ensure_case_defaults(item)
+        return schemas.UICasePage(
+            items=[schemas.UICaseRead.model_validate(item) for item in items],
+            total=total,
+        )
     items = list(db.scalars(stmt).all())
     for item in items:
         _ensure_case_defaults(item)
@@ -2935,6 +3699,209 @@ async def generate_ui_case_with_ai(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+def _ui_case_scope_conditions(db: Session, current_user: User, project_id: int | None) -> list | None:
+    conditions: list = []
+    if project_id:
+        _require_project_access(db, current_user, db.get(Project, project_id))
+        conditions.append(UICase.project_id == project_id)
+    elif current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return None
+        conditions.append(UICase.project_id.in_(project_ids))
+    return conditions
+
+
+@protected_router.get("/ui-cases/folders", response_model=schemas.UICaseFolderTree)
+def get_ui_case_folder_tree(
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.UICaseFolderTree:
+    conditions = _ui_case_scope_conditions(db, current_user, project_id)
+    if conditions is None:
+        return schemas.UICaseFolderTree()
+    stmt = select(UICase.folder_path, func.count(UICase.id)).group_by(UICase.folder_path)
+    for condition in conditions:
+        stmt = stmt.where(condition)
+    rows = db.execute(stmt).all()
+
+    total = 0
+    ungrouped = 0
+    nodes: dict[str, schemas.UICaseFolderNode] = {}
+    roots: list[schemas.UICaseFolderNode] = []
+
+    def ensure_node(path: str) -> schemas.UICaseFolderNode:
+        node = nodes.get(path)
+        if node is not None:
+            return node
+        node = schemas.UICaseFolderNode(path=path, name=path.rsplit("/", 1)[-1])
+        nodes[path] = node
+        if "/" in path:
+            ensure_node(path.rsplit("/", 1)[0]).children.append(node)
+        else:
+            roots.append(node)
+        return node
+
+    for folder_path, count in rows:
+        total += count
+        normalized = (folder_path or "").strip().strip("/")
+        if not normalized:
+            ungrouped += count
+            continue
+        ensure_node(normalized)
+        parts = normalized.split("/")
+        for index in range(1, len(parts) + 1):
+            ensure_node("/".join(parts[:index])).case_count += count
+
+    def sort_nodes(items: list[schemas.UICaseFolderNode]) -> None:
+        items.sort(key=lambda node: node.name)
+        for child in items:
+            sort_nodes(child.children)
+
+    sort_nodes(roots)
+    return schemas.UICaseFolderTree(total=total, ungrouped=ungrouped, folders=roots)
+
+
+@protected_router.post(
+    "/ui-cases/folders/rename",
+    response_model=schemas.UICaseBatchResult,
+    dependencies=[Depends(require_tester)],
+)
+def rename_ui_case_folder(
+    payload: schemas.UICaseFolderRename,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.UICaseBatchResult:
+    _require_project_access(db, current_user, db.get(Project, payload.project_id))
+    old_path = payload.old_path.strip().strip("/")
+    new_path = payload.new_path.strip().strip("/")
+    if not old_path or not new_path:
+        raise HTTPException(status_code=400, detail="目录路径不能为空")
+    if old_path == new_path:
+        return schemas.UICaseBatchResult(affected=0)
+    cases = list(
+        db.scalars(
+            select(UICase).where(
+                UICase.project_id == payload.project_id,
+                or_(UICase.folder_path == old_path, UICase.folder_path.like(f"{old_path}/%")),
+            )
+        ).all()
+    )
+    for case in cases:
+        current = case.folder_path or ""
+        case.folder_path = new_path + current[len(old_path):]
+        case.updated_by = current_user.id
+        _record_case_history(
+            db,
+            case_type="UI",
+            case=case,
+            action="UPDATE",
+            changed_by=current_user.id,
+            summary=f"目录重命名 {old_path} → {new_path}",
+        )
+    db.commit()
+    return schemas.UICaseBatchResult(affected=len(cases))
+
+
+@protected_router.get("/ui-cases/stats", response_model=schemas.UICaseStats)
+def get_ui_case_stats(
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.UICaseStats:
+    conditions = _ui_case_scope_conditions(db, current_user, project_id)
+    if conditions is None:
+        return schemas.UICaseStats()
+    base = select(func.count(UICase.id))
+    for condition in conditions:
+        base = base.where(condition)
+    total = db.scalar(base) or 0
+    active = db.scalar(base.where(UICase.status == "ACTIVE")) or 0
+    approved = db.scalar(base.where(UICase.review_status == "APPROVED")) or 0
+
+    runs_stmt = select(TestRun.status).where(TestRun.case_type == "UI")
+    if project_id:
+        runs_stmt = runs_stmt.where(TestRun.project_id == project_id)
+    elif current_user.role != "admin":
+        runs_stmt = runs_stmt.where(TestRun.project_id.in_(_accessible_project_ids(db, current_user)))
+    statuses = list(db.scalars(runs_stmt.order_by(TestRun.id.desc()).limit(50)).all())
+    finished = [item for item in statuses if item in {"SUCCESS", "FAILED", "ERROR", "TIMEOUT"}]
+    rate = None
+    if finished:
+        rate = round(sum(1 for item in finished if item == "SUCCESS") / len(finished), 4)
+    return schemas.UICaseStats(total=total, active=active, approved=approved, recent_success_rate=rate)
+
+
+@protected_router.put(
+    "/ui-cases/batch",
+    response_model=schemas.UICaseBatchResult,
+    dependencies=[Depends(require_tester)],
+)
+def batch_update_ui_cases(
+    payload: schemas.UICaseBatchUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.UICaseBatchResult:
+    patch = payload.patch.model_dump(exclude_unset=True)
+    if not patch:
+        raise HTTPException(status_code=400, detail="没有可更新的字段")
+    case_ids = list(dict.fromkeys(payload.case_ids))
+    cases = list(db.scalars(select(UICase).where(UICase.id.in_(case_ids))).all())
+    if len(cases) != len(case_ids):
+        raise HTTPException(status_code=404, detail="部分用例不存在")
+    checked_projects: set[int] = set()
+    for case in cases:
+        if case.project_id not in checked_projects:
+            _require_project_access(db, current_user, db.get(Project, case.project_id))
+            checked_projects.add(case.project_id)
+    for case in cases:
+        for key, value in patch.items():
+            setattr(case, key, value)
+        case.updated_by = current_user.id
+        _record_case_history(
+            db,
+            case_type="UI",
+            case=case,
+            action="UPDATE",
+            changed_by=current_user.id,
+            summary=f"批量更新属性：{', '.join(sorted(patch.keys()))}",
+        )
+    db.commit()
+    return schemas.UICaseBatchResult(affected=len(cases))
+
+
+@protected_router.delete(
+    "/ui-cases/batch",
+    response_model=schemas.UICaseBatchResult,
+    dependencies=[Depends(require_admin)],
+)
+def batch_delete_ui_cases(
+    payload: schemas.UICaseBatchDelete,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.UICaseBatchResult:
+    case_ids = list(dict.fromkeys(payload.case_ids))
+    cases = list(db.scalars(select(UICase).where(UICase.id.in_(case_ids))).all())
+    if len(cases) != len(case_ids):
+        raise HTTPException(status_code=404, detail="部分用例不存在")
+    for case in cases:
+        _record_case_history(
+            db,
+            case_type="UI",
+            case=case,
+            action="DELETE",
+            changed_by=current_user.id,
+            summary="批量删除 UI 用例",
+        )
+        db.execute(
+            delete(TestPlanCase).where(TestPlanCase.case_type == "UI", TestPlanCase.case_id == case.id)
+        )
+        db.delete(case)
+    db.commit()
+    return schemas.UICaseBatchResult(affected=len(cases))
+
+
 @protected_router.get("/ui-cases/{case_id}", response_model=schemas.UICaseRead)
 def get_ui_case(
     case_id: int,
@@ -2964,25 +3931,30 @@ def update_ui_case(
     if ui_case is None:
         raise HTTPException(status_code=404, detail="UI 用例不存在")
     _require_project_access(db, current_user, db.get(Project, ui_case.project_id))
+    original_review_status = (ui_case.review_status or "DRAFT").upper()
     original_signature = (
         ui_case.name,
         ui_case.folder_path,
         ui_case.target_url,
         ui_case.priority,
         ui_case.status,
-        ui_case.review_status,
         tuple(ui_case.tags_json or []),
-        ui_case.review_note,
         ui_case.expect_text,
         ui_case.steps_json,
         ui_case.assertions_json,
         ui_case.generation_mode,
+        ui_case.execution_mode,
+        ui_case.engine,
+        ui_case.self_heal_enabled,
+        ui_case.max_agent_steps,
+        ui_case.allowed_origins_json,
+        ui_case.prohibited_actions_json,
         ui_case.ai_goal,
         ui_case.skill_name,
         ui_case.skill_version,
         ui_case.generation_meta_json,
     )
-    for key, value in payload.model_dump().items():
+    for key, value in payload.model_dump(exclude={"review_status", "review_note"}).items():
         setattr(ui_case, key, value)
     new_signature = (
         ui_case.name,
@@ -2990,13 +3962,17 @@ def update_ui_case(
         ui_case.target_url,
         ui_case.priority,
         ui_case.status,
-        ui_case.review_status,
         tuple(ui_case.tags_json or []),
-        ui_case.review_note,
         ui_case.expect_text,
         ui_case.steps_json,
         ui_case.assertions_json,
         ui_case.generation_mode,
+        ui_case.execution_mode,
+        ui_case.engine,
+        ui_case.self_heal_enabled,
+        ui_case.max_agent_steps,
+        ui_case.allowed_origins_json,
+        ui_case.prohibited_actions_json,
         ui_case.ai_goal,
         ui_case.skill_name,
         ui_case.skill_version,
@@ -3004,6 +3980,11 @@ def update_ui_case(
     )
     if new_signature != original_signature:
         ui_case.version_no = _bump_version(ui_case.version_no)
+        if original_review_status in {"APPROVED", "IN_REVIEW"}:
+            ui_case.review_status = "DRAFT"
+            ui_case.reviewed_by = None
+            ui_case.reviewed_at = None
+            ui_case.submitted_review_at = None
     ui_case.updated_by = current_user.id
     _record_case_history(db, case_type="UI", case=ui_case, action="UPDATE", changed_by=current_user.id, summary="更新 UI 用例")
     db.commit()
@@ -3011,12 +3992,103 @@ def update_ui_case(
     return ui_case
 
 
-@protected_router.get("/performance-cases", response_model=list[schemas.PerformanceCaseRead])
-def list_performance_cases(
-    project_id: int | None = None,
+@protected_router.post(
+    "/ui-cases/{case_id}/review/submit",
+    response_model=schemas.UICaseRead,
+    dependencies=[Depends(require_tester)],
+)
+def submit_ui_case_review(
+    case_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> list[PerformanceCase]:
+) -> UICase:
+    ui_case = db.get(UICase, case_id)
+    if ui_case is None:
+        raise HTTPException(status_code=404, detail="UI 用例不存在")
+    _require_project_access(db, current_user, db.get(Project, ui_case.project_id))
+    _ensure_case_defaults(ui_case)
+    current_status = (ui_case.review_status or "DRAFT").upper()
+    if current_status not in {"DRAFT", "REJECTED"}:
+        raise HTTPException(status_code=400, detail=f"当前评审状态为 {current_status}，不能提交评审")
+    ui_case.review_status = "IN_REVIEW"
+    ui_case.submitted_review_at = utc_now_naive()
+    ui_case.reviewed_by = None
+    ui_case.reviewed_at = None
+    ui_case.updated_by = current_user.id
+    _record_case_history(db, case_type="UI", case=ui_case, action="REVIEW", changed_by=current_user.id, summary="提交评审")
+    db.commit()
+    db.refresh(ui_case)
+    return ui_case
+
+
+@protected_router.post(
+    "/ui-cases/{case_id}/review/decide",
+    response_model=schemas.UICaseRead,
+    dependencies=[Depends(require_tester)],
+)
+def decide_ui_case_review(
+    case_id: int,
+    payload: schemas.UICaseReviewDecision,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> UICase:
+    ui_case = db.get(UICase, case_id)
+    if ui_case is None:
+        raise HTTPException(status_code=404, detail="UI 用例不存在")
+    _require_project_access(db, current_user, db.get(Project, ui_case.project_id))
+    if ui_case.created_by is not None and ui_case.created_by == current_user.id:
+        raise HTTPException(status_code=403, detail="不能评审自己创建的用例")
+    _ensure_case_defaults(ui_case)
+    current_status = (ui_case.review_status or "DRAFT").upper()
+    if current_status != "IN_REVIEW":
+        raise HTTPException(status_code=400, detail=f"当前评审状态为 {current_status}，不在评审中")
+    ui_case.review_status = payload.result
+    ui_case.review_note = payload.note
+    ui_case.reviewed_by = current_user.id
+    ui_case.reviewed_at = utc_now_naive()
+    ui_case.updated_by = current_user.id
+    _record_case_history(
+        db,
+        case_type="UI",
+        case=ui_case,
+        action="REVIEW",
+        changed_by=current_user.id,
+        summary="评审通过" if payload.result == "APPROVED" else "评审拒绝",
+    )
+    db.commit()
+    db.refresh(ui_case)
+    return ui_case
+
+
+def _perf_case_scope_conditions(db: Session, current_user: User, project_id: int | None) -> list | None:
+    conditions: list = []
+    if project_id:
+        _require_project_access(db, current_user, db.get(Project, project_id))
+        conditions.append(PerformanceCase.project_id == project_id)
+    elif current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return None
+        conditions.append(PerformanceCase.project_id.in_(project_ids))
+    return conditions
+
+
+@protected_router.get(
+    "/performance-cases", response_model=schemas.PerformanceCasePage | list[schemas.PerformanceCaseRead]
+)
+def list_performance_cases(
+    project_id: int | None = None,
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    status: str | None = None,
+    priority: str | None = None,
+    review_status: str | None = None,
+    method: str | None = None,
+    folder: str | None = None,
+    keyword: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.PerformanceCasePage | list[PerformanceCase]:
     stmt = select(PerformanceCase).order_by(PerformanceCase.id.asc())
     if project_id:
         _require_project_access(db, current_user, db.get(Project, project_id))
@@ -3024,12 +4096,244 @@ def list_performance_cases(
     elif current_user.role != "admin":
         project_ids = _accessible_project_ids(db, current_user)
         if not project_ids:
-            return []
+            return schemas.PerformanceCasePage(items=[], total=0) if page is not None else []
         stmt = stmt.where(PerformanceCase.project_id.in_(project_ids))
+    if status:
+        stmt = stmt.where(PerformanceCase.status == status.strip().upper())
+    if priority:
+        stmt = stmt.where(PerformanceCase.priority == priority.strip().upper())
+    if review_status:
+        stmt = stmt.where(PerformanceCase.review_status == review_status.strip().upper())
+    if method:
+        stmt = stmt.where(PerformanceCase.method == method.strip().upper())
+    if folder:
+        normalized_folder = folder.strip().strip("/")
+        if normalized_folder == "__ungrouped__":
+            stmt = stmt.where(or_(PerformanceCase.folder_path.is_(None), PerformanceCase.folder_path == ""))
+        elif normalized_folder:
+            stmt = stmt.where(
+                or_(
+                    PerformanceCase.folder_path == normalized_folder,
+                    PerformanceCase.folder_path.like(f"{normalized_folder}/%"),
+                )
+            )
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        stmt = stmt.where(
+            or_(
+                PerformanceCase.name.like(pattern),
+                PerformanceCase.folder_path.like(pattern),
+                PerformanceCase.path.like(pattern),
+                cast(PerformanceCase.tags_json, String).like(pattern),
+            )
+        )
+    if page is not None:
+        total = db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
+        items = list(db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all())
+        for item in items:
+            _ensure_case_defaults(item)
+        return schemas.PerformanceCasePage(
+            items=[schemas.PerformanceCaseRead.model_validate(item) for item in items],
+            total=total,
+        )
     items = list(db.scalars(stmt).all())
     for item in items:
         _ensure_case_defaults(item)
     return items
+
+
+@protected_router.get("/performance-cases/folders", response_model=schemas.PerformanceCaseFolderTree)
+def get_performance_case_folder_tree(
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.PerformanceCaseFolderTree:
+    conditions = _perf_case_scope_conditions(db, current_user, project_id)
+    if conditions is None:
+        return schemas.PerformanceCaseFolderTree()
+    stmt = select(PerformanceCase.folder_path, func.count(PerformanceCase.id)).group_by(PerformanceCase.folder_path)
+    for condition in conditions:
+        stmt = stmt.where(condition)
+    rows = db.execute(stmt).all()
+
+    total = 0
+    ungrouped = 0
+    nodes: dict[str, schemas.PerformanceCaseFolderNode] = {}
+    roots: list[schemas.PerformanceCaseFolderNode] = []
+
+    def ensure_node(path: str) -> schemas.PerformanceCaseFolderNode:
+        node = nodes.get(path)
+        if node is not None:
+            return node
+        node = schemas.PerformanceCaseFolderNode(path=path, name=path.rsplit("/", 1)[-1])
+        nodes[path] = node
+        if "/" in path:
+            ensure_node(path.rsplit("/", 1)[0]).children.append(node)
+        else:
+            roots.append(node)
+        return node
+
+    for folder_path, count in rows:
+        total += count
+        normalized = (folder_path or "").strip().strip("/")
+        if not normalized:
+            ungrouped += count
+            continue
+        ensure_node(normalized)
+        parts = normalized.split("/")
+        for index in range(1, len(parts) + 1):
+            ensure_node("/".join(parts[:index])).case_count += count
+
+    def sort_nodes(items: list[schemas.PerformanceCaseFolderNode]) -> None:
+        items.sort(key=lambda node: node.name)
+        for child in items:
+            sort_nodes(child.children)
+
+    sort_nodes(roots)
+    return schemas.PerformanceCaseFolderTree(total=total, ungrouped=ungrouped, folders=roots)
+
+
+@protected_router.post(
+    "/performance-cases/folders/rename",
+    response_model=schemas.PerformanceCaseBatchResult,
+    dependencies=[Depends(require_tester)],
+)
+def rename_performance_case_folder(
+    payload: schemas.PerformanceCaseFolderRename,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.PerformanceCaseBatchResult:
+    _require_project_access(db, current_user, db.get(Project, payload.project_id))
+    old_path = payload.old_path.strip().strip("/")
+    new_path = payload.new_path.strip().strip("/")
+    if not old_path or not new_path:
+        raise HTTPException(status_code=400, detail="目录路径不能为空")
+    if old_path == new_path:
+        return schemas.PerformanceCaseBatchResult(affected=0)
+    cases = list(
+        db.scalars(
+            select(PerformanceCase).where(
+                PerformanceCase.project_id == payload.project_id,
+                or_(
+                    PerformanceCase.folder_path == old_path,
+                    PerformanceCase.folder_path.like(f"{old_path}/%"),
+                ),
+            )
+        ).all()
+    )
+    for case in cases:
+        current = case.folder_path or ""
+        case.folder_path = new_path + current[len(old_path):]
+        case.updated_by = current_user.id
+        _record_case_history(
+            db,
+            case_type="PERF",
+            case=case,
+            action="UPDATE",
+            changed_by=current_user.id,
+            summary=f"目录重命名 {old_path} → {new_path}",
+        )
+    db.commit()
+    return schemas.PerformanceCaseBatchResult(affected=len(cases))
+
+
+@protected_router.get("/performance-cases/stats", response_model=schemas.PerformanceCaseStats)
+def get_performance_case_stats(
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.PerformanceCaseStats:
+    conditions = _perf_case_scope_conditions(db, current_user, project_id)
+    if conditions is None:
+        return schemas.PerformanceCaseStats()
+    base = select(func.count(PerformanceCase.id))
+    for condition in conditions:
+        base = base.where(condition)
+    total = db.scalar(base) or 0
+    active = db.scalar(base.where(PerformanceCase.status == "ACTIVE")) or 0
+    approved = db.scalar(base.where(PerformanceCase.review_status == "APPROVED")) or 0
+
+    runs_stmt = select(TestRun.status).where(TestRun.case_type == "PERF")
+    if project_id:
+        runs_stmt = runs_stmt.where(TestRun.project_id == project_id)
+    elif current_user.role != "admin":
+        runs_stmt = runs_stmt.where(TestRun.project_id.in_(_accessible_project_ids(db, current_user)))
+    statuses = list(db.scalars(runs_stmt.order_by(TestRun.id.desc()).limit(50)).all())
+    finished = [item for item in statuses if item in {"SUCCESS", "FAILED", "ERROR", "TIMEOUT"}]
+    rate = None
+    if finished:
+        rate = round(sum(1 for item in finished if item == "SUCCESS") / len(finished), 4)
+    return schemas.PerformanceCaseStats(total=total, active=active, approved=approved, recent_success_rate=rate)
+
+
+@protected_router.put(
+    "/performance-cases/batch",
+    response_model=schemas.PerformanceCaseBatchResult,
+    dependencies=[Depends(require_tester)],
+)
+def batch_update_performance_cases(
+    payload: schemas.PerformanceCaseBatchUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.PerformanceCaseBatchResult:
+    patch = payload.patch.model_dump(exclude_unset=True)
+    if not patch:
+        raise HTTPException(status_code=400, detail="没有可更新的字段")
+    case_ids = list(dict.fromkeys(payload.case_ids))
+    cases = list(db.scalars(select(PerformanceCase).where(PerformanceCase.id.in_(case_ids))).all())
+    if len(cases) != len(case_ids):
+        raise HTTPException(status_code=404, detail="部分用例不存在")
+    checked_projects: set[int] = set()
+    for case in cases:
+        if case.project_id not in checked_projects:
+            _require_project_access(db, current_user, db.get(Project, case.project_id))
+            checked_projects.add(case.project_id)
+    for case in cases:
+        for key, value in patch.items():
+            setattr(case, key, value)
+        case.updated_by = current_user.id
+        _record_case_history(
+            db,
+            case_type="PERF",
+            case=case,
+            action="UPDATE",
+            changed_by=current_user.id,
+            summary=f"批量更新属性：{', '.join(sorted(patch.keys()))}",
+        )
+    db.commit()
+    return schemas.PerformanceCaseBatchResult(affected=len(cases))
+
+
+@protected_router.delete(
+    "/performance-cases/batch",
+    response_model=schemas.PerformanceCaseBatchResult,
+    dependencies=[Depends(require_admin)],
+)
+def batch_delete_performance_cases(
+    payload: schemas.PerformanceCaseBatchDelete,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.PerformanceCaseBatchResult:
+    case_ids = list(dict.fromkeys(payload.case_ids))
+    cases = list(db.scalars(select(PerformanceCase).where(PerformanceCase.id.in_(case_ids))).all())
+    if len(cases) != len(case_ids):
+        raise HTTPException(status_code=404, detail="部分用例不存在")
+    for case in cases:
+        _record_case_history(
+            db,
+            case_type="PERF",
+            case=case,
+            action="DELETE",
+            changed_by=current_user.id,
+            summary="批量删除性能用例",
+        )
+        db.execute(
+            delete(TestPlanCase).where(TestPlanCase.case_type == "PERF", TestPlanCase.case_id == case.id)
+        )
+        db.delete(case)
+    db.commit()
+    return schemas.PerformanceCaseBatchResult(affected=len(cases))
+
 
 
 @protected_router.delete("/ui-cases/{case_id}", status_code=204, dependencies=[Depends(require_admin)])
@@ -3066,6 +4370,20 @@ def create_performance_case(
     return perf_case
 
 
+@protected_router.get("/performance-cases/{case_id}", response_model=schemas.PerformanceCaseRead)
+def get_performance_case(
+    case_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PerformanceCase:
+    perf_case = db.get(PerformanceCase, case_id)
+    if perf_case is None:
+        raise HTTPException(status_code=404, detail="性能用例不存在")
+    _require_project_access(db, current_user, db.get(Project, perf_case.project_id))
+    _ensure_case_defaults(perf_case)
+    return perf_case
+
+
 @protected_router.put(
     "/performance-cases/{case_id}",
     response_model=schemas.PerformanceCaseRead,
@@ -3081,6 +4399,7 @@ def update_performance_case(
     if perf_case is None:
         raise HTTPException(status_code=404, detail="性能用例不存在")
     _require_project_access(db, current_user, db.get(Project, perf_case.project_id))
+    original_review_status = (perf_case.review_status or "DRAFT").upper()
     original_signature = (
         perf_case.name,
         perf_case.folder_path,
@@ -3088,9 +4407,7 @@ def update_performance_case(
         perf_case.path,
         perf_case.priority,
         perf_case.status,
-        perf_case.review_status,
         tuple(perf_case.tags_json or []),
-        perf_case.review_note,
         perf_case.expected_status,
         perf_case.headers_json,
         perf_case.body_json,
@@ -3100,7 +4417,7 @@ def update_performance_case(
         perf_case.max_p95_response_ms,
         perf_case.max_error_rate,
     )
-    data = payload.model_dump()
+    data = payload.model_dump(exclude={"review_status", "review_note"})
     data["method"] = data["method"].upper()
     for key, value in data.items():
         setattr(perf_case, key, value)
@@ -3111,9 +4428,7 @@ def update_performance_case(
         perf_case.path,
         perf_case.priority,
         perf_case.status,
-        perf_case.review_status,
         tuple(perf_case.tags_json or []),
-        perf_case.review_note,
         perf_case.expected_status,
         perf_case.headers_json,
         perf_case.body_json,
@@ -3125,6 +4440,11 @@ def update_performance_case(
     )
     if new_signature != original_signature:
         perf_case.version_no = _bump_version(perf_case.version_no)
+        if original_review_status in {"APPROVED", "IN_REVIEW"}:
+            perf_case.review_status = "DRAFT"
+            perf_case.reviewed_by = None
+            perf_case.reviewed_at = None
+            perf_case.submitted_review_at = None
     perf_case.updated_by = current_user.id
     _record_case_history(db, case_type="PERF", case=perf_case, action="UPDATE", changed_by=current_user.id, summary="更新性能用例")
     db.commit()
@@ -3137,8 +4457,80 @@ def delete_performance_case(case_id: int, db: Session = Depends(get_db)) -> None
     perf_case = db.get(PerformanceCase, case_id)
     if perf_case is None:
         raise HTTPException(status_code=404, detail="性能用例不存在")
+    db.execute(
+        delete(TestPlanCase).where(TestPlanCase.case_type == "PERF", TestPlanCase.case_id == case_id)
+    )
     db.delete(perf_case)
     db.commit()
+
+
+@protected_router.post(
+    "/performance-cases/{case_id}/review/submit",
+    response_model=schemas.PerformanceCaseRead,
+    dependencies=[Depends(require_tester)],
+)
+def submit_performance_case_review(
+    case_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PerformanceCase:
+    perf_case = db.get(PerformanceCase, case_id)
+    if perf_case is None:
+        raise HTTPException(status_code=404, detail="性能用例不存在")
+    _require_project_access(db, current_user, db.get(Project, perf_case.project_id))
+    _ensure_case_defaults(perf_case)
+    current_status = (perf_case.review_status or "DRAFT").upper()
+    if current_status not in {"DRAFT", "REJECTED"}:
+        raise HTTPException(status_code=400, detail=f"当前评审状态为 {current_status}，不能提交评审")
+    perf_case.review_status = "IN_REVIEW"
+    perf_case.submitted_review_at = utc_now_naive()
+    perf_case.reviewed_by = None
+    perf_case.reviewed_at = None
+    perf_case.updated_by = current_user.id
+    _record_case_history(db, case_type="PERF", case=perf_case, action="REVIEW", changed_by=current_user.id, summary="提交评审")
+    db.commit()
+    db.refresh(perf_case)
+    return perf_case
+
+
+@protected_router.post(
+    "/performance-cases/{case_id}/review/decide",
+    response_model=schemas.PerformanceCaseRead,
+    dependencies=[Depends(require_tester)],
+)
+def decide_performance_case_review(
+    case_id: int,
+    payload: schemas.PerformanceCaseReviewDecision,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PerformanceCase:
+    perf_case = db.get(PerformanceCase, case_id)
+    if perf_case is None:
+        raise HTTPException(status_code=404, detail="性能用例不存在")
+    _require_project_access(db, current_user, db.get(Project, perf_case.project_id))
+    if perf_case.created_by is not None and perf_case.created_by == current_user.id:
+        raise HTTPException(status_code=403, detail="不能评审自己创建的用例")
+    _ensure_case_defaults(perf_case)
+    current_status = (perf_case.review_status or "DRAFT").upper()
+    if current_status != "IN_REVIEW":
+        raise HTTPException(status_code=400, detail=f"当前评审状态为 {current_status}，不在评审中")
+    perf_case.review_status = payload.result
+    perf_case.review_note = payload.note
+    perf_case.reviewed_by = current_user.id
+    perf_case.reviewed_at = utc_now_naive()
+    perf_case.updated_by = current_user.id
+    _record_case_history(
+        db,
+        case_type="PERF",
+        case=perf_case,
+        action="REVIEW",
+        changed_by=current_user.id,
+        summary="评审通过" if payload.result == "APPROVED" else "评审拒绝",
+    )
+    db.commit()
+    db.refresh(perf_case)
+    return perf_case
+
 
 
 @protected_router.get("/environments", response_model=list[schemas.EnvironmentRead])
@@ -3262,7 +4654,7 @@ def precheck_api_case_execution(
         environment = db.get(Environment, environment_id)
         if environment is None or environment.project_id != api_case.project_id:
             raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
-    variables = environment.variables_json if environment and environment.variables_json else {}
+    variables = build_variable_context(project, environment)
     issues = _validation_issues_for_environment_runtime(environment, project)
     issues.extend(_validation_issues_for_api_case(api_case, variables))
     return _build_execution_precheck_result(
@@ -3290,7 +4682,7 @@ def precheck_ui_case_execution(
         environment = db.get(Environment, environment_id)
         if environment is None or environment.project_id != ui_case.project_id:
             raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
-    variables = environment.variables_json if environment and environment.variables_json else {}
+    variables = build_variable_context(project, environment)
     issues = _validation_issues_for_environment_runtime(environment, project)
     issues.extend(_validation_issues_for_ui_case(ui_case, variables))
     return _build_execution_precheck_result(
@@ -3318,7 +4710,7 @@ def precheck_performance_case_execution(
         environment = db.get(Environment, environment_id)
         if environment is None or environment.project_id != perf_case.project_id:
             raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
-    variables = environment.variables_json if environment and environment.variables_json else {}
+    variables = build_variable_context(project, environment)
     issues = _validation_issues_for_environment_runtime(environment, project)
     issues.extend(_validation_issues_for_performance_case(perf_case, variables))
     return _build_execution_precheck_result(
@@ -3346,7 +4738,7 @@ def precheck_plan_execution(
         environment = db.get(Environment, environment_id)
         if environment is None or environment.project_id != plan.project_id:
             raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
-    variables = environment.variables_json if environment and environment.variables_json else {}
+    variables = build_variable_context(project, environment)
     issues = _validation_issues_for_environment_runtime(environment, project)
     cases = list(
         db.scalars(
@@ -3706,31 +5098,13 @@ def trigger_test_plan(
         )
     )
 
-    plan_run = TestPlanRun(
-        plan_id=plan.id,
-        project_id=plan.project_id,
+    plan_run = services.create_plan_run_with_cases(
+        db,
+        plan,
         environment_id=environment_id,
-        status="PENDING",
-        summary="任务已提交，等待执行",
-        retry_count=0,
-        total_count=len(cases),
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
     )
-    db.add(plan_run)
-    db.commit()
-    db.refresh(plan_run)
-
-    for plan_case in cases:
-        services.create_test_run(
-            db,
-            project_id=plan.project_id,
-            environment_id=environment_id,
-            plan_run_id=plan_run.id,
-            case_type=plan_case.case_type,
-            case_id=plan_case.case_id,
-            case_name=plan_case.case_name,
-            timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-        )
 
     task_id, ran_inline = _dispatch_task_or_run_inline(run_test_plan, plan_run.id)
     if ran_inline:
@@ -3740,6 +5114,475 @@ def trigger_test_plan(
         db.commit()
         db.refresh(plan_run)
     return plan_run
+
+
+@protected_router.put(
+    "/test-plans/{plan_id}/schedule",
+    response_model=schemas.TestPlanRead,
+    dependencies=[Depends(require_tester)],
+)
+def update_test_plan_schedule(
+    plan_id: int,
+    payload: schemas.TestPlanScheduleUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TestPlan:
+    plan = db.get(TestPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="测试计划不存在")
+    _require_project_access(db, current_user, db.get(Project, plan.project_id))
+
+    if payload.schedule_enabled:
+        if payload.schedule_environment_id is not None:
+            env = db.get(Environment, payload.schedule_environment_id)
+            if env is None or env.project_id != plan.project_id:
+                raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
+        plan.schedule_enabled = True
+        plan.schedule_cron = payload.schedule_cron
+        plan.schedule_environment_id = payload.schedule_environment_id
+        plan.schedule_timeout_seconds = payload.schedule_timeout_seconds
+        plan.schedule_max_retries = payload.schedule_max_retries
+        plan.next_run_at = services.compute_next_run_at(payload.schedule_cron)
+    else:
+        plan.schedule_enabled = False
+        plan.schedule_cron = None
+        plan.schedule_environment_id = None
+        plan.schedule_timeout_seconds = None
+        plan.schedule_max_retries = 0
+        plan.next_run_at = None
+    plan.updated_by = current_user.id
+    db.commit()
+    db.refresh(plan)
+    return plan
+
+
+@protected_router.get(
+    "/projects/{project_id}/notification-setting",
+    response_model=schemas.NotificationSettingRead,
+)
+def get_project_notification_setting(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.NotificationSettingRead:
+    _require_project_access(db, current_user, db.get(Project, project_id))
+    setting = db.scalar(
+        select(ProjectNotificationSetting).where(ProjectNotificationSetting.project_id == project_id)
+    )
+    if setting is None:
+        return schemas.NotificationSettingRead(project_id=project_id)
+    return schemas.NotificationSettingRead.model_validate(setting)
+
+
+def _upsert_notification_setting(
+    db: Session, project_id: int, payload: schemas.NotificationSettingUpdate
+) -> ProjectNotificationSetting:
+    setting = db.scalar(
+        select(ProjectNotificationSetting).where(ProjectNotificationSetting.project_id == project_id)
+    )
+    if setting is None:
+        setting = ProjectNotificationSetting(project_id=project_id)
+        db.add(setting)
+    setting.enabled = payload.enabled
+    setting.channel_type = payload.channel_type
+    setting.webhook_url = payload.webhook_url
+    setting.secret = payload.secret
+    setting.notify_on = payload.notify_on
+    db.commit()
+    db.refresh(setting)
+    return setting
+
+
+@protected_router.put(
+    "/projects/{project_id}/notification-setting",
+    response_model=schemas.NotificationSettingRead,
+    dependencies=[Depends(require_tester)],
+)
+def update_project_notification_setting(
+    project_id: int,
+    payload: schemas.NotificationSettingUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ProjectNotificationSetting:
+    _require_project_access(db, current_user, db.get(Project, project_id))
+    return _upsert_notification_setting(db, project_id, payload)
+
+
+@protected_router.post(
+    "/projects/{project_id}/notification-setting/test",
+    dependencies=[Depends(require_tester)],
+)
+def test_project_notification_setting(
+    project_id: int,
+    payload: schemas.NotificationSettingUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    if not payload.webhook_url:
+        raise HTTPException(status_code=400, detail="请先填写 Webhook 地址")
+    probe = ProjectNotificationSetting(
+        project_id=project_id,
+        enabled=True,
+        channel_type=payload.channel_type,
+        webhook_url=payload.webhook_url,
+        secret=payload.secret,
+        notify_on=payload.notify_on,
+    )
+    text = f"【测试平台】这是一条测试消息\n项目：{project.name}\n若收到本消息，说明通知配置正确。"
+    success = notifications.send_webhook_message(probe, text)
+    return {"success": success, "message": "发送成功" if success else "发送失败，请检查 Webhook 地址与密钥"}
+
+
+@protected_router.get("/api-tokens", response_model=list[schemas.ApiTokenRead])
+def list_api_tokens(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[schemas.ApiTokenRead]:
+    records = db.scalars(
+        select(ApiToken).where(ApiToken.user_id == current_user.id).order_by(ApiToken.id.desc())
+    ).all()
+    return [
+        schemas.ApiTokenRead(
+            id=record.id,
+            name=record.name,
+            token_prefix=record.token[:8] + "****",
+            expires_at=record.expires_at,
+            last_used_at=record.last_used_at,
+            created_at=record.created_at,
+        )
+        for record in records
+    ]
+
+
+@protected_router.post("/api-tokens", response_model=schemas.ApiTokenCreated, status_code=201)
+def create_api_token(
+    payload: schemas.ApiTokenCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ApiTokenCreated:
+    record = services.create_api_token(
+        db, current_user, name=payload.name.strip(), expires_days=payload.expires_days
+    )
+    return schemas.ApiTokenCreated(
+        id=record.id,
+        name=record.name,
+        token_prefix=record.token[:8] + "****",
+        token=record.token,
+        expires_at=record.expires_at,
+        last_used_at=record.last_used_at,
+        created_at=record.created_at,
+    )
+
+
+@protected_router.delete("/api-tokens/{token_id}", status_code=204)
+def delete_api_token(
+    token_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    record = db.get(ApiToken, token_id)
+    if record is None or record.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Token 不存在")
+    db.delete(record)
+    db.commit()
+
+
+def _trigger_batch_run(
+    case_type: str,
+    payload: schemas.UIBatchRunCreate,
+    db: Session,
+    current_user: User,
+) -> UIBatchRun:
+    if case_type == "API":
+        case_model = APICase
+        precheck_fn = precheck_api_case_execution
+    elif case_type == "PERF":
+        case_model = PerformanceCase
+        precheck_fn = precheck_performance_case_execution
+    else:
+        case_model = UICase
+        precheck_fn = precheck_ui_case_execution
+    case_ids = list(dict.fromkeys(payload.case_ids))
+    cases = list(db.scalars(select(case_model).where(case_model.id.in_(case_ids))).all())
+    case_map = {case.id: case for case in cases}
+    missing = [case_id for case_id in case_ids if case_id not in case_map]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"用例不存在: {', '.join(str(item) for item in missing)}")
+    project_ids = {case.project_id for case in cases}
+    if len(project_ids) > 1:
+        raise HTTPException(status_code=400, detail="批量执行的用例必须属于同一项目")
+    project = _require_project_access(db, current_user, db.get(Project, project_ids.pop()))
+    inactive = [case.name for case in cases if (case.status or "ACTIVE").upper() != "ACTIVE"]
+    if inactive:
+        raise HTTPException(status_code=400, detail=f"以下用例未启用：{', '.join(inactive)}")
+    if payload.environment_id is not None:
+        env = db.get(Environment, payload.environment_id)
+        if env is None or env.project_id != project.id:
+            raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
+    for case_id in case_ids:
+        _raise_precheck_failure(
+            precheck_fn(
+                case_id,
+                environment_id=payload.environment_id,
+                db=db,
+                current_user=current_user,
+            )
+        )
+
+    batch_run = UIBatchRun(
+        project_id=project.id,
+        environment_id=payload.environment_id,
+        case_type=case_type,
+        status="PENDING",
+        summary="任务已提交，等待执行",
+        total_count=len(case_ids),
+        created_by=current_user.id,
+    )
+    db.add(batch_run)
+    db.commit()
+    db.refresh(batch_run)
+
+    for case_id in case_ids:
+        case = case_map[case_id]
+        services.create_test_run(
+            db,
+            project_id=project.id,
+            environment_id=payload.environment_id,
+            batch_run_id=batch_run.id,
+            case_type=case_type,
+            case_id=case.id,
+            case_name=case.name,
+            timeout_seconds=payload.timeout_seconds,
+            max_retries=payload.max_retries,
+        )
+
+    task_id, ran_inline = _dispatch_task_or_run_inline(run_ui_batch, batch_run.id)
+    if ran_inline:
+        db.refresh(batch_run)
+    else:
+        batch_run.summary = f"任务已提交，执行中（task_id={task_id}）"
+        db.commit()
+        db.refresh(batch_run)
+    return batch_run
+
+
+@protected_router.post(
+    "/executions/ui/batch-run",
+    response_model=schemas.UIBatchRunRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
+def trigger_ui_batch_run(
+    payload: schemas.UIBatchRunCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> UIBatchRun:
+    return _trigger_batch_run("UI", payload, db, current_user)
+
+
+@protected_router.post(
+    "/executions/api/batch-run",
+    response_model=schemas.UIBatchRunRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
+def trigger_api_batch_run(
+    payload: schemas.UIBatchRunCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> UIBatchRun:
+    return _trigger_batch_run("API", payload, db, current_user)
+
+
+def _list_batch_runs(
+    case_type: str,
+    project_id: int | None,
+    limit: int,
+    db: Session,
+    current_user: User,
+) -> list[UIBatchRun]:
+    stmt = select(UIBatchRun)
+    if case_type == "UI":
+        stmt = stmt.where(or_(UIBatchRun.case_type == "UI", UIBatchRun.case_type.is_(None)))
+    else:
+        stmt = stmt.where(UIBatchRun.case_type == case_type)
+    if project_id is not None:
+        _require_project_access(db, current_user, db.get(Project, project_id))
+        stmt = stmt.where(UIBatchRun.project_id == project_id)
+    elif current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return []
+        stmt = stmt.where(UIBatchRun.project_id.in_(project_ids))
+    stmt = stmt.order_by(UIBatchRun.id.desc()).limit(limit)
+    return list(db.scalars(stmt).all())
+
+
+@protected_router.get("/executions/ui/batch-runs", response_model=list[schemas.UIBatchRunRead])
+def list_ui_batch_runs(
+    project_id: int | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[UIBatchRun]:
+    return _list_batch_runs("UI", project_id, limit, db, current_user)
+
+
+@protected_router.get("/executions/api/batch-runs", response_model=list[schemas.UIBatchRunRead])
+def list_api_batch_runs(
+    project_id: int | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[UIBatchRun]:
+    return _list_batch_runs("API", project_id, limit, db, current_user)
+
+
+def _get_batch_run_detail(
+    batch_id: int,
+    db: Session,
+    current_user: User,
+) -> schemas.UIBatchRunDetail:
+    batch_run = db.get(UIBatchRun, batch_id)
+    if batch_run is None:
+        raise HTTPException(status_code=404, detail="批量执行记录不存在")
+    _require_project_access(db, current_user, db.get(Project, batch_run.project_id))
+    runs = list(
+        db.scalars(
+            select(TestRun).where(TestRun.batch_run_id == batch_run.id).order_by(TestRun.id.asc())
+        ).all()
+    )
+    detail = schemas.UIBatchRunDetail.model_validate(batch_run)
+    detail.runs = [schemas.TestRunRead.model_validate(run) for run in runs]
+    return detail
+
+
+@protected_router.get("/executions/ui/batch-runs/{batch_id}", response_model=schemas.UIBatchRunDetail)
+def get_ui_batch_run(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.UIBatchRunDetail:
+    return _get_batch_run_detail(batch_id, db, current_user)
+
+
+@protected_router.get("/executions/api/batch-runs/{batch_id}", response_model=schemas.UIBatchRunDetail)
+def get_api_batch_run(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.UIBatchRunDetail:
+    return _get_batch_run_detail(batch_id, db, current_user)
+
+
+def _rerun_failed_batch_run(
+    batch_id: int,
+    db: Session,
+    current_user: User,
+) -> UIBatchRun:
+    batch_run = db.get(UIBatchRun, batch_id)
+    if batch_run is None:
+        raise HTTPException(status_code=404, detail="批量执行记录不存在")
+    _require_project_access(db, current_user, db.get(Project, batch_run.project_id))
+    if batch_run.status in {"PENDING", "RUNNING"}:
+        raise HTTPException(status_code=400, detail="批量执行尚未结束")
+    failed_runs = list(
+        db.scalars(
+            select(TestRun)
+            .where(TestRun.batch_run_id == batch_run.id, TestRun.status != "SUCCESS")
+            .order_by(TestRun.id.asc())
+        ).all()
+    )
+    failed_case_ids = list(dict.fromkeys(run.case_id for run in failed_runs))
+    if not failed_case_ids:
+        raise HTTPException(status_code=400, detail="没有失败的用例可重跑")
+    return _trigger_batch_run(
+        (batch_run.case_type or "UI").upper(),
+        schemas.UIBatchRunCreate(
+            case_ids=failed_case_ids,
+            environment_id=batch_run.environment_id,
+            timeout_seconds=failed_runs[0].timeout_seconds,
+            max_retries=failed_runs[0].max_retries or 0,
+        ),
+        db=db,
+        current_user=current_user,
+    )
+
+
+@protected_router.post(
+    "/executions/ui/batch-runs/{batch_id}/rerun-failed",
+    response_model=schemas.UIBatchRunRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
+def rerun_failed_ui_batch_run(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> UIBatchRun:
+    return _rerun_failed_batch_run(batch_id, db, current_user)
+
+
+@protected_router.post(
+    "/executions/api/batch-runs/{batch_id}/rerun-failed",
+    response_model=schemas.UIBatchRunRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
+def rerun_failed_api_batch_run(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> UIBatchRun:
+    return _rerun_failed_batch_run(batch_id, db, current_user)
+
+
+@protected_router.post(
+    "/executions/perf/batch-run",
+    response_model=schemas.UIBatchRunRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
+def trigger_perf_batch_run(
+    payload: schemas.UIBatchRunCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> UIBatchRun:
+    return _trigger_batch_run("PERF", payload, db, current_user)
+
+
+@protected_router.get("/executions/perf/batch-runs", response_model=list[schemas.UIBatchRunRead])
+def list_perf_batch_runs(
+    project_id: int | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[UIBatchRun]:
+    return _list_batch_runs("PERF", project_id, limit, db, current_user)
+
+
+@protected_router.get("/executions/perf/batch-runs/{batch_id}", response_model=schemas.UIBatchRunDetail)
+def get_perf_batch_run(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.UIBatchRunDetail:
+    return _get_batch_run_detail(batch_id, db, current_user)
+
+
+@protected_router.post(
+    "/executions/perf/batch-runs/{batch_id}/rerun-failed",
+    response_model=schemas.UIBatchRunRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
+def rerun_failed_perf_batch_run(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> UIBatchRun:
+    return _rerun_failed_batch_run(batch_id, db, current_user)
 
 
 @protected_router.post(
@@ -3764,33 +5607,104 @@ def create_ui_case(
     return ui_case
 
 
-@protected_router.get("/executions/runs", response_model=list[schemas.TestRunRead])
+@protected_router.get("/executions/runs", response_model=schemas.TestRunPage | list[schemas.TestRunRead])
 def list_runs(
     project_id: int | None = None,
     case_type: str | None = None,
     case_id: int | None = None,
+    status: str | None = None,
+    error_type: str | None = None,
+    keyword: str | None = None,
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
     limit: int = Query(default=30, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> list[TestRun]:
-    stmt = select(TestRun)
+) -> schemas.TestRunPage | list[TestRun]:
     normalized_case_type = (case_type or "").strip().upper()
     if normalized_case_type and normalized_case_type not in {"API", "UI", "PERF"}:
         raise HTTPException(status_code=400, detail="不支持的用例类型")
+    normalized_status = (status or "").strip().upper()
+    if normalized_status and normalized_status not in {
+        "PENDING",
+        "RUNNING",
+        "SUCCESS",
+        "FAILED",
+        "ERROR",
+        "TIMEOUT",
+        "CANCELLED",
+    }:
+        raise HTTPException(status_code=400, detail="不支持的执行状态")
+
+    base_conditions = []
     if project_id is not None:
         _require_project_access(db, current_user, db.get(Project, project_id))
-        stmt = stmt.where(TestRun.project_id == project_id)
+        base_conditions.append(TestRun.project_id == project_id)
     elif current_user.role != "admin":
         project_ids = _accessible_project_ids(db, current_user)
         if not project_ids:
-            return []
-        stmt = stmt.where(TestRun.project_id.in_(project_ids))
+            return schemas.TestRunPage(items=[], total=0) if page is not None else []
+        base_conditions.append(TestRun.project_id.in_(project_ids))
     if normalized_case_type:
-        stmt = stmt.where(TestRun.case_type == normalized_case_type)
+        base_conditions.append(TestRun.case_type == normalized_case_type)
     if case_id is not None:
-        stmt = stmt.where(TestRun.case_id == case_id)
-    stmt = stmt.order_by(TestRun.id.desc()).limit(limit)
-    return list(db.scalars(stmt).all())
+        base_conditions.append(TestRun.case_id == case_id)
+
+    filter_conditions = list(base_conditions)
+    if normalized_status:
+        filter_conditions.append(TestRun.status == normalized_status)
+    if error_type and error_type.strip():
+        filter_conditions.append(TestRun.error_type == error_type.strip().upper())
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        filter_conditions.append(or_(TestRun.case_name.like(pattern), TestRun.summary.like(pattern)))
+
+    stmt = select(TestRun).where(*filter_conditions).order_by(TestRun.id.desc())
+    if page is None:
+        return list(db.scalars(stmt.limit(limit)).all())
+
+    total = db.scalar(select(func.count()).select_from(TestRun).where(*filter_conditions)) or 0
+    items = list(db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all())
+    status_counts = dict(
+        db.execute(
+            select(TestRun.status, func.count()).where(*base_conditions).group_by(TestRun.status)
+        ).all()
+    )
+    failed = sum(status_counts.get(key, 0) for key in ("FAILED", "ERROR", "TIMEOUT"))
+    return schemas.TestRunPage(
+        items=[schemas.TestRunRead.model_validate(item) for item in items],
+        total=total,
+        running=status_counts.get("RUNNING", 0) + status_counts.get("PENDING", 0),
+        failed=failed,
+        retryable=failed + status_counts.get("CANCELLED", 0),
+    )
+
+
+@protected_router.get("/executions/runs/latest", response_model=list[schemas.TestRunRead])
+def list_latest_runs(
+    case_type: str = Query(...),
+    case_ids: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[TestRun]:
+    normalized_case_type = case_type.strip().upper()
+    if normalized_case_type not in {"API", "UI", "PERF"}:
+        raise HTTPException(status_code=400, detail="不支持的用例类型")
+    try:
+        ids = [int(item) for item in case_ids.split(",") if item.strip()]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="case_ids 格式不正确") from exc
+    ids = list(dict.fromkeys(ids))[:200]
+    if not ids:
+        return []
+    conditions = [TestRun.case_type == normalized_case_type, TestRun.case_id.in_(ids)]
+    if current_user.role != "admin":
+        project_ids = _accessible_project_ids(db, current_user)
+        if not project_ids:
+            return []
+        conditions.append(TestRun.project_id.in_(project_ids))
+    latest_ids = select(func.max(TestRun.id)).where(*conditions).group_by(TestRun.case_id)
+    return list(db.scalars(select(TestRun).where(TestRun.id.in_(latest_ids))).all())
 
 
 @protected_router.get("/executions/runs/{run_id}", response_model=schemas.TestRunRead)
@@ -4235,6 +6149,19 @@ def timestamp_convert(payload: schemas.TimestampPayload) -> schemas.ToolResult:
     return schemas.ToolResult(result=services.convert_timestamp(payload.payload))
 
 
+@protected_router.post("/tools/cron/preview", response_model=schemas.ToolResult)
+def cron_preview(payload: schemas.TextPayload) -> schemas.ToolResult:
+    try:
+        return schemas.ToolResult(result=services.preview_cron(payload.payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@protected_router.post("/tools/hash/digest", response_model=schemas.ToolResult)
+def hash_digest(payload: schemas.TextPayload) -> schemas.ToolResult:
+    return schemas.ToolResult(result=services.digest_text(payload.payload))
+
+
 @protected_router.get("/reports", response_model=list[schemas.TestPlanRunView])
 def list_reports(
     db: Session = Depends(get_db),
@@ -4392,7 +6319,11 @@ def get_report(
     if plan_run is None:
         raise HTTPException(status_code=404, detail="报告不存在")
     _require_project_access(db, current_user, db.get(Project, plan_run.project_id))
+    return _assemble_report_detail(db, plan_run)
 
+
+def _assemble_report_detail(db: Session, plan_run: TestPlanRun) -> schemas.ReportDetail:
+    plan_run_id = plan_run.id
     test_runs = list(
         db.scalars(select(TestRun).where(TestRun.plan_run_id == plan_run_id).order_by(TestRun.id.asc())).all()
     )
@@ -4524,6 +6455,107 @@ def download_report_file(
     return FileResponse(path=file_path, media_type=media_type, filename=filename)
 
 
+def _report_share_url(share_token: str | None) -> str:
+    if not share_token:
+        return ""
+    return f"/shared-report/{share_token}"
+
+
+@protected_router.post(
+    "/reports/{plan_run_id}/share",
+    response_model=schemas.ReportShareResult,
+    dependencies=[Depends(require_tester)],
+)
+def enable_report_share(
+    plan_run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ReportShareResult:
+    """为报告生成（或复用）公开分享链接 token，无需登录即可访问。"""
+    plan_run = db.get(TestPlanRun, plan_run_id)
+    if plan_run is None:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    _require_project_access(db, current_user, db.get(Project, plan_run.project_id))
+    if not plan_run.share_token:
+        plan_run.share_token = secrets.token_urlsafe(24)
+        db.commit()
+        db.refresh(plan_run)
+    return schemas.ReportShareResult(
+        plan_run_id=plan_run.id,
+        share_token=plan_run.share_token,
+        share_url=_report_share_url(plan_run.share_token),
+        enabled=True,
+    )
+
+
+@protected_router.delete(
+    "/reports/{plan_run_id}/share",
+    response_model=schemas.ReportShareResult,
+    dependencies=[Depends(require_tester)],
+)
+def disable_report_share(
+    plan_run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ReportShareResult:
+    """关闭报告分享，使已发出的链接失效。"""
+    plan_run = db.get(TestPlanRun, plan_run_id)
+    if plan_run is None:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    _require_project_access(db, current_user, db.get(Project, plan_run.project_id))
+    plan_run.share_token = None
+    db.commit()
+    db.refresh(plan_run)
+    return schemas.ReportShareResult(
+        plan_run_id=plan_run.id,
+        share_token=None,
+        share_url="",
+        enabled=False,
+    )
+
+
+@public_router.get("/public/reports/{share_token}", response_model=schemas.PublicReportDetail)
+def get_shared_report(
+    share_token: str,
+    db: Session = Depends(get_db),
+) -> schemas.PublicReportDetail:
+    """通过分享 token 匿名访问报告详情（无需登录）。"""
+    plan_run = db.scalar(select(TestPlanRun).where(TestPlanRun.share_token == share_token))
+    if plan_run is None:
+        raise HTTPException(status_code=404, detail="分享链接无效或已失效")
+    detail = _assemble_report_detail(db, plan_run)
+    return schemas.PublicReportDetail(
+        plan_run=schemas.PublicTestPlanRunRead.model_validate(
+            detail.plan_run.model_dump()
+        ),
+        test_runs=[
+            schemas.PublicTestRunRead.model_validate(run.model_dump())
+            for run in detail.test_runs
+        ],
+        recent_history=detail.recent_history,
+    )
+
+
+_VALID_USER_ROLES = {"admin", "tester", "viewer"}
+_VALID_USER_STATUSES = {"ACTIVE", "DISABLED"}
+
+
+def _validate_user_fields(role: str | None = None, status: str | None = None) -> None:
+    if role is not None and role not in _VALID_USER_ROLES:
+        raise HTTPException(status_code=422, detail="非法角色，仅支持 admin / tester / viewer")
+    if status is not None and status not in _VALID_USER_STATUSES:
+        raise HTTPException(status_code=422, detail="非法状态，仅支持 ACTIVE / DISABLED")
+
+
+def _other_active_admin_exists(db: Session, exclude_user_id: int) -> bool:
+    count = db.scalar(
+        select(func.count())
+        .select_from(User)
+        .where(User.role == "admin", User.status == "ACTIVE", User.id != exclude_user_id)
+    )
+    return bool(count)
+
+
 @protected_router.get("/users", response_model=list[schemas.UserRead], dependencies=[Depends(require_admin)])
 def list_users(db: Session = Depends(get_db)) -> list[User]:
     users = list(db.scalars(select(User).order_by(User.id.asc())).all())
@@ -4533,7 +6565,10 @@ def list_users(db: Session = Depends(get_db)) -> list[User]:
 @protected_router.post("/users", response_model=schemas.UserRead, status_code=201, dependencies=[Depends(require_admin)])
 def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db)) -> User:
     data = payload.model_dump()
-    password = data.pop("password", None) or services.DEFAULT_USER_PASSWORD
+    _validate_user_fields(role=data.get("role"), status=data.get("status"))
+    if db.scalar(select(User).where(User.username == data["username"])) is not None:
+        raise HTTPException(status_code=400, detail="用户名已存在")
+    password = data.pop("password")
     user = User(**data, password_hash=services.hash_password(password))
     db.add(user)
     db.commit()
@@ -4543,12 +6578,24 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db)) -> U
     return _serialize_user(db, user)
 
 
-@protected_router.put("/users/{user_id}", response_model=schemas.UserRead, dependencies=[Depends(require_admin)])
-def update_user(user_id: int, payload: schemas.UserUpdate, db: Session = Depends(get_db)) -> User:
+@protected_router.put("/users/{user_id}", response_model=schemas.UserRead)
+def update_user(
+    user_id: int,
+    payload: schemas.UserUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+) -> User:
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在")
     data = payload.model_dump(exclude_unset=True)
+    _validate_user_fields(role=data.get("role"), status=data.get("status"))
+    demoting = "role" in data and user.role == "admin" and data["role"] != "admin"
+    disabling = "status" in data and user.status == "ACTIVE" and data["status"] == "DISABLED"
+    if (demoting or disabling) and user.id == current_user.id:
+        raise HTTPException(status_code=400, detail="不能停用或降级自己的账号")
+    if (demoting or disabling) and user.role == "admin" and not _other_active_admin_exists(db, user.id):
+        raise HTTPException(status_code=400, detail="至少保留一名启用的管理员")
     password = data.pop("password", None)
     if password:
         user.password_hash = services.hash_password(password)
@@ -4560,4 +6607,34 @@ def update_user(user_id: int, payload: schemas.UserUpdate, db: Session = Depends
         user.status = data["status"]
     db.commit()
     db.refresh(user)
+    if disabling:
+        services.revoke_all_user_tokens(db, user.id)
     return _serialize_user(db, user)
+
+
+@protected_router.delete("/users/{user_id}", status_code=204)
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+) -> None:
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if user.id == current_user.id:
+        raise HTTPException(status_code=400, detail="不能删除自己的账号")
+    if user.role == "admin" and not _other_active_admin_exists(db, user.id):
+        raise HTTPException(status_code=400, detail="至少保留一名启用的管理员")
+    # 先将全库指向该用户的可空外键（created_by/updated_by 等审计字段）置空，
+    # 避免数据库 RESTRICT 外键约束阻止删除；tokens/工作空间成员由级联删除处理
+    for table in User.metadata.sorted_tables:
+        for column in table.columns:
+            if column.nullable and any(fk.column.table.name == "users" for fk in column.foreign_keys):
+                db.execute(table.update().where(column == user.id).values({column.name: None}))
+    db.execute(delete(ProjectMember).where(ProjectMember.user_id == user.id))
+    db.delete(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="该用户存在无法解除的关联数据，请先停用账号")

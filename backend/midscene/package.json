@@ -1,0 +1,13 @@
+{
+  "name": "omnitest-midscene-runner",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test midscene_runner.test.js"
+  },
+  "dependencies": {
+    "@midscene/web": "1.10.8",
+    "@playwright/test": "1.58.2",
+    "playwright": "1.58.2"
+  }
+}

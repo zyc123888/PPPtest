@@ -1,26 +1,6 @@
 <template>
   <div class="app-page">
-    <PageHeader title="常用工具" subtitle="提供常用的测试数据辅助能力" />
-
-    <div class="tools-hero section-gap">
-      <el-card class="page-card tools-hero__main" shadow="never">
-        <div class="tools-hero__kicker">Utility Layer</div>
-        <div class="tools-hero__title">常用工具</div>
-        <div class="tools-hero__subtitle">把格式化、编码、时间转换这类辅助能力统一收口，保持平台内部工具的一致视觉。</div>
-      </el-card>
-      <el-card class="page-card tools-hero__stat" shadow="never">
-        <el-statistic title="工具页签" :value="3" />
-      </el-card>
-      <el-card class="page-card tools-hero__stat" shadow="never">
-        <el-statistic title="JSON 默认内容" :value="jsonTool.input ? 1 : 0" />
-      </el-card>
-      <el-card class="page-card tools-hero__stat" shadow="never">
-        <el-statistic title="Base64 示例" :value="base64Tool.input ? 1 : 0" />
-      </el-card>
-      <el-card class="page-card tools-hero__stat" shadow="never">
-        <el-statistic title="时区选项" :value="timezones.length" />
-      </el-card>
-    </div>
+    <PageHeader title="常用工具" subtitle="格式化、编解码、造数、调度预览等测试辅助能力" />
 
     <el-card class="page-card" shadow="never">
       <el-tabs v-model="activeTab" type="card">
@@ -55,6 +35,41 @@
             <div class="toolbar-right">
               <el-button type="primary" @click="handleBase64Encode">编码</el-button>
               <el-button @click="handleBase64Decode">解码</el-button>
+            </div>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="URL 编解码" name="url">
+          <el-row :gutter="16" class="section-gap">
+            <el-col :xs="24" :lg="12">
+              <el-input v-model="urlTool.input" type="textarea" :rows="12" placeholder="请输入待编码 / 解码的文本" />
+            </el-col>
+            <el-col :xs="24" :lg="12">
+              <el-input v-model="urlTool.output" type="textarea" :rows="12" readonly placeholder="转换结果" />
+            </el-col>
+          </el-row>
+          <div class="toolbar">
+            <div />
+            <div class="toolbar-right">
+              <el-button type="primary" @click="handleUrlEncode">URL 编码</el-button>
+              <el-button @click="handleUrlDecode">URL 解码</el-button>
+            </div>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="哈希计算" name="hash">
+          <el-row :gutter="16" class="section-gap">
+            <el-col :xs="24" :lg="12">
+              <el-input v-model="hashTool.input" type="textarea" :rows="12" placeholder="请输入待计算哈希的文本" />
+            </el-col>
+            <el-col :xs="24" :lg="12">
+              <el-input v-model="hashTool.output" type="textarea" :rows="12" readonly placeholder="MD5 / SHA1 / SHA256 结果" />
+            </el-col>
+          </el-row>
+          <div class="toolbar">
+            <div />
+            <div class="toolbar-right">
+              <el-button type="primary" @click="handleHashDigest">计算哈希</el-button>
             </div>
           </div>
         </el-tab-pane>
@@ -155,6 +170,104 @@
             </div>
           </template>
         </el-tab-pane>
+
+        <el-tab-pane label="Cron 预览" name="cron">
+          <el-alert
+            class="tool-hint"
+            type="info"
+            :closable="false"
+            title="与测试计划定时调度口径一致：5 段（分 时 日 月 周），按北京时间解释"
+          />
+          <div class="ts-line section-gap">
+            <el-input v-model="cronTool.expression" class="ts-line__grow" placeholder="如 0 2 * * *" />
+            <el-select v-model="cronTool.preset" class="ts-line__dir" placeholder="常用预设" @change="applyCronPreset">
+              <el-option v-for="item in cronPresets" :key="item.value" :label="`${item.label}（${item.value}）`" :value="item.value" />
+            </el-select>
+            <el-button type="primary" class="ts-line__btn" @click="handleCronPreview">预览触发时间</el-button>
+          </div>
+          <div v-if="cronTool.runs.length" class="cron-runs">
+            <div v-for="(run, idx) in cronTool.runs" :key="run + idx" class="cron-runs__item">
+              <span class="cron-runs__index">第 {{ idx + 1 }} 次</span>
+              <span class="cron-runs__time">{{ run }}</span>
+            </div>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="JWT 解析" name="jwt">
+          <el-input v-model="jwtTool.input" type="textarea" :rows="5" placeholder="粘贴 JWT（header.payload.signature）" />
+          <div class="toolbar">
+            <div class="jwt-status">
+              <template v-if="jwtTool.expText">
+                <el-tag :type="jwtTool.expired ? 'danger' : 'success'" effect="light">
+                  {{ jwtTool.expired ? '已过期' : '未过期' }}
+                </el-tag>
+                <span class="jwt-status__text">过期时间：{{ jwtTool.expText }}</span>
+              </template>
+            </div>
+            <div class="toolbar-right">
+              <el-button type="primary" @click="handleJwtDecode">解析 Token</el-button>
+            </div>
+          </div>
+          <el-row v-if="jwtTool.header" :gutter="16">
+            <el-col :xs="24" :lg="8">
+              <div class="tool-block__title">Header</div>
+              <el-input v-model="jwtTool.header" type="textarea" :rows="12" readonly />
+            </el-col>
+            <el-col :xs="24" :lg="16">
+              <div class="tool-block__title">Payload</div>
+              <el-input v-model="jwtTool.payload" type="textarea" :rows="12" readonly />
+            </el-col>
+          </el-row>
+        </el-tab-pane>
+
+        <el-tab-pane label="数据生成" name="datagen">
+          <div class="ts-line">
+            <el-select v-model="genTool.type" class="ts-line__dir">
+              <el-option label="手机号" value="phone" />
+              <el-option label="身份证号" value="idcard" />
+              <el-option label="邮箱" value="email" />
+              <el-option label="UUID" value="uuid" />
+              <el-option label="随机字符串" value="string" />
+            </el-select>
+            <div class="gen-count">
+              <span class="gen-count__label">数量</span>
+              <el-input-number v-model="genTool.count" :min="1" :max="100" />
+            </div>
+            <div v-if="genTool.type === 'string'" class="gen-count">
+              <span class="gen-count__label">长度</span>
+              <el-input-number v-model="genTool.length" :min="4" :max="128" />
+            </div>
+            <el-button type="primary" class="ts-line__btn" @click="handleGenerate">生成</el-button>
+            <el-button :disabled="!genTool.output" @click="copyText(genTool.output, '已复制生成结果')">复制结果</el-button>
+          </div>
+          <el-input v-model="genTool.output" class="section-gap" type="textarea" :rows="12" readonly placeholder="生成结果，每行一条" />
+        </el-tab-pane>
+
+        <el-tab-pane label="正则测试" name="regex">
+          <div class="ts-line">
+            <el-input v-model="regexTool.pattern" class="ts-line__grow" placeholder="正则表达式，如 \d+" />
+            <el-checkbox-group v-model="regexTool.flags" class="regex-flags">
+              <el-checkbox label="g">g 全局</el-checkbox>
+              <el-checkbox label="i">i 忽略大小写</el-checkbox>
+              <el-checkbox label="m">m 多行</el-checkbox>
+              <el-checkbox label="s">s 单行</el-checkbox>
+            </el-checkbox-group>
+          </div>
+          <el-input v-model="regexTool.text" class="section-gap" type="textarea" :rows="6" placeholder="待匹配文本，结果实时更新" />
+          <el-alert v-if="regexResult.error" class="tool-hint" type="error" :closable="false" :title="`表达式错误：${regexResult.error}`" />
+          <template v-else>
+            <div class="tool-block__title">匹配结果（{{ regexResult.matches.length }} 处{{ regexResult.truncated ? '，仅展示前 200 条' : '' }}）</div>
+            <el-table v-if="regexResult.matches.length" :data="regexResult.matches" size="small" border max-height="320">
+              <el-table-column type="index" label="#" width="56" />
+              <el-table-column prop="match" label="匹配内容" min-width="200" show-overflow-tooltip />
+              <el-table-column prop="index" label="起始位置" width="100" />
+              <el-table-column label="捕获分组" min-width="200" show-overflow-tooltip>
+                <template #default="scope">{{ scope.row.groups.length ? scope.row.groups.join(' | ') : '-' }}</template>
+              </el-table-column>
+            </el-table>
+            <el-empty v-else description="暂无匹配" :image-size="64" />
+          </template>
+        </el-tab-pane>
       </el-tabs>
     </el-card>
   </div>
@@ -207,6 +320,192 @@ const handleBase64Decode = async () => {
     ElMessage.error(error.message)
   }
 }
+
+const copyText = async (text, tip = '已复制') => {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success(tip)
+  } catch (error) {
+    ElMessage.error('复制失败，请手动复制')
+  }
+}
+
+/* ---------------- URL 编解码 ---------------- */
+const urlTool = reactive({
+  input: 'https://example.com/search?q=测试 平台&lang=zh',
+  output: ''
+})
+
+const handleUrlEncode = () => {
+  urlTool.output = encodeURIComponent(urlTool.input)
+}
+
+const handleUrlDecode = () => {
+  try {
+    urlTool.output = decodeURIComponent(urlTool.input)
+  } catch (error) {
+    ElMessage.error('解码失败：不是合法的 URL 编码内容')
+  }
+}
+
+/* ---------------- 哈希计算 ---------------- */
+const hashTool = reactive({ input: 'platform-demo', output: '' })
+
+const handleHashDigest = async () => {
+  try {
+    const res = await api.post('/tools/hash/digest', { payload: hashTool.input })
+    hashTool.output = res.result
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+/* ---------------- Cron 预览 ---------------- */
+const cronPresets = [
+  { label: '每天 02:00', value: '0 2 * * *' },
+  { label: '每小时整点', value: '0 * * * *' },
+  { label: '每 30 分钟', value: '*/30 * * * *' },
+  { label: '工作日 09:00', value: '0 9 * * 1-5' },
+  { label: '每周一 08:30', value: '30 8 * * 1' }
+]
+
+const cronTool = reactive({ expression: '0 2 * * *', preset: '', runs: [] })
+
+const applyCronPreset = (value) => {
+  if (value) cronTool.expression = value
+}
+
+const handleCronPreview = async () => {
+  try {
+    const res = await api.post('/tools/cron/preview', { payload: cronTool.expression })
+    cronTool.runs = res.result.split('\n').filter(Boolean)
+  } catch (error) {
+    cronTool.runs = []
+    ElMessage.error(error.message)
+  }
+}
+
+/* ---------------- JWT 解析 ---------------- */
+const jwtTool = reactive({ input: '', header: '', payload: '', expired: false, expText: '' })
+
+const decodeJwtSegment = (segment) => {
+  const normalized = segment.replace(/-/g, '+').replace(/_/g, '/')
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4)
+  const bytes = Uint8Array.from(atob(padded), (char) => char.charCodeAt(0))
+  return JSON.parse(new TextDecoder().decode(bytes))
+}
+
+const handleJwtDecode = () => {
+  const parts = jwtTool.input.trim().split('.')
+  if (parts.length !== 3) {
+    ElMessage.error('JWT 需为三段式（header.payload.signature）')
+    return
+  }
+  try {
+    const header = decodeJwtSegment(parts[0])
+    const payload = decodeJwtSegment(parts[1])
+    jwtTool.header = JSON.stringify(header, null, 2)
+    jwtTool.payload = JSON.stringify(payload, null, 2)
+    if (payload.exp) {
+      jwtTool.expired = payload.exp * 1000 < Date.now()
+      jwtTool.expText = new Date(payload.exp * 1000).toLocaleString()
+    } else {
+      jwtTool.expired = false
+      jwtTool.expText = ''
+    }
+  } catch (error) {
+    jwtTool.header = ''
+    jwtTool.payload = ''
+    jwtTool.expText = ''
+    ElMessage.error('解析失败：不是合法的 JWT')
+  }
+}
+
+/* ---------------- 数据生成 ---------------- */
+const genTool = reactive({ type: 'phone', count: 5, length: 16, output: '' })
+
+const randomInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
+const randomPick = (list) => list[randomInt(0, list.length - 1)]
+
+const PHONE_PREFIXES = ['133', '135', '137', '138', '139', '150', '152', '157', '158', '159', '176', '177', '180', '182', '185', '186', '188', '189', '198', '199']
+const ID_AREA_CODES = ['110101', '310104', '440305', '510107', '330106', '420111', '320102', '500103']
+const EMAIL_DOMAINS = ['example.com', 'test.com', 'qq.com', '163.com', 'outlook.com']
+const STRING_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+
+const randomString = (length) =>
+  Array.from({ length }, () => STRING_CHARSET[randomInt(0, STRING_CHARSET.length - 1)]).join('')
+
+const generatePhone = () =>
+  randomPick(PHONE_PREFIXES) + Array.from({ length: 8 }, () => randomInt(0, 9)).join('')
+
+const generateIdCard = () => {
+  const area = randomPick(ID_AREA_CODES)
+  const year = randomInt(1960, 2005)
+  const month = String(randomInt(1, 12)).padStart(2, '0')
+  const day = String(randomInt(1, 28)).padStart(2, '0')
+  const sequence = String(randomInt(1, 999)).padStart(3, '0')
+  const base = `${area}${year}${month}${day}${sequence}`
+  const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
+  const checkCodes = '10X98765432'
+  const sum = base.split('').reduce((acc, char, idx) => acc + Number(char) * weights[idx], 0)
+  return base + checkCodes[sum % 11]
+}
+
+const generateEmail = () => `${randomString(randomInt(6, 10)).toLowerCase()}@${randomPick(EMAIL_DOMAINS)}`
+
+const generateUuid = () => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+    const rand = randomInt(0, 15)
+    return (char === 'x' ? rand : (rand & 0x3) | 0x8).toString(16)
+  })
+}
+
+const handleGenerate = () => {
+  const generators = {
+    phone: generatePhone,
+    idcard: generateIdCard,
+    email: generateEmail,
+    uuid: generateUuid,
+    string: () => randomString(genTool.length)
+  }
+  const generator = generators[genTool.type]
+  genTool.output = Array.from({ length: genTool.count }, () => generator()).join('\n')
+}
+
+/* ---------------- 正则测试 ---------------- */
+const regexTool = reactive({
+  pattern: '\\d+',
+  flags: ['g'],
+  text: '订单 20260731-042 已发货，运单号 SF1391234567890'
+})
+
+const regexResult = computed(() => {
+  const out = { error: '', matches: [], truncated: false }
+  if (!regexTool.pattern) return out
+  let re
+  try {
+    re = new RegExp(regexTool.pattern, regexTool.flags.join(''))
+  } catch (error) {
+    out.error = error.message
+    return out
+  }
+  if (re.global) {
+    for (const match of regexTool.text.matchAll(re)) {
+      if (out.matches.length >= 200) {
+        out.truncated = true
+        break
+      }
+      out.matches.push({ index: match.index, match: match[0], groups: match.slice(1).map((g) => g ?? '') })
+    }
+  } else {
+    const match = re.exec(regexTool.text)
+    if (match) {
+      out.matches.push({ index: match.index, match: match[0], groups: match.slice(1).map((g) => g ?? '') })
+    }
+  }
+  return out
+})
 
 /* ---------------- 时间戳转换 ---------------- */
 const timezones = [
@@ -345,53 +644,70 @@ const convertBatch = () => {
 </script>
 
 <style scoped>
-.tools-hero {
+.tool-hint {
+  margin-bottom: 14px;
+}
+
+.tool-block__title {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 12px 0 8px;
+}
+
+.cron-runs {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr));
-  gap: var(--space-12);
+  gap: 8px;
+  max-width: 560px;
 }
 
-.tools-hero__main {
-  border-radius: 20px;
-  background:
-    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.88)),
-    radial-gradient(circle at top right, rgba(99, 102, 241, 0.26), transparent 35%);
-  color: #f8fafc;
+.cron-runs__item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--el-border-color-light, #e4e7ed);
+  border-radius: 10px;
+  background: var(--el-fill-color-lighter, #fafafa);
 }
 
-.tools-hero__kicker {
+.cron-runs__index {
+  flex: 0 0 auto;
   font-size: 12px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: rgba(226, 232, 240, 0.72);
-  margin-bottom: 10px;
+  color: var(--color-text-secondary, #909399);
 }
 
-.tools-hero__title {
-  font-size: 26px;
-  font-weight: 700;
-  line-height: 1.25;
-  margin-bottom: 10px;
+.cron-runs__time {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
-.tools-hero__subtitle {
-  max-width: 760px;
-  color: rgba(226, 232, 240, 0.82);
-  line-height: 1.7;
+.jwt-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
-.tools-hero__stat {
-  border-radius: 18px;
+.jwt-status__text {
+  font-size: 13px;
+  color: var(--color-text-secondary, #909399);
 }
 
-@media (max-width: 960px) {
-  .tools-hero {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+.gen-count {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
 
-  .tools-hero__main {
-    grid-column: 1 / -1;
-  }
+.gen-count__label {
+  font-size: 13px;
+  color: var(--color-text-secondary, #909399);
+}
+
+.regex-flags {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
 }
 
 /* 时间戳转换 */

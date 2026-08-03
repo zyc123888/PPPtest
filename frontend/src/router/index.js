@@ -6,6 +6,14 @@ const Login = () => import('@/views/login/index.vue')
 const Dashboard = () => import('@/views/dashboard/index.vue')
 const Workspace = () => import('@/views/workspace/index.vue')
 const Project = () => import('@/views/project/index.vue')
+const ProjectWorkspace = () => import('@/views/project/workspace/Layout.vue')
+const ProjectOverview = () => import('@/views/project/workspace/Overview.vue')
+const ProjectRequirements = () => import('@/views/project/workspace/Requirements.vue')
+const ProjectIterations = () => import('@/views/project/workspace/Iterations.vue')
+const ProjectTasks = () => import('@/views/project/workspace/Tasks.vue')
+const ProjectDefects = () => import('@/views/project/workspace/Defects.vue')
+const ProjectTrace = () => import('@/views/project/workspace/Trace.vue')
+const ProjectSettings = () => import('@/views/project/workspace/Settings.vue')
 const CaseCenter = () => import('@/views/case/index.vue')
 const APICase = () => import('@/views/case/api/index.vue')
 const UICase = () => import('@/views/case/ui/index.vue')
@@ -16,6 +24,7 @@ const Plan = () => import('@/views/plan/index.vue')
 const Environment = () => import('@/views/environment/index.vue')
 const Execution = () => import('@/views/execution/index.vue')
 const Report = () => import('@/views/report/index.vue')
+const SharedReport = () => import('@/views/report/shared.vue')
 const Tools = () => import('@/views/tools/index.vue')
 const User = () => import('@/views/user/index.vue')
 
@@ -25,6 +34,12 @@ export const constantRoutes = [
     component: Login,
     name: 'Login',
     meta: { public: true, title: '登录' }
+  },
+  {
+    path: '/shared-report/:token',
+    component: SharedReport,
+    name: 'SharedReport',
+    meta: { public: true, title: '报告分享' }
   },
   {
     path: '/',
@@ -60,6 +75,27 @@ export const constantRoutes = [
         component: Project,
         name: 'Project',
         meta: { title: '项目管理', icon: 'Folder' }
+      }
+    ]
+  },
+  {
+    path: '/project/:id',
+    component: Layout,
+    meta: { hideInMenu: true },
+    children: [
+      {
+        path: '',
+        component: ProjectWorkspace,
+        redirect: { name: 'ProjectOverview' },
+        children: [
+          { path: 'overview', component: ProjectOverview, name: 'ProjectOverview', meta: { title: '概览' } },
+          { path: 'requirements', component: ProjectRequirements, name: 'ProjectRequirements', meta: { title: '需求' } },
+          { path: 'iterations', component: ProjectIterations, name: 'ProjectIterations', meta: { title: '迭代' } },
+          { path: 'tasks', component: ProjectTasks, name: 'ProjectTasks', meta: { title: '任务' } },
+          { path: 'defects', component: ProjectDefects, name: 'ProjectDefects', meta: { title: '缺陷' } },
+          { path: 'trace', component: ProjectTrace, name: 'ProjectTrace', meta: { title: '追溯' } },
+          { path: 'settings', component: ProjectSettings, name: 'ProjectSettings', meta: { title: '设置' } }
+        ]
       }
     ]
   },

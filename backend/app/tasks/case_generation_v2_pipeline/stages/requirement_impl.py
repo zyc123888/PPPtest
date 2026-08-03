@@ -21,6 +21,7 @@ _normalize_requirement_quote = getattr(_engine, '_normalize_requirement_quote')
 _normalize_test_design_profile = getattr(_engine, '_normalize_test_design_profile')
 _resolve_requirement_source_quote = getattr(_engine, '_resolve_requirement_source_quote')
 _source_evidence_role = getattr(_engine, '_source_evidence_role')
+_source_quote_contains_target_evidence = getattr(_engine, '_source_quote_contains_target_evidence')
 _state_target_conflicts = getattr(_engine, '_state_target_conflicts')
 _trusted_scope_fingerprint = getattr(_engine, '_trusted_scope_fingerprint')
 _trusted_scope_source_items = getattr(_engine, '_trusted_scope_source_items')
@@ -605,7 +606,7 @@ def _validate_trusted_requirement_handoff(scope_index: dict, requirement_handoff
                         quote
                         for quote in source_quotes
                         if not _is_state_label_only(quote)
-                        and _source_evidence_role(source, basis_type="text", source_quote=quote) == "target"
+                        and _source_quote_contains_target_evidence(source, quote)
                     ]
                     if not target_text_quotes and not claimed_target_refs:
                         issues.append({
@@ -705,7 +706,7 @@ def _source_requirement_needs_state_repair(source: dict, function_points: list[d
             quote
             for quote in fp.get("source_quotes") or []
             if not _is_state_label_only(quote)
-            and _source_evidence_role(source, basis_type="text", source_quote=quote) == "target"
+            and _source_quote_contains_target_evidence(source, quote)
         ]
         target_refs = {
             str(value).strip()

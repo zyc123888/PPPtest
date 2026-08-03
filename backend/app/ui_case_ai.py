@@ -12,7 +12,7 @@ from app.timeutil import utc_now_naive
 
 
 SKILL_NAME = "ui-case-designer"
-SKILL_VERSION = "1.0.0"
+SKILL_VERSION = "2.0.1"
 _REQUIRED_OUTPUT_KEYS = {
     "name",
     "folder_path",
@@ -89,6 +89,64 @@ def _text_list(value, field_name: str) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _first_text(*values) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _normalize_generated_workflow_values(
+    steps: list,
+    assertions: list,
+    *,
+    expect_text: str,
+) -> tuple[list[dict], list[dict], list[str]]:
+    normalized_steps: list[dict] = []
+    normalized_assertions: list[dict] = []
+    warnings: list[str] = []
+    required_step_values = {"goto", "fill", "press", "select_option"}
+
+    for index, raw_step in enumerate(steps, start=1):
+        if not isinstance(raw_step, dict):
+            raise ValueError(f"AI 草稿第 {index} 个步骤必须是对象")
+        step = dict(raw_step)
+        action = str(step.get("action") or "").strip()
+        value = _first_text(step.get("value"))
+        if action in {"wait_for_text", "assert_text"} and not value:
+            value = _first_text(step.get("text"), expect_text)
+            if value:
+                step["value"] = value
+                warnings.append(f"第 {index} 个步骤 {action} 缺少 value，已使用期望文本“{value}”补全")
+        if action in required_step_values and not value:
+            raise ValueError(f"AI 草稿第 {index} 个步骤 {action} 缺少必填值，请补充具体输入或地址后重试")
+        if action in {"wait_for_text", "assert_text"} and not value:
+            raise ValueError(f"AI 草稿第 {index} 个步骤 {action} 缺少要验证的具体文本，请在测试目标中写明期望文案后重试")
+        normalized_steps.append(step)
+
+    text_assertion_types = {"text_present", "text_visible", "text_hidden"}
+    required_assertion_values = text_assertion_types | {"url_contains", "title_contains", "visual"}
+    for index, raw_assertion in enumerate(assertions, start=1):
+        if not isinstance(raw_assertion, dict):
+            raise ValueError(f"AI 草稿第 {index} 个断言必须是对象")
+        assertion = dict(raw_assertion)
+        assertion_type = str(assertion.get("type") or "").strip()
+        value = _first_text(assertion.get("value"), assertion.get("expected"))
+        if assertion_type in text_assertion_types and not value:
+            value = _first_text(assertion.get("text"), expect_text)
+            if value:
+                assertion["value"] = value
+                warnings.append(f"第 {index} 个断言 {assertion_type} 缺少 value，已使用期望文本“{value}”补全")
+        elif value and "value" not in assertion:
+            assertion["value"] = value
+        if assertion_type in required_assertion_values and not value:
+            raise ValueError(f"AI 草稿第 {index} 个断言 {assertion_type} 缺少期望值，请写明可观察结果后重试")
+        normalized_assertions.append(assertion)
+
+    return normalized_steps, normalized_assertions, warnings
+
+
 def _gate_generated_payload(
     payload: dict,
     request: schemas.UICaseAIGenerateRequest,
@@ -112,16 +170,21 @@ def _gate_generated_payload(
     if not isinstance(assertions, list):
         raise ValueError("模型返回的 assertions_json 必须是数组")
 
+    expect_text = str(payload.get("expect_text") or "").strip()
+    steps, assertions, normalization_warnings = _normalize_generated_workflow_values(
+        steps,
+        assertions,
+        expect_text=expect_text,
+    )
+
     for index, step in enumerate(steps, start=1):
-        if not isinstance(step, dict):
-            raise ValueError(f"第 {index} 个 AI 步骤必须是对象")
         if step.get("action") != "goto":
             continue
         destination = urljoin(requested_target, str(step.get("value") or "").strip())
         if _origin(destination) not in allowed_origins:
             raise ValueError(f"第 {index} 个 AI 步骤尝试跳转到未授权域名")
 
-    warnings = _text_list(payload.get("warnings"), "warnings")[:10]
+    warnings = (_text_list(payload.get("warnings"), "warnings") + normalization_warnings)[:10]
     design_notes = _text_list(payload.get("design_notes"), "design_notes")[:10]
     tags = _text_list(payload.get("tags_json"), "tags_json")
     for tag in ("AI生成", SKILL_NAME):
@@ -141,8 +204,13 @@ def _gate_generated_payload(
         "tags_json": tags[:12],
         "steps_json": steps,
         "assertions_json": assertions or None,
-        "expect_text": str(payload.get("expect_text") or "").strip(),
+        "expect_text": expect_text,
         "generation_mode": "ai_skill",
+        "execution_mode": request.execution_mode,
+        "self_heal_enabled": request.execution_mode == "adaptive",
+        "max_agent_steps": request.max_steps,
+        "allowed_origins_json": sorted(allowed_origins),
+        "prohibited_actions_json": None,
         "ai_goal": request.goal.strip(),
         "skill_name": SKILL_NAME,
         "skill_version": SKILL_VERSION,
@@ -172,6 +240,7 @@ async def generate_ui_case_draft(
             "goal": request.goal.strip(),
             "context": (request.context or "").strip() or None,
             "max_steps": request.max_steps,
+            "execution_mode": request.execution_mode,
             "allowed_origins": allowed_origins,
         },
         ensure_ascii=False,

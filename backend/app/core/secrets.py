@@ -15,6 +15,15 @@ def _fernet() -> Fernet:
         raise RuntimeError("APP_ENCRYPTION_KEY 不是合法 Fernet key") from exc
 
 
+def is_encryption_available() -> bool:
+    """检测是否已正确配置 APP_ENCRYPTION_KEY，可用于加密降级判断。"""
+    try:
+        _fernet()
+        return True
+    except RuntimeError:
+        return False
+
+
 def encrypt_secret(value: str | None) -> str | None:
     normalized = str(value or "").strip()
     if not normalized:

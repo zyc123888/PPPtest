@@ -27,12 +27,30 @@
     </div>
 
     <el-card class="page-card" shadow="never">
-      <el-table v-loading="listLoading" :data="list" border>
+      <div class="filter-bar">
+        <el-input v-model="filters.keyword" placeholder="搜索用户名 / 显示名" clearable style="width: 220px" />
+        <el-select v-model="filters.role" placeholder="角色" clearable style="width: 140px">
+          <el-option v-for="(label, value) in roleLabels" :key="value" :label="label" :value="value" />
+        </el-select>
+        <el-select v-model="filters.status" placeholder="状态" clearable style="width: 140px">
+          <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
+        </el-select>
+        <span class="filter-count">共 {{ filteredList.length }} 人</span>
+      </div>
+      <el-table v-loading="listLoading" :data="filteredList" border>
         <el-table-column label="ID" prop="id" align="center" width="80" />
         <el-table-column label="用户名" prop="username" min-width="160" />
         <el-table-column label="显示名" prop="display_name" min-width="160" />
-        <el-table-column label="角色" prop="role" width="120" align="center" />
-        <el-table-column label="状态" prop="status" width="120" align="center" />
+        <el-table-column label="角色" width="120" align="center">
+          <template #default="scope">
+            <el-tag :type="roleTagTypes[scope.row.role] || 'info'" effect="light">{{ roleLabels[scope.row.role] || scope.row.role }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="100" align="center">
+          <template #default="scope">
+            <el-tag :type="scope.row.status === 'ACTIVE' ? 'success' : 'info'" effect="light">{{ statusLabels[scope.row.status] || scope.row.status }}</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="所属工作空间" min-width="260">
           <template #default="scope">
             <div class="workspace-tags">
@@ -60,17 +78,24 @@
             {{ formatTime(scope.row.last_login_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="140" align="center">
+        <el-table-column label="操作" width="180" align="center">
           <template #default="scope">
             <el-button size="small" @click="handleEdit(scope.row)">编辑</el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              :disabled="scope.row.id === currentUserId"
+              @click="handleDelete(scope.row)"
+            >删除</el-button>
           </template>
         </el-table-column>
       </el-table>
 
       <div class="mobile-cards">
-        <div v-for="item in list" :key="item.id" class="mobile-card">
+        <div v-for="item in filteredList" :key="item.id" class="mobile-card">
           <div class="mobile-card-title">{{ item.username }}</div>
-          <div class="mobile-card-meta">角色：{{ item.role }} · 状态：{{ item.status }}</div>
+          <div class="mobile-card-meta">角色：{{ roleLabels[item.role] || item.role }} · 状态：{{ statusLabels[item.status] || item.status }}</div>
           <div class="mobile-card-meta">显示名：{{ item.display_name || '-' }}</div>
           <div class="mobile-card-meta">
             空间：
@@ -91,6 +116,7 @@
           <div class="mobile-card-desc">最近登录：{{ formatTime(item.last_login_at) }}</div>
           <div class="mobile-card-actions">
             <el-button size="small" @click="handleEdit(item)">编辑</el-button>
+            <el-button size="small" type="danger" plain :disabled="item.id === currentUserId" @click="handleDelete(item)">删除</el-button>
           </div>
         </div>
       </div>
@@ -118,18 +144,31 @@
           </el-select>
         </el-form-item>
         <el-form-item v-if="isEdit" label="所属工作空间">
-          <div class="workspace-tags dialog-workspaces">
-            <el-tag
-              v-for="membership in temp.workspace_memberships"
-              :key="`${membership.workspace_id}-${membership.role}`"
-              class="workspace-tag"
-              effect="plain"
-              @click="handleWorkspaceJump(membership)"
-            >
-              {{ membership.workspace_name }}
-              <span class="workspace-role">· {{ membership.role }}</span>
-            </el-tag>
-            <span v-if="!temp.workspace_memberships?.length">-</span>
+          <div class="workspace-manage">
+            <div class="workspace-tags dialog-workspaces">
+              <el-tag
+                v-for="membership in temp.workspace_memberships"
+                :key="`${membership.workspace_id}-${membership.role}`"
+                class="workspace-tag"
+                effect="plain"
+                closable
+                @close="removeMembership(membership)"
+              >
+                {{ membership.workspace_name }}
+                <span class="workspace-role">· {{ membership.role }}</span>
+              </el-tag>
+              <span v-if="!temp.workspace_memberships?.length">-</span>
+            </div>
+            <div class="workspace-add">
+              <el-select v-model="joinForm.workspace_id" placeholder="选择工作空间" size="small" style="width: 200px">
+                <el-option v-for="ws in joinableWorkspaces" :key="ws.id" :label="ws.name" :value="ws.id" />
+              </el-select>
+              <el-select v-model="joinForm.role" size="small" style="width: 110px">
+                <el-option label="member" value="member" />
+                <el-option label="owner" value="owner" />
+              </el-select>
+              <el-button size="small" type="primary" plain :disabled="!joinForm.workspace_id" :loading="joining" @click="joinWorkspace">加入</el-button>
+            </div>
           </div>
         </el-form-item>
         <el-form-item :label="passwordLabel" prop="password">
@@ -148,8 +187,9 @@
 import { computed, onMounted, nextTick, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/lib/api'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
+import { useAuthStore } from '@/stores/auth'
 
 const list = ref([])
 const listLoading = ref(false)
@@ -157,6 +197,29 @@ const dialogVisible = ref(false)
 const dataFormRef = ref(null)
 const isEdit = ref(false)
 const router = useRouter()
+const authStore = useAuthStore()
+
+const currentUserId = computed(() => authStore.user?.id ?? null)
+
+const roleLabels = { admin: '管理员', tester: '测试工程师', viewer: '访客' }
+const statusLabels = { ACTIVE: '启用', DISABLED: '停用' }
+const roleTagTypes = { admin: 'danger', tester: 'primary', viewer: 'info' }
+
+const filters = reactive({ keyword: '', role: '', status: '' })
+
+const filteredList = computed(() => {
+  const keyword = filters.keyword.trim().toLowerCase()
+  return list.value.filter((item) => {
+    if (keyword) {
+      const username = (item.username || '').toLowerCase()
+      const displayName = (item.display_name || '').toLowerCase()
+      if (!username.includes(keyword) && !displayName.includes(keyword)) return false
+    }
+    if (filters.role && item.role !== filters.role) return false
+    if (filters.status && item.status !== filters.status) return false
+    return true
+  })
+})
 
 const temp = reactive({
   id: null,
@@ -167,6 +230,15 @@ const temp = reactive({
   workspaces: [],
   workspace_memberships: [],
   password: ''
+})
+
+const allWorkspaces = ref([])
+const joinForm = reactive({ workspace_id: null, role: 'member' })
+const joining = ref(false)
+
+const joinableWorkspaces = computed(() => {
+  const joinedIds = new Set((temp.workspace_memberships || []).map((item) => item.workspace_id))
+  return allWorkspaces.value.filter((ws) => !joinedIds.has(ws.id))
 })
 
 const rules = computed(() => {
@@ -225,6 +297,84 @@ const getList = async () => {
     ElMessage.error(error.message)
   } finally {
     listLoading.value = false
+  }
+}
+
+const loadWorkspaces = async () => {
+  try {
+    allWorkspaces.value = await api.get('/workspaces')
+  } catch (error) {
+    allWorkspaces.value = []
+  }
+}
+
+const refreshTempMemberships = async () => {
+  await getList()
+  const fresh = list.value.find((item) => item.id === temp.id)
+  if (fresh) {
+    temp.workspaces = Array.isArray(fresh.workspaces) ? [...fresh.workspaces] : []
+    temp.workspace_memberships = getWorkspaceMemberships(fresh).map((item) => ({ ...item }))
+  }
+}
+
+const joinWorkspace = async () => {
+  if (!joinForm.workspace_id || !temp.id) return
+  joining.value = true
+  try {
+    await api.post(`/workspaces/${joinForm.workspace_id}/members`, {
+      user_id: temp.id,
+      role: joinForm.role
+    })
+    ElMessage.success('已加入工作空间')
+    joinForm.workspace_id = null
+    joinForm.role = 'member'
+    await refreshTempMemberships()
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    joining.value = false
+  }
+}
+
+const removeMembership = async (membership) => {
+  if (!membership?.member_id) {
+    ElMessage.warning('该成员记录暂不支持移除')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认将该用户移出「${membership.workspace_name}」？`,
+      '移除成员',
+      { type: 'warning', confirmButtonText: '移除', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await api.delete(`/workspaces/${membership.workspace_id}/members/${membership.member_id}`)
+    ElMessage.success('已移出工作空间')
+    await refreshTempMemberships()
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const handleDelete = async (row) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除用户「${row.username}」？删除后不可恢复。`,
+      '删除用户',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await api.delete(`/users/${row.id}`)
+    ElMessage.success('删除成功')
+    getList()
+  } catch (error) {
+    ElMessage.error(error.message)
   }
 }
 
@@ -295,6 +445,7 @@ const submitData = () => {
 
 onMounted(() => {
   getList()
+  loadWorkspaces()
 })
 </script>
 
@@ -350,6 +501,31 @@ onMounted(() => {
 </style>
 
 <style scoped>
+.filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+  margin-bottom: var(--space-12);
+}
+
+.filter-count {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.workspace-manage {
+  width: 100%;
+}
+
+.workspace-add {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  margin-top: 10px;
+}
+
 .workspace-tags {
   display: flex;
   flex-wrap: wrap;

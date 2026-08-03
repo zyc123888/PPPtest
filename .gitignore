@@ -26,8 +26,15 @@ e2e/reports/
 
 # Local assistant and backup artifacts
 .workbuddy/
+.qoder/
+.playwright-mcp/
 backup_before_optimization/
 claw_5skill_final/
+
+# Runtime upload directories
+.uploads/
+uploads/
+backend/uploads/
 
 # Local design experiments and temporary analysis files
 _podcasts.icns

@@ -1,7 +1,10 @@
 <template>
   <div class="app-page ui-case-page">
-    <PageHeader title="UI 用例" subtitle="编排浏览器步骤、断言并查看执行证据">
+    <PageHeader title="UI 用例" subtitle="管理可执行的浏览器测试与运行证据">
       <template #actions>
+        <el-tooltip content="批量执行记录" placement="bottom">
+          <el-button :icon="Tickets" aria-label="批量执行记录" @click="openBatchHistory" />
+        </el-tooltip>
         <el-tooltip content="导入 UI 用例" placement="bottom">
           <el-button :icon="Upload" aria-label="导入 UI 用例" @click="openImportDialog" />
         </el-tooltip>
@@ -9,145 +12,188 @@
           <el-button :icon="Download" aria-label="导出当前结果" @click="exportCurrentCases" />
         </el-tooltip>
         <el-tooltip content="刷新" placement="bottom">
-          <el-button :icon="Refresh" aria-label="刷新 UI 用例" :loading="listLoading" @click="getList" />
+          <el-button :icon="Refresh" aria-label="刷新 UI 用例" :loading="listLoading" @click="refreshAll" />
         </el-tooltip>
-        <el-button v-if="canTest" :icon="MagicStick" @click="openAIDialog">AI 创建</el-button>
-        <el-button v-if="canTest" type="primary" :icon="Plus" @click="handleCreate">新增 UI 用例</el-button>
+        <el-button v-if="canTest" :icon="Plus" @click="handleCreate">高级创建</el-button>
+        <el-button v-if="canTest" type="primary" :icon="MagicStick" :disabled="listLoading || !projects.length" @click="openAIDialog">AI 创建</el-button>
       </template>
     </PageHeader>
 
     <section class="summary-strip section-gap" aria-label="UI 用例概览">
       <div class="summary-item">
+        <span class="summary-item__icon is-primary"><el-icon><DocumentCopy /></el-icon></span>
+        <div>
         <span class="summary-item__label">用例总数</span>
-        <strong>{{ list.length }}</strong>
+        <strong>{{ stats.total }}</strong>
+        </div>
       </div>
       <div class="summary-item">
+        <span class="summary-item__icon is-success"><el-icon><CircleCheck /></el-icon></span>
+        <div>
         <span class="summary-item__label">启用</span>
-        <strong>{{ activeCount }}</strong>
+        <strong>{{ stats.active }}</strong>
+        </div>
       </div>
       <div class="summary-item">
+        <span class="summary-item__icon is-review"><el-icon><Finished /></el-icon></span>
+        <div>
         <span class="summary-item__label">已评审</span>
-        <strong>{{ approvedCount }}</strong>
+        <strong>{{ stats.approved }}</strong>
+        </div>
       </div>
       <div class="summary-item">
+        <span class="summary-item__icon is-rate"><el-icon><TrendCharts /></el-icon></span>
+        <div>
         <span class="summary-item__label">最近成功率</span>
         <strong>{{ recentSuccessRate }}</strong>
-      </div>
-    </section>
-
-    <section class="workspace-panel">
-      <div class="filter-bar">
-        <el-select v-model="filters.projectId" clearable placeholder="全部项目" class="filter-control">
-          <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
-        </el-select>
-        <el-select v-model="filters.status" clearable placeholder="全部状态" class="filter-control filter-control--short">
-          <el-option label="启用" value="ACTIVE" />
-          <el-option label="停用" value="INACTIVE" />
-        </el-select>
-        <el-select v-model="filters.priority" clearable placeholder="全部优先级" class="filter-control filter-control--short">
-          <el-option v-for="item in ['P0', 'P1', 'P2', 'P3']" :key="item" :label="item" :value="item" />
-        </el-select>
-        <el-input v-model="filters.keyword" clearable :prefix-icon="Search" placeholder="搜索名称、分组、地址或标签" class="filter-search" />
-        <span class="filter-result">{{ filteredList.length }} 条</span>
-      </div>
-
-      <el-table v-loading="listLoading" :data="pagedList" class="case-table" row-key="id" @row-dblclick="openCaseDetail">
-        <el-table-column label="用例" min-width="260">
-          <template #default="scope">
-            <button class="case-name" type="button" @click="openCaseDetail(scope.row)">{{ scope.row.name }}</button>
-            <div class="case-meta">
-              <span>{{ scope.row.folder_path || '未分组' }}</span>
-              <span>v{{ scope.row.version_no }}</span>
-              <span>{{ (scope.row.steps_json || []).length }} 步</span>
-              <el-tag v-if="scope.row.generation_mode === 'ai_skill'" size="small" effect="plain">AI</el-tag>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="项目" width="160" show-overflow-tooltip>
-          <template #default="scope">{{ projectMap[scope.row.project_id] || scope.row.project_id }}</template>
-        </el-table-column>
-        <el-table-column label="优先级" width="90" align="center">
-          <template #default="scope"><el-tag size="small" :type="priorityTag(scope.row.priority)">{{ scope.row.priority }}</el-tag></template>
-        </el-table-column>
-        <el-table-column label="状态" width="100" align="center">
-          <template #default="scope"><el-tag size="small" :type="scope.row.status === 'ACTIVE' ? 'success' : 'info'">{{ caseStatusText(scope.row.status) }}</el-tag></template>
-        </el-table-column>
-        <el-table-column label="评审" width="110" align="center">
-          <template #default="scope"><el-tag size="small" effect="plain" :type="reviewTag(scope.row.review_status)">{{ reviewText(scope.row.review_status) }}</el-tag></template>
-        </el-table-column>
-        <el-table-column label="目标地址" prop="target_url" min-width="230" show-overflow-tooltip />
-        <el-table-column label="最近执行" width="150">
-          <template #default="scope">
-            <div v-if="latestRunMap[scope.row.id]" class="last-run">
-              <el-tag size="small" :type="executionStatusTag(latestRunMap[scope.row.id].status)">{{ executionStatusText(latestRunMap[scope.row.id].status) }}</el-tag>
-              <span>{{ formatShortTime(latestRunMap[scope.row.id].created_at) }}</span>
-            </div>
-            <span v-else class="muted">未执行</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" align="right" width="176" fixed="right">
-          <template #default="scope">
-            <div class="row-actions">
-              <el-tooltip content="查看详情" placement="top"><el-button circle size="small" :icon="View" aria-label="查看 UI 用例" @click="openCaseDetail(scope.row)" /></el-tooltip>
-              <el-tooltip v-if="canTest" content="编辑" placement="top"><el-button circle size="small" :icon="Edit" aria-label="编辑 UI 用例" @click="handleEdit(scope.row)" /></el-tooltip>
-              <el-tooltip v-if="canTest" content="立即执行" placement="top"><el-button circle size="small" type="primary" :icon="VideoPlay" aria-label="执行 UI 用例" @click="handleRun(scope.row)" /></el-tooltip>
-              <el-tooltip v-if="canAdmin" content="删除" placement="top"><el-button circle size="small" type="danger" plain :icon="Delete" aria-label="删除 UI 用例" @click="handleDelete(scope.row)" /></el-tooltip>
-            </div>
-          </template>
-        </el-table-column>
-      </el-table>
-
-      <div class="mobile-cards">
-        <article v-for="item in pagedList" :key="item.id" class="mobile-case">
-          <button class="case-name" type="button" @click="openCaseDetail(item)">{{ item.name }}</button>
-          <div class="mobile-case__tags">
-            <el-tag size="small" :type="priorityTag(item.priority)">{{ item.priority }}</el-tag>
-            <el-tag size="small" :type="item.status === 'ACTIVE' ? 'success' : 'info'">{{ caseStatusText(item.status) }}</el-tag>
-            <el-tag v-if="item.generation_mode === 'ai_skill'" size="small" effect="plain">AI</el-tag>
-          </div>
-          <div class="mobile-case__url">{{ item.target_url }}</div>
-          <div class="row-actions">
-            <el-button size="small" :icon="View" @click="openCaseDetail(item)">详情</el-button>
-            <el-button v-if="canTest" size="small" type="primary" :icon="VideoPlay" @click="handleRun(item)">执行</el-button>
-          </div>
-        </article>
-      </div>
-
-      <div class="table-pagination">
-        <el-pagination v-model:page-size="pageSize" v-model:current-page="page" layout="total, sizes, prev, pager, next" :total="filteredList.length" :page-sizes="[10, 20, 50]" />
-      </div>
-    </section>
-
-    <el-dialog v-model="aiDialogVisible" title="AI 创建 UI 用例" width="min(680px, 94vw)" destroy-on-close>
-      <el-form ref="aiFormRef" :model="aiForm" :rules="aiRules" label-position="top">
-        <div class="ai-form-grid">
-          <el-form-item label="所属项目" prop="project_id">
-            <el-select v-model="aiForm.project_id" style="width: 100%" @change="handleAIProjectChange">
-              <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="Skill">
-            <el-input model-value="ui-case-designer · v1.0.0" disabled />
-          </el-form-item>
         </div>
-        <el-form-item label="目标地址" prop="target_url">
-          <el-input v-model="aiForm.target_url" placeholder="https://example.com" />
+      </div>
+    </section>
+
+    <div class="case-layout">
+      <section class="workspace-panel case-layout__tree">
+        <FolderTree
+          v-model="selectedFolder"
+          :folders="folderTree.folders"
+          :total="folderTree.total"
+          :ungrouped="folderTree.ungrouped"
+          :can-rename="canTest"
+          @rename="handleFolderRename"
+          @refresh="loadFolders"
+        />
+      </section>
+
+      <section class="workspace-panel case-layout__main">
+        <div class="filter-bar">
+          <el-button class="tree-drawer-trigger" :icon="Files" aria-label="打开用例目录" @click="treeDrawerVisible = true" />
+          <el-select v-model="filters.projectId" clearable placeholder="全部项目" class="filter-control">
+            <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+          <el-select v-model="filters.status" clearable placeholder="全部状态" class="filter-control filter-control--short">
+            <el-option label="启用" value="ACTIVE" />
+            <el-option label="停用" value="INACTIVE" />
+          </el-select>
+          <el-select v-model="filters.priority" clearable placeholder="全部优先级" class="filter-control filter-control--short">
+            <el-option v-for="item in ['P0', 'P1', 'P2', 'P3']" :key="item" :label="item" :value="item" />
+          </el-select>
+          <el-select v-model="filters.reviewStatus" clearable placeholder="全部评审" class="filter-control filter-control--short">
+            <el-option label="草稿" value="DRAFT" />
+            <el-option label="评审中" value="IN_REVIEW" />
+            <el-option label="已通过" value="APPROVED" />
+            <el-option label="已拒绝" value="REJECTED" />
+          </el-select>
+          <el-input v-model="filters.keyword" clearable :prefix-icon="Search" placeholder="搜索名称、分组、地址或标签" class="filter-search" />
+          <span class="filter-result">{{ total }} 条</span>
+        </div>
+
+        <CaseTable
+          ref="caseTableRef"
+          :rows="list"
+          :loading="listLoading"
+          :total="total"
+          :page="page"
+          :page-size="pageSize"
+          :project-map="projectMap"
+          :latest-run-map="latestRunMap"
+          :can-test="canTest"
+          :can-admin="canAdmin"
+          @update:page="page = $event"
+          @update:page-size="pageSize = $event"
+          @selection-change="selectedRows = $event"
+          @detail="openCaseDetail"
+          @edit="handleEdit"
+          @run="handleRun"
+          @delete="handleDelete"
+          @batch-run="openBatchRun"
+          @batch-edit="openBatchEdit"
+          @batch-delete="handleBatchDelete"
+        />
+      </section>
+    </div>
+
+    <el-drawer v-model="treeDrawerVisible" title="用例目录" direction="ltr" size="min(300px, 86vw)">
+      <FolderTree
+        :model-value="selectedFolder"
+        :folders="folderTree.folders"
+        :total="folderTree.total"
+        :ungrouped="folderTree.ungrouped"
+        :can-rename="canTest"
+        @update:model-value="(value) => { selectedFolder = value; treeDrawerVisible = false }"
+        @rename="handleFolderRename"
+        @refresh="loadFolders"
+      />
+    </el-drawer>
+
+    <BatchRunDialog
+      v-model="batchRunVisible"
+      :environments="batchEnvironments"
+      :count="selectedRows.length"
+      :submitting="batchSubmitting"
+      @submit="submitBatchRun"
+    />
+
+    <BatchRunDrawer
+      v-model="batchDrawerVisible"
+      :batch-id="activeBatchId"
+      :project-id="filters.projectId || null"
+      :case-name-map="caseNameCache"
+      :can-test="canTest"
+      @open-run="handleOpenRunFromBatch"
+      @finished="getList"
+    />
+
+    <el-dialog v-model="batchEditVisible" title="批量修改用例" width="520px">
+      <p class="batch-edit-hint">将对已选的 <strong>{{ selectedRows.length }}</strong> 条用例应用以下修改；留空的字段不会变更。</p>
+      <el-form label-position="top" :model="batchEditForm">
+        <el-form-item label="移动到目录">
+          <el-tree-select
+            v-model="batchEditForm.folder_path"
+            :data="folderSelectOptions"
+            check-strictly
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            placeholder="选择已有目录或输入新路径"
+            style="width: 100%"
+          />
         </el-form-item>
-        <el-form-item label="测试目标" prop="goal">
-          <el-input v-model="aiForm.goal" type="textarea" :rows="4" maxlength="4000" show-word-limit placeholder="例如：打开 Google，搜索 OmniTest，并验证结果页显示 OmniTest" />
+        <el-form-item label="优先级">
+          <el-select v-model="batchEditForm.priority" clearable placeholder="不修改" style="width: 100%">
+            <el-option v-for="item in ['P0', 'P1', 'P2', 'P3']" :key="item" :label="item" :value="item" />
+          </el-select>
         </el-form-item>
-        <el-form-item label="补充上下文">
-          <el-input v-model="aiForm.context" type="textarea" :rows="3" maxlength="8000" placeholder="可填写测试数据、登录前置条件或已知的稳定选择器" />
-        </el-form-item>
-        <el-form-item label="最多步骤">
-          <el-input-number v-model="aiForm.max_steps" :min="1" :max="30" controls-position="right" />
+        <el-form-item label="用例状态">
+          <el-select v-model="batchEditForm.status" clearable placeholder="不修改" style="width: 100%">
+            <el-option label="启用" value="ACTIVE" />
+            <el-option label="停用" value="INACTIVE" />
+          </el-select>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="aiDialogVisible = false">取消</el-button>
-        <el-button type="primary" :icon="MagicStick" :loading="aiGenerating" @click="generateAIDraft">生成草稿</el-button>
+        <el-button @click="batchEditVisible = false">取消</el-button>
+        <el-button type="primary" :loading="batchEditSubmitting" @click="submitBatchEdit">保存修改</el-button>
       </template>
     </el-dialog>
+
+    <AICaseComposer
+      v-model="aiDialogVisible"
+      :form="aiForm"
+      @update:form="Object.assign(aiForm, $event)"
+      :projects="projects"
+      :draft-ready="aiDraftReady"
+      :draft="temp"
+      :warnings="aiWarnings"
+      :generating="aiGenerating"
+      :saving="saving"
+      :running="aiSavingRun"
+      @project-change="handleAIProjectChange"
+      @generate="generateAIDraft"
+      @reset="resetAIDraft"
+      @advanced-edit="openAIDraftInEditor"
+      @save="saveAIDraft(false)"
+      @save-run="saveAIDraft(true)"
+    />
 
     <el-dialog v-model="editorVisible" :title="isEditing ? '编辑 UI 用例' : '新增 UI 用例'" width="min(1080px, 96vw)" top="4vh" destroy-on-close>
       <el-form ref="editorFormRef" :model="temp" :rules="rules" label-position="top">
@@ -164,7 +210,19 @@
                 </el-select>
               </el-form-item>
               <el-form-item label="用例名称" prop="name"><el-input v-model="temp.name" /></el-form-item>
-              <el-form-item label="目录/分组"><el-input v-model="temp.folder_path" placeholder="例如：登录/核心流程" /></el-form-item>
+              <el-form-item label="目录/分组">
+                <el-tree-select
+                  v-model="temp.folder_path"
+                  :data="folderSelectOptions"
+                  check-strictly
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="选择已有目录或输入新路径，如：登录/核心流程"
+                  style="width: 100%"
+                />
+              </el-form-item>
               <el-form-item label="目标地址" prop="target_url"><el-input v-model="temp.target_url" placeholder="http://frontend:3000/login" /></el-form-item>
               <el-form-item label="优先级">
                 <el-segmented v-model="temp.priority" :options="['P0', 'P1', 'P2', 'P3']" block />
@@ -177,13 +235,51 @@
                   <el-option v-for="item in tagOptions" :key="item" :label="item" :value="item" />
                 </el-select>
               </el-form-item>
-              <el-form-item label="评审状态">
-                <el-select v-model="temp.review_status" style="width: 100%">
-                  <el-option label="草稿" value="DRAFT" /><el-option label="评审中" value="IN_REVIEW" /><el-option label="已通过" value="APPROVED" /><el-option label="已拒绝" value="REJECTED" />
-                </el-select>
+              <el-form-item label="评审状态（只读）">
+                <div class="review-readonly">
+                  <el-tag effect="plain" :type="reviewTag(temp.review_status)">{{ reviewText(temp.review_status) }}</el-tag>
+                  <span>评审在详情页进行；内容变更会自动重置为草稿</span>
+                </div>
               </el-form-item>
               <el-form-item label="当前版本"><el-input v-model="temp.version_no" disabled /></el-form-item>
-              <el-form-item label="评审备注" class="form-grid__wide"><el-input v-model="temp.review_note" type="textarea" :rows="3" /></el-form-item>
+              <el-form-item v-if="temp.review_note" label="评审意见（只读）" class="form-grid__wide">
+                <p class="review-note-readonly">{{ temp.review_note }}</p>
+              </el-form-item>
+              <div class="runtime-config form-grid__wide">
+                <div class="runtime-config__head">
+                  <div><strong>AI 运行策略</strong><span>{{ engineDescription(temp.engine) }}</span></div>
+                  <el-tag effect="plain" :type="temp.engine === 'midscene' ? 'warning' : 'info'">{{ engineText(temp.engine) }}</el-tag>
+                </div>
+                <el-form-item label="执行引擎">
+                  <el-segmented v-model="temp.engine" :options="engineOptions" block />
+                </el-form-item>
+                <template v-if="temp.engine !== 'midscene'">
+                <el-form-item label="执行模式">
+                  <el-segmented v-model="temp.execution_mode" :options="executionModeOptions" block />
+                </el-form-item>
+                <el-form-item v-if="['stable', 'adaptive'].includes(temp.execution_mode)" label="定位恢复">
+                  <el-switch v-model="temp.self_heal_enabled" active-text="允许一次受控 AI 自愈" />
+                </el-form-item>
+                <el-form-item v-if="temp.execution_mode === 'explore'" label="最大探索步数">
+                  <el-input-number v-model="temp.max_agent_steps" :min="1" :max="30" controls-position="right" />
+                </el-form-item>
+                <el-form-item v-if="temp.execution_mode === 'explore'" label="允许域名">
+                  <el-select v-model="temp.allowed_origins_json" multiple allow-create filterable default-first-option style="width: 100%" placeholder="默认仅目标地址和项目地址">
+                    <el-option v-for="item in temp.allowed_origins_json" :key="item" :label="item" :value="item" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item v-if="temp.execution_mode === 'explore'" label="禁止操作">
+                  <el-select v-model="temp.prohibited_actions_json" multiple allow-create filterable default-first-option style="width: 100%" placeholder="删除、支付、发布等">
+                    <el-option v-for="item in defaultProhibitedActions" :key="item" :label="item" :value="item" />
+                  </el-select>
+                </el-form-item>
+                </template>
+                <el-form-item v-else label="允许域名">
+                  <el-select v-model="temp.allowed_origins_json" multiple allow-create filterable default-first-option style="width: 100%" placeholder="默认仅目标地址和项目地址">
+                    <el-option v-for="item in temp.allowed_origins_json" :key="item" :label="item" :value="item" />
+                  </el-select>
+                </el-form-item>
+              </div>
             </div>
           </el-tab-pane>
 
@@ -209,6 +305,12 @@
                   </div>
                 </div>
                 <div class="builder-fields">
+                  <div v-if="stepDefinition(step).selector || stepDefinition(step).optionalSelector" class="semantic-fields">
+                    <el-input v-model="step.target" placeholder="语义目标，例如：登录按钮" />
+                    <el-input v-model="step.role" placeholder="ARIA 角色，例如：button" />
+                    <el-input v-model="step.accessible_name" placeholder="可访问名称，例如：登录" />
+                    <el-input v-model="step.test_id" placeholder="data-testid（可选）" />
+                  </div>
                   <el-input v-if="stepDefinition(step).selector || stepDefinition(step).optionalSelector" v-model="step.selector" :placeholder="stepDefinition(step).optionalSelector ? '限定选择器（可选）' : '选择器，例如 [data-testid=submit]'" />
                   <el-input v-if="stepDefinition(step).needsValue" v-model="step.value" :placeholder="stepDefinition(step).valueLabel" />
                   <el-input-number v-if="stepDefinition(step).duration" v-model="step.duration_ms" :min="1" :max="60000" :step="500" controls-position="right" />
@@ -239,6 +341,12 @@
                   <div class="builder-actions"><el-tooltip content="删除"><el-button text type="danger" :icon="Delete" aria-label="删除断言" @click="temp.assertions.splice(index, 1)" /></el-tooltip></div>
                 </div>
                 <div class="builder-fields">
+                  <div v-if="assertionDefinition(assertion).selector || assertionDefinition(assertion).optionalSelector || assertionDefinition(assertion).semanticTarget" class="semantic-fields">
+                    <el-input v-model="assertion.target" placeholder="检查区域或元素，例如：登录表单" />
+                    <el-input v-model="assertion.role" placeholder="ARIA 角色（可选）" />
+                    <el-input v-model="assertion.accessible_name" placeholder="可访问名称（可选）" />
+                    <el-input v-model="assertion.test_id" placeholder="data-testid（可选）" />
+                  </div>
                   <el-input v-if="assertionDefinition(assertion).selector || assertionDefinition(assertion).optionalSelector" v-model="assertion.selector" :placeholder="assertionDefinition(assertion).optionalSelector ? '限定选择器（可选）' : '选择器'" />
                   <el-input v-if="assertionDefinition(assertion).needsValue" v-model="assertion.value" :placeholder="assertionDefinition(assertion).valueLabel" />
                 </div>
@@ -276,10 +384,13 @@
             <el-descriptions-item label="项目">{{ projectMap[currentCase.project_id] || currentCase.project_id }}</el-descriptions-item><el-descriptions-item label="优先级">{{ currentCase.priority }}</el-descriptions-item>
             <el-descriptions-item label="分组">{{ currentCase.folder_path || '-' }}</el-descriptions-item><el-descriptions-item label="评审">{{ reviewText(currentCase.review_status) }}</el-descriptions-item>
             <el-descriptions-item label="生成方式">{{ currentCase.generation_mode === 'ai_skill' ? 'AI Skill' : '手工' }}</el-descriptions-item><el-descriptions-item label="Skill">{{ currentCase.skill_name ? `${currentCase.skill_name} · v${currentCase.skill_version}` : '-' }}</el-descriptions-item>
+            <el-descriptions-item label="执行引擎">{{ engineText(currentCase.engine) }}</el-descriptions-item><el-descriptions-item label="执行模式">{{ currentCase.engine === 'midscene' ? '—' : executionModeText(currentCase.execution_mode) }}</el-descriptions-item>
+            <el-descriptions-item label="AI 自愈">{{ currentCase.engine === 'midscene' ? '—' : (currentCase.self_heal_enabled ? '允许一次' : '关闭') }}</el-descriptions-item>
             <el-descriptions-item label="目标地址" :span="2">{{ currentCase.target_url }}</el-descriptions-item><el-descriptions-item label="最终文本" :span="2">{{ currentCase.expect_text }}</el-descriptions-item>
             <el-descriptions-item v-if="currentCase.ai_goal" label="测试目标" :span="2">{{ currentCase.ai_goal }}</el-descriptions-item>
           </el-descriptions>
-          <section class="detail-section"><div class="detail-section__head"><h3>操作步骤</h3><span>{{ (currentCase.steps_json || []).length }} 步</span></div><div v-if="currentCase.steps_json?.length" class="definition-list"><div v-for="(step, index) in currentCase.steps_json" :key="index" class="definition-item"><span>{{ index + 1 }}</span><div><strong>{{ step.name || stepLabel(step.action) }}</strong><code v-if="step.selector">{{ step.selector }}</code><p v-if="step.value !== undefined">{{ step.value }}</p></div></div></div><el-empty v-else description="无附加步骤" :image-size="60" /></section>
+          <ReviewPanel :case-data="currentCase" :can-test="canTest" :current-user-id="currentUserId" @changed="refreshCurrentCase" />
+          <section class="detail-section"><div class="detail-section__head"><h3>操作步骤</h3><span>{{ (currentCase.steps_json || []).length }} 步</span></div><div v-if="currentCase.steps_json?.length" class="definition-list"><div v-for="(step, index) in currentCase.steps_json" :key="index" class="definition-item"><span>{{ index + 1 }}</span><div><strong>{{ step.name || stepLabel(step.action) }}</strong><p v-if="step.target">目标：{{ step.target }}</p><code v-if="step.selector">{{ step.selector }}</code><p v-if="step.value !== undefined">{{ step.value }}</p></div></div></div><el-empty v-else description="无附加步骤" :image-size="60" /></section>
           <section class="detail-section"><div class="detail-section__head"><h3>断言</h3><span>{{ (currentCase.assertions_json || []).length + 1 }} 项</span></div><div class="definition-list"><div class="definition-item"><span>1</span><div><strong>最终文本可见</strong><p>{{ currentCase.expect_text }}</p></div></div><div v-for="(assertion, index) in currentCase.assertions_json || []" :key="index" class="definition-item"><span>{{ index + 2 }}</span><div><strong>{{ assertion.name || assertionLabel(assertion.type) }}</strong><code v-if="assertion.selector">{{ assertion.selector }}</code><p>{{ assertion.value ?? assertion.expected }}</p></div></div></div></section>
         </el-tab-pane>
         <el-tab-pane :label="`执行记录 (${caseRuns.length})`" name="runs">
@@ -290,7 +401,19 @@
 
           <section v-if="selectedRun" class="run-detail" v-loading="runDetailLoading">
             <div class="run-detail__head"><div><h3>执行 #{{ selectedRun.id }}</h3><p>{{ selectedRun.summary || '-' }}</p></div><el-tag :type="executionStatusTag(selectedRun.status)">{{ executionStatusText(selectedRun.status) }}</el-tag></div>
-            <div v-if="selectedRun.stderr_text" class="run-error">{{ selectedRun.stderr_text }}</div>
+            <el-collapse v-if="selectedRun.stderr_text" class="run-technical">
+              <el-collapse-item title="技术详情（排障使用）" name="stderr">
+                <pre>{{ selectedRun.stderr_text }}</pre>
+              </el-collapse-item>
+            </el-collapse>
+            <div v-if="selectedRun.response_payload?.engine || selectedRun.response_payload?.execution_mode" class="runtime-evidence">
+              <span>引擎 <strong>{{ engineText(selectedRun.response_payload.engine || 'native') }}</strong></span>
+              <span v-if="selectedRun.response_payload.execution_mode">模式 <strong>{{ executionModeText(selectedRun.response_payload.execution_mode) }}</strong></span>
+              <span v-if="selectedRun.response_payload.engine === 'midscene' && selectedRun.response_payload.model">模型 <strong>{{ selectedRun.response_payload.model }}</strong></span>
+              <span v-if="selectedRun.response_payload.healing_count !== undefined">AI 自愈 <strong>{{ selectedRun.response_payload.healing_count || 0 }} 次</strong></span>
+              <span v-if="selectedRun.response_payload.visual_reviews?.length">视觉检查 <strong>{{ selectedRun.response_payload.visual_reviews.length }} 项</strong></span>
+              <span v-if="selectedRun.response_payload.release_gate_eligible === false">探索结果 <strong>不作为发布门禁</strong></span>
+            </div>
             <div class="run-detail-grid">
               <div class="run-steps"><h4>步骤结果</h4><div v-for="(step, index) in selectedRunSteps" :key="index" class="run-step"><el-icon :class="step.status === 'SUCCESS' ? 'is-success' : 'is-failed'"><CircleCheck v-if="step.status === 'SUCCESS'" /><WarningFilled v-else /></el-icon><div><strong>{{ step.name || `步骤 ${index + 1}` }}</strong><p>{{ formatStepDetail(step.detail) }}</p></div><span>{{ formatDuration(step.duration_ms) }}</span></div></div>
               <div class="run-artifacts"><h4>执行产物</h4><button v-for="(artifact, index) in selectedRunArtifacts" :key="`${artifact.name}-${index}`" type="button" class="artifact-item" @click="previewArtifact(index, artifact)"><el-icon><Picture v-if="isImageArtifact(artifact)" /><Document v-else /></el-icon><span>{{ artifact.name }}</span><el-button text :icon="Download" :aria-label="`下载 ${artifact.name}`" @click.stop="downloadArtifact(index, artifact)" /></button><div v-if="previewUrl" class="artifact-preview"><img :src="previewUrl" alt="UI 执行截图" /></div></div>
@@ -313,11 +436,18 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Bottom, CircleCheck, CopyDocument, Delete, Document, Download, Edit, MagicStick, Picture, Plus,
-  Refresh, Search, Top, Upload, VideoPlay, View, WarningFilled
+  Bottom, CircleCheck, CopyDocument, Delete, Document, DocumentCopy, Download, Files, Finished,
+  MagicStick, Picture, Plus, Refresh, Search, Tickets, Top, TrendCharts, Upload, VideoPlay, WarningFilled
 } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
+import AICaseComposer from './components/AICaseComposer.vue'
+import FolderTree from './components/FolderTree.vue'
+import CaseTable from './components/CaseTable.vue'
+import BatchRunDialog from './components/BatchRunDialog.vue'
+import BatchRunDrawer from './components/BatchRunDrawer.vue'
+import ReviewPanel from './components/ReviewPanel.vue'
 import { usePermissions } from '@/lib/permissions'
+import { useAuthStore } from '@/stores/auth'
 import { executionStatusTag, executionStatusText } from '@/lib/execution'
 import {
   UI_ASSERTION_OPTIONS, UI_STEP_OPTIONS, createUiAssertion, createUiStep,
@@ -326,9 +456,9 @@ import {
 } from '@/lib/uiCase'
 
 const list = ref([])
+const total = ref(0)
 const projects = ref([])
 const environments = ref([])
-const runs = ref([])
 const listLoading = ref(true)
 const saving = ref(false)
 const editorVisible = ref(false)
@@ -353,77 +483,244 @@ const importVisible = ref(false)
 const importText = ref('')
 const aiDialogVisible = ref(false)
 const aiGenerating = ref(false)
-const aiFormRef = ref(null)
+const aiDraftReady = ref(false)
+const aiWarnings = ref([])
+const aiSavingRun = ref(false)
+const stats = reactive({ total: 0, active: 0, approved: 0, recent_success_rate: null })
+const folderTree = ref({ total: 0, ungrouped: 0, folders: [] })
+const selectedFolder = ref('')
+const treeDrawerVisible = ref(false)
+const latestRunMap = ref({})
+const caseNameCache = reactive({})
+const caseTableRef = ref(null)
+const selectedRows = ref([])
+const batchRunVisible = ref(false)
+const batchSubmitting = ref(false)
+const batchEnvironments = ref([])
+const batchDrawerVisible = ref(false)
+const activeBatchId = ref(null)
+const batchEditVisible = ref(false)
+const batchEditSubmitting = ref(false)
+const batchEditForm = reactive({ folder_path: '', priority: '', status: '' })
 const { canAdmin, canTest } = usePermissions()
+const authStore = useAuthStore()
+const currentUserId = computed(() => authStore.user?.id || null)
 let itemKey = 0
 let pollTimer = null
+let keywordTimer = null
 
-const filters = reactive({ projectId: undefined, status: '', priority: '', keyword: '' })
+const filters = reactive({ projectId: undefined, status: '', priority: '', reviewStatus: '', keyword: '' })
 const page = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(20)
 const temp = reactive({
   project_id: undefined, name: '', folder_path: '', target_url: '', priority: 'P1', status: 'ACTIVE',
   review_status: 'DRAFT', version_no: '1.0.0', review_note: '', expect_text: '', tags_json: [], steps: [], assertions: [],
-  generation_mode: 'manual', ai_goal: '', skill_name: '', skill_version: '', generation_meta_json: null
+  generation_mode: 'manual', execution_mode: 'stable', engine: 'native', self_heal_enabled: false, max_agent_steps: 10,
+  allowed_origins_json: [], prohibited_actions_json: [], ai_goal: '', skill_name: '', skill_version: '', generation_meta_json: null
 })
-const aiForm = reactive({ project_id: undefined, target_url: '', goal: '', context: '', max_steps: 12 })
+const aiForm = reactive({ project_id: undefined, target_url: '', goal: '', context: '', max_steps: 12, execution_mode: 'adaptive' })
 const runForm = reactive({ case_id: undefined, project_id: undefined, environment_id: undefined, timeout_seconds: 60, max_retries: 0 })
+const executionModeOptions = [
+  { label: '稳定回归', value: 'stable' },
+  { label: '适应执行', value: 'adaptive' },
+  { label: '自主探索', value: 'explore' },
+  { label: '视觉测试', value: 'visual' }
+]
+const engineOptions = [
+  { label: '平台引擎', value: 'native' },
+  { label: 'Midscene AI', value: 'midscene' }
+]
+const defaultProhibitedActions = ['删除', '支付', '购买', '发布', '发送', '授权']
 const rules = {
   project_id: [{ required: true, message: '请选择项目', trigger: 'change' }],
   name: [{ required: true, message: '请输入用例名称', trigger: 'blur' }, { min: 2, message: '名称至少 2 个字符', trigger: 'blur' }],
   target_url: [{ required: true, message: '请输入目标地址', trigger: 'blur' }],
   expect_text: [{ required: true, message: '请输入最终文本断言', trigger: 'blur' }]
 }
-const aiRules = {
-  project_id: [{ required: true, message: '请选择项目', trigger: 'change' }],
-  target_url: [{ required: true, message: '请输入目标地址', trigger: 'blur' }],
-  goal: [{ required: true, message: '请输入测试目标', trigger: 'blur' }, { min: 5, message: '测试目标至少 5 个字符', trigger: 'blur' }]
-}
-
 const withKey = (item) => ({ ...item, _key: ++itemKey })
 const projectMap = computed(() => Object.fromEntries(projects.value.map((item) => [item.id, item.name])))
 const tagOptions = computed(() => [...new Set(list.value.flatMap((item) => item.tags_json || []))].sort((a, b) => a.localeCompare(b, 'zh-CN')))
 const runEnvironmentOptions = computed(() => environments.value.filter((item) => item.project_id === runForm.project_id))
-const activeCount = computed(() => list.value.filter((item) => item.status === 'ACTIVE').length)
-const approvedCount = computed(() => list.value.filter((item) => item.review_status === 'APPROVED').length)
-const recentSuccessRate = computed(() => {
-  const recent = runs.value.slice(0, 50).filter((item) => !['PENDING', 'RUNNING'].includes(item.status))
-  if (!recent.length) return '-'
-  return `${Math.round(recent.filter((item) => item.status === 'SUCCESS').length / recent.length * 100)}%`
-})
-const latestRunMap = computed(() => {
-  const map = {}
-  runs.value.forEach((run) => { if (!map[run.case_id]) map[run.case_id] = run })
-  return map
-})
-const filteredList = computed(() => {
-  const keyword = filters.keyword.trim().toLowerCase()
-  return list.value.filter((item) => {
-    if (filters.projectId && item.project_id !== filters.projectId) return false
-    if (filters.status && item.status !== filters.status) return false
-    if (filters.priority && item.priority !== filters.priority) return false
-    if (!keyword) return true
-    return [item.name, item.folder_path, item.target_url, ...(item.tags_json || [])].some((value) => String(value || '').toLowerCase().includes(keyword))
-  })
-})
-const pagedList = computed(() => filteredList.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
+const recentSuccessRate = computed(() => (stats.recent_success_rate == null ? '-' : `${Math.round(stats.recent_success_rate * 100)}%`))
+const mapFolderNode = (node) => ({ value: node.path, label: node.name, children: (node.children || []).map(mapFolderNode) })
+const folderSelectOptions = computed(() => (folderTree.value.folders || []).map(mapFolderNode))
 
-watch(() => [filters.projectId, filters.status, filters.priority, filters.keyword], () => { page.value = 1 })
+const buildListQuery = () => {
+  const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value) })
+  if (filters.projectId) params.set('project_id', String(filters.projectId))
+  if (filters.status) params.set('status', filters.status)
+  if (filters.priority) params.set('priority', filters.priority)
+  if (filters.reviewStatus) params.set('review_status', filters.reviewStatus)
+  if (selectedFolder.value) params.set('folder', selectedFolder.value)
+  if (filters.keyword.trim()) params.set('keyword', filters.keyword.trim())
+  return params
+}
+
+const loadLatestRuns = async (caseIds) => {
+  if (!caseIds.length) { latestRunMap.value = {}; return }
+  try {
+    const rows = await api.get(`/executions/runs/latest?case_type=UI&case_ids=${caseIds.join(',')}`)
+    latestRunMap.value = Object.fromEntries(rows.map((run) => [run.case_id, run]))
+  } catch {
+    latestRunMap.value = {}
+  }
+}
 
 const getList = async () => {
   listLoading.value = true
   try {
-    const [caseData, projectData, runData] = await Promise.all([
-      api.get('/ui-cases'), api.get('/projects'), api.get('/executions/runs?case_type=UI&limit=200')
-    ])
-    list.value = caseData
-    projects.value = projectData
-    runs.value = runData
-    if (currentCase.value) currentCase.value = caseData.find((item) => item.id === currentCase.value.id) || currentCase.value
+    const data = await api.get(`/ui-cases?${buildListQuery()}`)
+    list.value = data.items
+    total.value = data.total
+    data.items.forEach((item) => { caseNameCache[item.id] = item.name })
+    await loadLatestRuns(data.items.map((item) => item.id))
+    if (currentCase.value) currentCase.value = data.items.find((item) => item.id === currentCase.value.id) || currentCase.value
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
     listLoading.value = false
+  }
+}
+
+const loadStats = async () => {
+  try {
+    const suffix = filters.projectId ? `?project_id=${filters.projectId}` : ''
+    Object.assign(stats, await api.get(`/ui-cases/stats${suffix}`))
+  } catch {
+    /* 概览统计失败不阻塞列表 */
+  }
+}
+
+const loadFolders = async () => {
+  try {
+    const suffix = filters.projectId ? `?project_id=${filters.projectId}` : ''
+    folderTree.value = await api.get(`/ui-cases/folders${suffix}`)
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const loadProjects = async () => {
+  try {
+    projects.value = await api.get('/projects')
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const refreshAll = () => Promise.all([getList(), loadStats(), loadFolders()])
+
+const handleFolderRename = async ({ oldPath, newPath }) => {
+  if (!filters.projectId) {
+    ElMessage.warning('请先在筛选中选择项目，再重命名目录')
+    return
+  }
+  try {
+    const result = await api.post('/ui-cases/folders/rename', { project_id: filters.projectId, old_path: oldPath, new_path: newPath })
+    ElMessage.success(`目录已重命名，共更新 ${result.affected} 条用例`)
+    if (selectedFolder.value === oldPath || selectedFolder.value.startsWith(`${oldPath}/`)) {
+      selectedFolder.value = newPath + selectedFolder.value.slice(oldPath.length)
+    }
+    await Promise.all([loadFolders(), getList()])
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const openBatchRun = async () => {
+  const projectIds = [...new Set(selectedRows.value.map((row) => row.project_id))]
+  if (projectIds.length > 1) {
+    ElMessage.warning('批量执行的用例必须属于同一项目')
+    return
+  }
+  const inactive = selectedRows.value.filter((row) => row.status !== 'ACTIVE')
+  if (inactive.length) {
+    ElMessage.warning(`以下用例未启用，无法批量执行：${inactive.map((row) => row.name).join('、')}`)
+    return
+  }
+  try {
+    batchEnvironments.value = await api.get(`/environments?project_id=${projectIds[0]}`)
+    batchRunVisible.value = true
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const submitBatchRun = async (payload) => {
+  batchSubmitting.value = true
+  try {
+    const batch = await api.post('/executions/ui/batch-run', { case_ids: selectedRows.value.map((row) => row.id), ...payload })
+    batchRunVisible.value = false
+    caseTableRef.value?.clearSelection()
+    ElMessage.success(`批量执行 #${batch.id} 已提交`)
+    activeBatchId.value = batch.id
+    batchDrawerVisible.value = true
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    batchSubmitting.value = false
+  }
+}
+
+const openBatchHistory = () => {
+  activeBatchId.value = null
+  batchDrawerVisible.value = true
+}
+
+const handleOpenRunFromBatch = async (run) => {
+  batchDrawerVisible.value = false
+  await openCaseDetail({ id: run.case_id }, 'runs')
+  await selectRun(run)
+}
+
+const openBatchEdit = () => {
+  Object.assign(batchEditForm, { folder_path: '', priority: '', status: '' })
+  batchEditVisible.value = true
+}
+
+const submitBatchEdit = async () => {
+  const patch = {}
+  if (batchEditForm.folder_path && batchEditForm.folder_path.trim()) patch.folder_path = batchEditForm.folder_path.trim()
+  if (batchEditForm.priority) patch.priority = batchEditForm.priority
+  if (batchEditForm.status) patch.status = batchEditForm.status
+  if (!Object.keys(patch).length) {
+    ElMessage.warning('请至少填写一个要修改的字段')
+    return
+  }
+  batchEditSubmitting.value = true
+  try {
+    const result = await api.put('/ui-cases/batch', { case_ids: selectedRows.value.map((row) => row.id), patch })
+    ElMessage.success(`已批量更新 ${result.affected} 条用例`)
+    batchEditVisible.value = false
+    caseTableRef.value?.clearSelection()
+    await Promise.all([getList(), loadFolders(), loadStats()])
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    batchEditSubmitting.value = false
+  }
+}
+
+const handleBatchDelete = async () => {
+  try {
+    await ElMessageBox.confirm(`确认删除已选的 ${selectedRows.value.length} 条 UI 用例？该操作不可恢复。`, '批量删除确认', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+    const result = await api.delete('/ui-cases/batch', { case_ids: selectedRows.value.map((row) => row.id) })
+    ElMessage.success(`已删除 ${result.affected} 条 UI 用例`)
+    caseTableRef.value?.clearSelection()
+    await refreshAll()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.message)
+  }
+}
+
+const refreshCurrentCase = async () => {
+  if (!currentCase.value) return
+  try {
+    currentCase.value = await api.get(`/ui-cases/${currentCase.value.id}`)
+    await getList()
+  } catch (error) {
+    ElMessage.error(error.message)
   }
 }
 
@@ -433,7 +730,8 @@ const resetTemp = () => {
     project_id: project?.id, name: '', folder_path: '', target_url: project?.base_url || 'http://frontend:3000',
     priority: 'P1', status: 'ACTIVE', review_status: 'DRAFT', version_no: '1.0.0', review_note: '',
     expect_text: '', tags_json: [], steps: [], assertions: [], generation_mode: 'manual', ai_goal: '',
-    skill_name: '', skill_version: '', generation_meta_json: null
+    execution_mode: 'stable', engine: 'native', self_heal_enabled: false, max_agent_steps: 10, allowed_origins_json: [],
+    prohibited_actions_json: [], skill_name: '', skill_version: '', generation_meta_json: null
   })
 }
 
@@ -449,15 +747,15 @@ const openAIDialog = () => {
     target_url: project?.base_url || 'http://frontend:3000',
     goal: '',
     context: '',
-    max_steps: 12
+    max_steps: 12,
+    execution_mode: 'adaptive'
   })
+  aiDraftReady.value = false
+  aiWarnings.value = []
   aiDialogVisible.value = true
-  nextTick(() => aiFormRef.value?.clearValidate())
 }
 
 const generateAIDraft = async () => {
-  const valid = await aiFormRef.value?.validate().catch(() => false)
-  if (!valid) return
   aiGenerating.value = true
   try {
     const result = await api.post('/ui-cases/ai/generate', {
@@ -465,7 +763,8 @@ const generateAIDraft = async () => {
       target_url: aiForm.target_url.trim(),
       goal: aiForm.goal.trim(),
       context: aiForm.context.trim() || null,
-      max_steps: aiForm.max_steps
+      max_steps: aiForm.max_steps,
+      execution_mode: aiForm.execution_mode
     })
     const draft = result.draft
     Object.assign(temp, {
@@ -475,22 +774,36 @@ const generateAIDraft = async () => {
       tags_json: [...(draft.tags_json || [])], steps: (draft.steps_json || []).map((step) => withKey(normalizeUiStep(step))),
       assertions: (draft.assertions_json || []).map((assertion) => withKey(normalizeUiAssertion(assertion))),
       generation_mode: draft.generation_mode || 'ai_skill', ai_goal: draft.ai_goal || aiForm.goal.trim(),
+      execution_mode: draft.execution_mode || aiForm.execution_mode, self_heal_enabled: Boolean(draft.self_heal_enabled),
+      engine: draft.engine || 'native',
+      max_agent_steps: draft.max_agent_steps || aiForm.max_steps, allowed_origins_json: [...(draft.allowed_origins_json || [])],
+      prohibited_actions_json: [...(draft.prohibited_actions_json || [])],
       skill_name: draft.skill_name || result.skill_name, skill_version: draft.skill_version || result.skill_version,
       generation_meta_json: draft.generation_meta_json || null
     })
-    aiDialogVisible.value = false
-    isEditing.value = false
-    editingCaseId.value = null
-    editorTab.value = 'steps'
-    editorVisible.value = true
-    if (result.warnings?.length) ElMessage.warning(`AI 草稿已生成，含 ${result.warnings.length} 项待确认`)
-    else ElMessage.success('AI 草稿已生成，请确认后保存')
-    nextTick(() => editorFormRef.value?.clearValidate())
+    aiWarnings.value = result.warnings || []
+    aiDraftReady.value = true
+    if (result.warnings?.length) ElMessage.warning(`已生成测试步骤，其中 ${result.warnings.length} 项需要留意`)
+    else ElMessage.success('测试步骤已生成')
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
     aiGenerating.value = false
   }
+}
+
+const resetAIDraft = () => {
+  aiDraftReady.value = false
+  aiWarnings.value = []
+}
+
+const openAIDraftInEditor = () => {
+  aiDialogVisible.value = false
+  isEditing.value = false
+  editingCaseId.value = null
+  editorTab.value = 'steps'
+  editorVisible.value = true
+  nextTick(() => editorFormRef.value?.clearValidate())
 }
 
 const handleCreate = () => {
@@ -510,6 +823,10 @@ const handleEdit = (row) => {
     tags_json: [...(row.tags_json || [])], steps: (row.steps_json || []).map((step) => withKey(normalizeUiStep(step))),
     assertions: (row.assertions_json || []).map((assertion) => withKey(normalizeUiAssertion(assertion))),
     generation_mode: row.generation_mode || 'manual', ai_goal: row.ai_goal || '', skill_name: row.skill_name || '',
+    execution_mode: row.execution_mode || 'stable', self_heal_enabled: Boolean(row.self_heal_enabled),
+    engine: row.engine || 'native',
+    max_agent_steps: row.max_agent_steps || 10, allowed_origins_json: [...(row.allowed_origins_json || [])],
+    prohibited_actions_json: [...(row.prohibited_actions_json || [])],
     skill_version: row.skill_version || '', generation_meta_json: row.generation_meta_json || null
   })
   isEditing.value = true
@@ -533,6 +850,46 @@ const moveItem = (items, index, offset) => {
   items.splice(target, 0, item)
 }
 
+const buildTempPayload = () => ({
+  project_id: temp.project_id,
+  name: temp.name.trim(),
+  folder_path: temp.folder_path.trim() || null,
+  target_url: temp.target_url.trim(),
+  priority: temp.priority,
+  status: temp.status,
+  review_status: temp.review_status,
+  version_no: temp.version_no,
+  review_note: temp.review_note.trim() || null,
+  tags_json: temp.tags_json.length ? temp.tags_json : null,
+  steps_json: serializeUiSteps(temp.steps),
+  assertions_json: temp.assertions.length ? serializeUiAssertions(temp.assertions) : null,
+  expect_text: temp.expect_text.trim(),
+  generation_mode: temp.generation_mode || 'manual',
+  ai_goal: temp.ai_goal.trim() || null,
+  execution_mode: temp.execution_mode || 'stable',
+  engine: temp.engine || 'native',
+  self_heal_enabled: Boolean(temp.self_heal_enabled),
+  max_agent_steps: temp.max_agent_steps || 10,
+  allowed_origins_json: temp.allowed_origins_json.length ? temp.allowed_origins_json : null,
+  prohibited_actions_json: temp.prohibited_actions_json.length ? temp.prohibited_actions_json : null,
+  skill_name: temp.skill_name || null,
+  skill_version: temp.skill_version || null,
+  generation_meta_json: temp.generation_meta_json
+})
+
+const validateTempWorkflow = () => {
+  if (!temp.project_id || !temp.name.trim() || !temp.target_url.trim() || !temp.expect_text.trim()) {
+    ElMessage.error('AI 草稿缺少名称、地址或通过条件，请返回修改后重新生成')
+    return false
+  }
+  const workflowErrors = validateUiWorkflow(temp.steps, temp.assertions)
+  if (workflowErrors.length) {
+    ElMessage.error(workflowErrors[0])
+    return false
+  }
+  return true
+}
+
 const saveData = async () => {
   const valid = await editorFormRef.value?.validate().catch(() => false)
   if (!valid) {
@@ -547,14 +904,7 @@ const saveData = async () => {
   }
   saving.value = true
   try {
-    const payload = {
-      project_id: temp.project_id, name: temp.name.trim(), folder_path: temp.folder_path.trim() || null,
-      target_url: temp.target_url.trim(), priority: temp.priority, status: temp.status, review_status: temp.review_status,
-      version_no: temp.version_no, review_note: temp.review_note.trim() || null, tags_json: temp.tags_json.length ? temp.tags_json : null,
-      steps_json: serializeUiSteps(temp.steps), assertions_json: temp.assertions.length ? serializeUiAssertions(temp.assertions) : null,
-      expect_text: temp.expect_text.trim(), generation_mode: temp.generation_mode || 'manual', ai_goal: temp.ai_goal.trim() || null,
-      skill_name: temp.skill_name || null, skill_version: temp.skill_version || null, generation_meta_json: temp.generation_meta_json
-    }
+    const payload = buildTempPayload()
     if (isEditing.value) await api.put(`/ui-cases/${editingCaseId.value}`, payload)
     else await api.post('/ui-cases', payload)
     editorVisible.value = false
@@ -564,6 +914,43 @@ const saveData = async () => {
     ElMessage.error(error.message)
   } finally {
     saving.value = false
+  }
+}
+
+const saveAIDraft = async (runAfterSave) => {
+  if (!validateTempWorkflow()) return
+  if (runAfterSave) aiSavingRun.value = true
+  else saving.value = true
+  let created = null
+  try {
+    created = await api.post('/ui-cases', buildTempPayload())
+    await getList()
+    if (!runAfterSave) {
+      aiDialogVisible.value = false
+      ElMessage.success('UI 用例已保存')
+      return
+    }
+
+    const precheck = await api.get(`/executions/ui/${created.id}/precheck`)
+    if (!precheck.is_valid) {
+      aiDialogVisible.value = false
+      throw new Error(`用例已保存，但试运行前校验未通过：${precheck.summary}`)
+    }
+    const run = await api.post(`/executions/ui/${created.id}/run`, {
+      environment_id: null,
+      timeout_seconds: 60,
+      max_retries: 0
+    })
+    aiDialogVisible.value = false
+    ElMessage.success(`用例已保存，试运行 #${run.id} 已提交`)
+    await openCaseDetail(created, 'runs')
+    await selectRun(run)
+    startPolling()
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    saving.value = false
+    aiSavingRun.value = false
   }
 }
 
@@ -698,33 +1085,81 @@ const submitImportCases = async () => {
   } catch (error) { ElMessage.error(error.message) }
 }
 
-const priorityTag = (priority) => ({ P0: 'danger', P1: 'warning', P2: '', P3: 'info' }[priority] || 'info')
 const caseStatusText = (status) => ({ ACTIVE: '启用', INACTIVE: '停用' }[status] || status)
 const reviewText = (status) => ({ DRAFT: '草稿', IN_REVIEW: '评审中', APPROVED: '已通过', REJECTED: '已拒绝' }[status] || status)
 const reviewTag = (status) => ({ APPROVED: 'success', IN_REVIEW: 'warning', REJECTED: 'danger', DRAFT: 'info' }[status] || 'info')
 const stepLabel = (action) => UI_STEP_OPTIONS.find((item) => item.value === action)?.label || action
 const assertionLabel = (type) => UI_ASSERTION_OPTIONS.find((item) => item.value === type)?.label || (type === 'text_present' ? '文本可见' : type)
+const executionModeText = (mode) => ({ stable: '稳定回归', adaptive: '适应执行', explore: '自主探索', visual: '视觉测试' }[mode] || '稳定回归')
+const engineText = (engine) => ({ native: '平台引擎', midscene: 'Midscene AI' }[engine] || '平台引擎')
+const engineDescription = (engine) => ({
+  native: '平台内置 Playwright 引擎，支持四种执行模式，适合日常回归与发布门禁。',
+  midscene: 'Midscene AI 引擎（Node + Playwright），将自然语言步骤交由多模态模型自主定位执行，需工作空间已配置模型。'
+}[engine] || '')
 const formatShortTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-'
 const formatDuration = (value) => value === null || value === undefined ? '-' : value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(1)}s`
 const formatStepDetail = (detail) => {
   if (!detail) return '-'
   if (typeof detail === 'string') return detail
-  const parts = [detail.action, detail.selector, detail.value, detail.error].filter(Boolean)
+  const resolution = detail.resolution
+  const resolutionText = resolution?.method && resolution.method !== 'not_applicable'
+    ? `定位：${({ test_id: 'test-id', role_name: '角色/名称', label: '标签', placeholder: '占位文本', visible_text: '可见文本', selector_fallback: '选择器兜底', ai_healing: 'AI 自愈', ai_exploration: 'AI 探索', visual_model: 'AI 视觉' }[resolution.method] || resolution.method)}`
+    : ''
+  const parts = [detail.action, detail.target, detail.selector, detail.value, resolutionText, detail.error].filter(Boolean)
   return parts.join(' · ') || JSON.stringify(detail)
 }
 
-onMounted(getList)
+watch(() => filters.projectId, () => {
+  selectedFolder.value = ''
+  page.value = 1
+  refreshAll()
+})
+watch([() => filters.status, () => filters.priority, () => filters.reviewStatus], () => {
+  page.value = 1
+  getList()
+})
+watch(() => filters.keyword, () => {
+  clearTimeout(keywordTimer)
+  keywordTimer = setTimeout(() => {
+    page.value = 1
+    getList()
+  }, 300)
+})
+watch(selectedFolder, () => {
+  page.value = 1
+  getList()
+})
+watch(page, () => getList())
+watch(pageSize, () => {
+  page.value = 1
+  getList()
+})
+
+onMounted(async () => {
+  await loadProjects()
+  await refreshAll()
+})
 onUnmounted(() => { stopPolling(); revokePreview() })
 </script>
 
 <style scoped>
 .ui-case-page { min-width: 0; }
-.summary-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--el-border-color-lighter); background: #fff; }
-.summary-item { min-height: 76px; padding: 14px 20px; display: flex; flex-direction: column; justify-content: center; border-right: 1px solid var(--el-border-color-lighter); }
+.summary-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; border: 1px solid #e4e7ed; border-radius: 8px; background: #fff; box-shadow: 0 4px 14px rgb(15 23 42 / 3%); }
+.summary-item { min-height: 84px; padding: 14px 20px; display: flex; align-items: center; gap: 13px; border-right: 1px solid var(--el-border-color-lighter); }
 .summary-item:last-child { border-right: 0; }
+.summary-item > div { min-width: 0; display: flex; flex-direction: column; justify-content: center; }
+.summary-item__icon { width: 36px; height: 36px; flex: 0 0 36px; display: grid; place-items: center; border: 1px solid; border-radius: 8px; font-size: 17px; }
+.summary-item__icon.is-primary { border-color: #c7d2fe; background: #eef2ff; color: #4f46e5; }
+.summary-item__icon.is-success { border-color: #bbebd4; background: #effaf5; color: #159a62; }
+.summary-item__icon.is-review { border-color: #bfdbfe; background: #eff6ff; color: #2563eb; }
+.summary-item__icon.is-rate { border-color: #fed7aa; background: #fff7ed; color: #c2410c; }
 .summary-item__label { color: var(--color-text-secondary); font-size: 12px; }
-.summary-item strong { margin-top: 4px; font-size: 22px; line-height: 1.2; }
-.workspace-panel { background: #fff; border: 1px solid var(--el-border-color-lighter); }
+.summary-item strong { margin-top: 3px; color: #172033; font-size: 22px; line-height: 1.2; }
+.workspace-panel { overflow: hidden; background: #fff; border: 1px solid #e4e7ed; border-radius: 8px; box-shadow: 0 5px 18px rgb(15 23 42 / 3%); }
+.case-layout { margin-top: 14px; display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 16px; align-items: start; }
+.case-layout__tree { padding: 12px 10px; position: sticky; top: 16px; max-height: calc(100vh - 120px); overflow: auto; }
+.case-layout__main { min-width: 0; }
+.tree-drawer-trigger { display: none; }
 .filter-bar { min-height: 62px; padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--el-border-color-lighter); }
 .filter-control { width: 190px; }
 .filter-control--short { width: 140px; }
@@ -733,15 +1168,25 @@ onUnmounted(() => { stopPolling(); revokePreview() })
 .case-table { width: 100%; }
 .case-name { border: 0; padding: 0; background: none; color: var(--el-color-primary); font: inherit; font-weight: 600; cursor: pointer; text-align: left; }
 .case-name:hover { text-decoration: underline; }
-.case-meta { margin-top: 5px; display: flex; gap: 12px; color: var(--color-text-secondary); font-size: 12px; }
+.case-meta { margin-top: 5px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--color-text-secondary); font-size: 11px; line-height: 1.4; }
 .last-run { display: flex; align-items: center; gap: 8px; color: var(--color-text-secondary); font-size: 12px; }
 .muted { color: var(--color-text-secondary); }
 .row-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .mobile-cards { display: none; }
+:deep(.case-table .el-table__header th) { height: 44px; background: #f8fafc; color: #667085; font-weight: 600; }
+:deep(.case-table .el-table__row td) { padding: 12px 0; }
+:deep(.case-table .el-table__row:hover > td) { background: #f8faff !important; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 18px; }
 .form-grid__wide { grid-column: 1 / -1; }
 .ai-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
 .ai-origin { min-height: 38px; margin-bottom: 16px; display: flex; align-items: center; gap: 10px; color: var(--color-text-secondary); font-size: 13px; }
+.field-help { margin-top: 7px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.5; }
+.runtime-config { margin: 8px 0 14px; padding: 14px; border: 1px solid var(--el-border-color); background: #f8fafc; }
+.runtime-config__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.runtime-config__head div { display: flex; flex-direction: column; gap: 4px; }
+.runtime-config__head strong { font-size: 14px; }
+.runtime-config__head span { color: var(--color-text-secondary); font-size: 12px; }
+.runtime-config > .el-form-item:last-child { margin-bottom: 0; }
 .editor-tabs :deep(.el-tabs__content) { min-height: 480px; max-height: 62vh; overflow: auto; padding: 4px 2px 12px; }
 .builder-toolbar { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 12px; }
 .builder-toolbar--bordered { padding-top: 14px; border-top: 1px solid var(--el-border-color-lighter); }
@@ -752,8 +1197,9 @@ onUnmounted(() => { stopPolling(); revokePreview() })
 .builder-index { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--el-border-color); border-radius: 50%; color: var(--color-text-secondary); font-size: 12px; }
 .builder-action { width: 180px; }
 .builder-actions { display: flex; }
-.builder-fields { display: flex; gap: 10px; align-items: center; padding: 10px 0 0 42px; }
+.builder-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 10px 0 0 42px; }
 .builder-fields > .el-input, .builder-fields > .el-select { flex: 1; min-width: 0; }
+.semantic-fields { flex: 1 0 100%; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .dimension-separator { color: var(--color-text-secondary); }
 .dialog-version { margin-right: auto; color: var(--color-text-secondary); font-size: 12px; }
 :deep(.el-dialog__footer) { display: flex; align-items: center; }
@@ -779,7 +1225,10 @@ onUnmounted(() => { stopPolling(); revokePreview() })
 .run-detail { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--el-border-color); }
 .run-detail__head { display: flex; justify-content: space-between; align-items: flex-start; }
 .run-detail__head p { margin: 5px 0 0; color: var(--color-text-secondary); font-size: 12px; }
-.run-error { margin-top: 12px; padding: 10px; background: var(--el-color-danger-light-9); color: var(--el-color-danger); border-radius: 4px; white-space: pre-wrap; font-size: 12px; }
+.run-technical { margin-top: 12px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; padding: 0 12px; }
+.run-technical pre { max-height: 260px; margin: 0; padding: 10px; overflow: auto; background: #f7f8fa; color: var(--color-text-secondary); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.55; }
+.runtime-evidence { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--el-border-color-lighter); background: #f8fafc; font-size: 12px; color: var(--color-text-secondary); }
+.runtime-evidence strong { margin-left: 4px; color: var(--color-text); }
 .run-detail-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(240px, .8fr); gap: 20px; margin-top: 18px; }
 .run-steps h4, .run-artifacts h4 { margin-bottom: 10px; }
 .run-step { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 8px; padding: 9px 0; border-bottom: 1px solid var(--el-border-color-lighter); }
@@ -795,6 +1244,9 @@ onUnmounted(() => { stopPolling(); revokePreview() })
 .import-editor { margin-top: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 @media (max-width: 900px) {
+  .case-layout { grid-template-columns: 1fr; }
+  .case-layout__tree { display: none; }
+  .tree-drawer-trigger { display: inline-flex; }
   .summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .summary-item:nth-child(2) { border-right: 0; }
   .summary-item:nth-child(-n+2) { border-bottom: 1px solid var(--el-border-color-lighter); }
@@ -804,6 +1256,8 @@ onUnmounted(() => { stopPolling(); revokePreview() })
   .case-table { display: none; }
   .mobile-cards { display: grid; gap: 10px; padding: 12px; }
   .mobile-case { padding: 12px; border: 1px solid var(--el-border-color); border-radius: 6px; }
+  .mobile-case__title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .case-sequence { flex: 0 0 auto; color: var(--color-text-secondary); font-size: 12px; }
   .mobile-case__tags { display: flex; gap: 6px; margin: 8px 0; }
   .mobile-case__url { margin-bottom: 10px; color: var(--color-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
   .form-grid { grid-template-columns: 1fr; }
@@ -813,6 +1267,7 @@ onUnmounted(() => { stopPolling(); revokePreview() })
   .builder-row__head > .el-input { grid-column: 2 / -1; }
   .builder-action { width: 100%; }
   .builder-fields { padding-left: 0; flex-wrap: wrap; }
+  .semantic-fields { grid-template-columns: 1fr; }
   .run-detail-grid { grid-template-columns: 1fr; }
 }
 </style>

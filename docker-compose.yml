@@ -80,6 +80,7 @@ services:
       - "8000:8000"
     volumes:
       - ./backend/reports:/app/reports
+      - ./backend/uploads:/app/uploads
       - ./backend/app:/app/app
       - ./backend/claw_5skill_final:/app/claw_5skill_final
       - ./backend/claw_5skill_unified:/app/claw_5skill_unified
@@ -108,6 +109,9 @@ services:
       context: ./backend
       target: execution
     container_name: ppptest-worker
+    # Docker Desktop bind mounts retain the host owner. Run the browser worker
+    # with the host UID/GID so screenshots and traces remain writable.
+    user: "${LOCAL_UID:-501}:${LOCAL_GID:-20}"
     command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=solo -Q execution,celery -n execution@%h'
     environment:
       APP_ENV: docker
@@ -120,6 +124,8 @@ services:
       BACKEND_PUBLIC_URL: http://127.0.0.1:8000
       FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
       APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
+      MIDSCENE_NODE_BIN: /usr/local/bin/node
+      MIDSCENE_RUNNER_PATH: /app/midscene/midscene_runner.js
       CASE_GENERATION_RULES_DIR: claw_5skill_final
       CASE_GENERATION_UNIFIED_RULES_DIR: claw_5skill_unified
       CASE_GEN_MAX_CONCURRENCY: "4"
@@ -209,6 +215,41 @@ services:
       driver: "json-file"
       options:
         max-size: "5m"
+        max-file: "2"
+    networks:
+      - ppptest-network
+
+  beat:
+    build:
+      context: ./backend
+      target: runtime
+    container_name: ppptest-beat
+    command: sh -c 'exec celery -A app.core.celery_app.celery_app beat -l info --schedule /tmp/celerybeat-schedule'
+    environment:
+      APP_ENV: docker
+      DATABASE_URL: "${DOCKER_DATABASE_URL}"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
+      APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/app:/app/app
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.2'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "2m"
         max-file: "2"
     networks:
       - ppptest-network

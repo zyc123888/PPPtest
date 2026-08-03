@@ -1,3 +1,4 @@
+import json
 from collections.abc import Generator
 
 from sqlalchemy import create_engine, inspect, text
@@ -76,6 +77,44 @@ def ensure_schema(db_engine) -> list[str]:
             connection.execute(text(ddl))
             schema_changes.append(f"{table_name}.{column_name}:varchar({min_length})")
 
+    def migrate_json_secret_column(
+        connection,
+        table_name: str,
+        plaintext_column: str,
+        encrypted_column: str,
+    ) -> None:
+        if table_name not in tables:
+            return
+        from app.core.secrets import encrypt_secret, is_encryption_available
+
+        if not is_encryption_available():
+            return
+        rows = connection.execute(
+            text(
+                f"SELECT id, {plaintext_column} AS plaintext_value FROM {table_name} "
+                f"WHERE {encrypted_column} IS NULL AND {plaintext_column} IS NOT NULL"
+            )
+        ).mappings()
+        migrated = 0
+        for row in rows:
+            raw_value = row["plaintext_value"]
+            if raw_value in (None, "", {}, []):
+                continue
+            serialized = raw_value if isinstance(raw_value, str) else json.dumps(raw_value, ensure_ascii=False)
+            encrypted = encrypt_secret(serialized)
+            if not encrypted:
+                continue
+            connection.execute(
+                text(
+                    f"UPDATE {table_name} SET {encrypted_column} = :encrypted, "
+                    f"{plaintext_column} = NULL WHERE id = :row_id"
+                ),
+                {"encrypted": encrypted, "row_id": row["id"]},
+            )
+            migrated += 1
+        if migrated:
+            schema_changes.append(f"{table_name}.{encrypted_column}:migrated({migrated})")
+
     with db_engine.begin() as connection:
         if settings.normalize_mysql_charset_on_bootstrap and db_engine.url.get_backend_name().startswith("mysql"):
             db_name = db_engine.url.database or "test_platform"
@@ -91,6 +130,12 @@ def ensure_schema(db_engine) -> list[str]:
                     )
                 )
 
+        add_column_if_missing(
+            connection,
+            "ui_cases",
+            "engine",
+            "ALTER TABLE ui_cases ADD COLUMN engine VARCHAR(20) NOT NULL DEFAULT 'native'",
+        )
         add_column_if_missing(
             connection,
             "projects",
@@ -141,6 +186,48 @@ def ensure_schema(db_engine) -> list[str]:
         )
         add_column_if_missing(
             connection,
+            "test_plans",
+            "schedule_enabled",
+            "ALTER TABLE test_plans ADD COLUMN schedule_enabled BOOLEAN NOT NULL DEFAULT 0",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "schedule_cron",
+            "ALTER TABLE test_plans ADD COLUMN schedule_cron VARCHAR(120) NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "schedule_environment_id",
+            "ALTER TABLE test_plans ADD COLUMN schedule_environment_id INTEGER NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "schedule_timeout_seconds",
+            "ALTER TABLE test_plans ADD COLUMN schedule_timeout_seconds INTEGER NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "schedule_max_retries",
+            "ALTER TABLE test_plans ADD COLUMN schedule_max_retries INTEGER NOT NULL DEFAULT 0",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "next_run_at",
+            "ALTER TABLE test_plans ADD COLUMN next_run_at DATETIME NULL",
+        )
+        add_column_if_missing(
+            connection,
+            "test_plans",
+            "last_triggered_at",
+            "ALTER TABLE test_plans ADD COLUMN last_triggered_at DATETIME NULL",
+        )
+        add_column_if_missing(
+            connection,
             "users",
             "password_hash",
             "ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NULL",
@@ -161,6 +248,10 @@ def ensure_schema(db_engine) -> list[str]:
         extra_columns = [
             ("projects", "created_by", "ALTER TABLE projects ADD COLUMN created_by INTEGER NULL"),
             ("projects", "updated_by", "ALTER TABLE projects ADD COLUMN updated_by INTEGER NULL"),
+            ("projects", "status", "ALTER TABLE projects ADD COLUMN status VARCHAR(20) NULL DEFAULT 'ACTIVE'"),
+            ("projects", "code", "ALTER TABLE projects ADD COLUMN code VARCHAR(40) NULL"),
+            ("projects", "start_date", "ALTER TABLE projects ADD COLUMN start_date DATETIME NULL"),
+            ("projects", "end_date", "ALTER TABLE projects ADD COLUMN end_date DATETIME NULL"),
             ("api_cases", "priority", "ALTER TABLE api_cases ADD COLUMN priority VARCHAR(20) NULL"),
             ("api_cases", "status", "ALTER TABLE api_cases ADD COLUMN status VARCHAR(20) NULL"),
             ("api_cases", "review_status", "ALTER TABLE api_cases ADD COLUMN review_status VARCHAR(20) NULL"),
@@ -169,6 +260,8 @@ def ensure_schema(db_engine) -> list[str]:
             ("api_cases", "folder_path", "ALTER TABLE api_cases ADD COLUMN folder_path VARCHAR(255) NULL"),
             ("api_cases", "tags_json", "ALTER TABLE api_cases ADD COLUMN tags_json JSON NULL"),
             ("api_cases", "assertions_json", "ALTER TABLE api_cases ADD COLUMN assertions_json JSON NULL"),
+            ("api_cases", "extractors_json", "ALTER TABLE api_cases ADD COLUMN extractors_json JSON NULL"),
+            ("api_cases", "steps_json", "ALTER TABLE api_cases ADD COLUMN steps_json JSON NULL"),
             ("api_cases", "created_by", "ALTER TABLE api_cases ADD COLUMN created_by INTEGER NULL"),
             ("api_cases", "updated_by", "ALTER TABLE api_cases ADD COLUMN updated_by INTEGER NULL"),
             ("api_cases", "updated_at", "ALTER TABLE api_cases ADD COLUMN updated_at DATETIME NULL"),
@@ -181,6 +274,11 @@ def ensure_schema(db_engine) -> list[str]:
             ("ui_cases", "tags_json", "ALTER TABLE ui_cases ADD COLUMN tags_json JSON NULL"),
             ("ui_cases", "assertions_json", "ALTER TABLE ui_cases ADD COLUMN assertions_json JSON NULL"),
             ("ui_cases", "generation_mode", "ALTER TABLE ui_cases ADD COLUMN generation_mode VARCHAR(30) NULL"),
+            ("ui_cases", "execution_mode", "ALTER TABLE ui_cases ADD COLUMN execution_mode VARCHAR(30) NULL DEFAULT 'stable'"),
+            ("ui_cases", "self_heal_enabled", "ALTER TABLE ui_cases ADD COLUMN self_heal_enabled INTEGER NULL DEFAULT 0"),
+            ("ui_cases", "max_agent_steps", "ALTER TABLE ui_cases ADD COLUMN max_agent_steps INTEGER NULL DEFAULT 10"),
+            ("ui_cases", "allowed_origins_json", "ALTER TABLE ui_cases ADD COLUMN allowed_origins_json JSON NULL"),
+            ("ui_cases", "prohibited_actions_json", "ALTER TABLE ui_cases ADD COLUMN prohibited_actions_json JSON NULL"),
             ("ui_cases", "ai_goal", "ALTER TABLE ui_cases ADD COLUMN ai_goal TEXT NULL"),
             ("ui_cases", "skill_name", "ALTER TABLE ui_cases ADD COLUMN skill_name VARCHAR(120) NULL"),
             ("ui_cases", "skill_version", "ALTER TABLE ui_cases ADD COLUMN skill_version VARCHAR(30) NULL"),
@@ -239,6 +337,17 @@ def ensure_schema(db_engine) -> list[str]:
             ("test_runs", "stderr_text", "ALTER TABLE test_runs ADD COLUMN stderr_text TEXT NULL"),
             ("test_runs", "artifacts_json", "ALTER TABLE test_runs ADD COLUMN artifacts_json JSON NULL"),
             ("test_runs", "step_results_json", "ALTER TABLE test_runs ADD COLUMN step_results_json JSON NULL"),
+            ("test_runs", "batch_run_id", "ALTER TABLE test_runs ADD COLUMN batch_run_id INTEGER NULL"),
+            ("ui_cases", "submitted_review_at", "ALTER TABLE ui_cases ADD COLUMN submitted_review_at DATETIME NULL"),
+            ("ui_cases", "reviewed_by", "ALTER TABLE ui_cases ADD COLUMN reviewed_by INTEGER NULL"),
+            ("ui_cases", "reviewed_at", "ALTER TABLE ui_cases ADD COLUMN reviewed_at DATETIME NULL"),
+            ("api_cases", "submitted_review_at", "ALTER TABLE api_cases ADD COLUMN submitted_review_at DATETIME NULL"),
+            ("api_cases", "reviewed_by", "ALTER TABLE api_cases ADD COLUMN reviewed_by INTEGER NULL"),
+            ("api_cases", "reviewed_at", "ALTER TABLE api_cases ADD COLUMN reviewed_at DATETIME NULL"),
+            ("performance_cases", "submitted_review_at", "ALTER TABLE performance_cases ADD COLUMN submitted_review_at DATETIME NULL"),
+            ("performance_cases", "reviewed_by", "ALTER TABLE performance_cases ADD COLUMN reviewed_by INTEGER NULL"),
+            ("performance_cases", "reviewed_at", "ALTER TABLE performance_cases ADD COLUMN reviewed_at DATETIME NULL"),
+            ("ui_batch_runs", "case_type", "ALTER TABLE ui_batch_runs ADD COLUMN case_type VARCHAR(20) NULL DEFAULT 'UI'"),
             ("case_generation_jobs", "task_id", "ALTER TABLE case_generation_jobs ADD COLUMN task_id VARCHAR(120) NULL"),
             ("case_generation_jobs", "active_attempt_id", "ALTER TABLE case_generation_jobs ADD COLUMN active_attempt_id INTEGER NULL"),
             ("case_generation_artifacts", "attempt_id", "ALTER TABLE case_generation_artifacts ADD COLUMN attempt_id INTEGER NULL"),
@@ -246,9 +355,32 @@ def ensure_schema(db_engine) -> list[str]:
             ("case_generation_v2_jobs", "active_attempt_id", "ALTER TABLE case_generation_v2_jobs ADD COLUMN active_attempt_id INTEGER NULL"),
             ("case_generation_v2_artifacts", "attempt_id", "ALTER TABLE case_generation_v2_artifacts ADD COLUMN attempt_id INTEGER NULL"),
             ("case_generation_v2_artifacts", "expired_at", "ALTER TABLE case_generation_v2_artifacts ADD COLUMN expired_at DATETIME NULL"),
+            ("projects", "variables_json", "ALTER TABLE projects ADD COLUMN variables_json JSON NULL"),
+            ("projects", "variables_encrypted", "ALTER TABLE projects ADD COLUMN variables_encrypted TEXT NULL"),
+            ("api_cases", "datasets_json", "ALTER TABLE api_cases ADD COLUMN datasets_json JSON NULL"),
+            ("api_cases", "mock_enabled", "ALTER TABLE api_cases ADD COLUMN mock_enabled BOOLEAN NOT NULL DEFAULT 0"),
+            ("api_cases", "mock_config_json", "ALTER TABLE api_cases ADD COLUMN mock_config_json JSON NULL"),
+            ("environments", "auth_config_encrypted", "ALTER TABLE environments ADD COLUMN auth_config_encrypted TEXT NULL"),
+            ("environments", "variables_encrypted", "ALTER TABLE environments ADD COLUMN variables_encrypted TEXT NULL"),
+            ("test_plan_runs", "share_token", "ALTER TABLE test_plan_runs ADD COLUMN share_token VARCHAR(64) NULL"),
+            ("defects", "defect_type", "ALTER TABLE defects ADD COLUMN defect_type VARCHAR(20) NULL DEFAULT 'FUNCTION'"),
+            ("defects", "reproducibility", "ALTER TABLE defects ADD COLUMN reproducibility VARCHAR(20) NULL DEFAULT 'ALWAYS'"),
+            ("defects", "found_version", "ALTER TABLE defects ADD COLUMN found_version VARCHAR(80) NULL"),
+            ("defects", "fixed_version", "ALTER TABLE defects ADD COLUMN fixed_version VARCHAR(80) NULL"),
+            ("defects", "module", "ALTER TABLE defects ADD COLUMN module VARCHAR(120) NULL"),
+            ("defects", "resolution", "ALTER TABLE defects ADD COLUMN resolution TEXT NULL"),
+            ("defects", "assignees_json", "ALTER TABLE defects ADD COLUMN assignees_json JSON NULL"),
+            ("defects", "cc_json", "ALTER TABLE defects ADD COLUMN cc_json JSON NULL"),
+            ("defects", "tags_json", "ALTER TABLE defects ADD COLUMN tags_json JSON NULL"),
+            ("defects", "due_date", "ALTER TABLE defects ADD COLUMN due_date DATETIME NULL"),
+            ("requirements", "assignees_json", "ALTER TABLE requirements ADD COLUMN assignees_json JSON NULL"),
+            ("tasks", "assignees_json", "ALTER TABLE tasks ADD COLUMN assignees_json JSON NULL"),
         ]
         for table_name, column_name, ddl in extra_columns:
             add_column_if_missing(connection, table_name, column_name, ddl)
+
+        migrate_json_secret_column(connection, "projects", "variables_json", "variables_encrypted")
+        migrate_json_secret_column(connection, "environments", "variables_json", "variables_encrypted")
 
         create_index_if_missing(
             connection,
@@ -259,6 +391,11 @@ def ensure_schema(db_engine) -> list[str]:
             connection,
             "idx_test_runs_plan_run_id",
             "CREATE INDEX IF NOT EXISTS idx_test_runs_plan_run_id ON test_runs(plan_run_id)",
+        )
+        create_index_if_missing(
+            connection,
+            "idx_test_runs_batch_run_id",
+            "CREATE INDEX IF NOT EXISTS idx_test_runs_batch_run_id ON test_runs(batch_run_id)",
         )
         create_index_if_missing(
             connection,
@@ -294,6 +431,11 @@ def ensure_schema(db_engine) -> list[str]:
             connection,
             "idx_case_generation_v2_jobs_active_attempt",
             "CREATE INDEX IF NOT EXISTS idx_case_generation_v2_jobs_active_attempt ON case_generation_v2_jobs(active_attempt_id)",
+        )
+        create_index_if_missing(
+            connection,
+            "idx_test_plan_runs_share_token",
+            "CREATE INDEX IF NOT EXISTS idx_test_plan_runs_share_token ON test_plan_runs(share_token)",
         )
 
     return schema_changes

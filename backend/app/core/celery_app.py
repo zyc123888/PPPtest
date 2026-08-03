@@ -27,4 +27,11 @@ celery_app.conf.update(
         "app.tasks.executions.*": {"queue": "execution"},
     },
     broker_transport_options={"visibility_timeout": 7500},
+    beat_schedule={
+        "scan-scheduled-plans": {
+            "task": "app.tasks.scan_scheduled_plans",
+            "schedule": 60.0,
+            "options": {"queue": "execution"},
+        },
+    },
 )

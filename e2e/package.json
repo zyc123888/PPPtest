@@ -3,10 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "playwright test --reporter=line"
+    "test": "playwright test --reporter=line",
+    "test:ai": "playwright test -c playwright.midscene.config.js",
+    "midscene:verify": "npx @midscene/cli@latest model verify"
   },
   "devDependencies": {
-    "@playwright/test": "^1.54.0"
+    "@midscene/web": "^1.10.8",
+    "@playwright/test": "^1.54.0",
+    "dotenv": "^17.4.2"
   }
 }
-

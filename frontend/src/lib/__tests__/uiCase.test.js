@@ -31,8 +31,39 @@ describe('UI case workflow helpers', () => {
     const assertion = createUiAssertion('url_contains')
 
     expect(validateUiWorkflow([step], [assertion])).toEqual([
-      '步骤 1 缺少选择器',
+      '步骤 1 缺少语义目标或选择器',
       '断言 1 缺少期望值'
+    ])
+  })
+
+  it('accepts and serializes semantic targets without selectors', () => {
+    const step = {
+      ...createUiStep('click'),
+      target: '登录按钮',
+      role: 'button',
+      accessible_name: '登录'
+    }
+
+    expect(validateUiWorkflow([step], [])).toEqual([])
+    expect(serializeUiSteps([step])).toEqual([
+      {
+        action: 'click',
+        target: '登录按钮',
+        role: 'button',
+        accessible_name: '登录'
+      }
+    ])
+  })
+
+  it('supports visual assertions', () => {
+    const assertion = {
+      ...createUiAssertion('visual'),
+      target: '登录表单',
+      value: '表单完整可见且没有遮挡'
+    }
+    expect(validateUiWorkflow([], [assertion])).toEqual([])
+    expect(serializeUiAssertions([assertion])).toEqual([
+      { type: 'visual', target: '登录表单', value: '表单完整可见且没有遮挡' }
     ])
   })
 

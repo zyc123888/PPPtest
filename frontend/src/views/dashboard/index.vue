@@ -74,24 +74,9 @@
         </div>
 
         <div class="trend-body">
-          <svg class="trend-chart" viewBox="0 0 640 220" preserveAspectRatio="none" aria-label="最近 7 天成功率趋势">
-            <polyline class="trend-chart__axis" points="42,20 42,200 604,200" />
-            <polyline class="trend-chart__grid" points="42,60 604,60" />
-            <polyline class="trend-chart__grid" points="42,100 604,100" />
-            <polyline class="trend-chart__grid" points="42,140 604,140" />
-            <polyline class="trend-chart__grid" points="42,175 604,175" />
-            <polyline class="trend-chart__line" :points="trendPolyline" />
-            <circle
-              v-for="point in trendPoints"
-              :key="point.key"
-              class="trend-chart__point"
-              :cx="point.x"
-              :cy="point.y"
-              r="3.5"
-            />
-          </svg>
+          <TrendChart class="trend-frame" :data="trendSeries" :height="220" aria-label="最近 7 天成功率趋势" />
           <div class="trend-legend">
-            <div v-for="point in trendPoints" :key="point.key" class="trend-legend__item">
+            <div v-for="point in trendData" :key="point.key" class="trend-legend__item">
               <span class="legend-date">{{ point.label }}</span>
               <strong class="legend-value">{{ point.value }}%</strong>
             </div>
@@ -178,6 +163,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
+import TrendChart from '@/components/TrendChart.vue'
 
 const summary = ref({
   workspace_count: 0,
@@ -344,23 +330,14 @@ const trendData = computed(() => {
   }))
 })
 
-const trendPoints = computed(() => {
-  const left = 42
-  const right = 604
-  const top = 24
-  const bottom = 200
-  const width = right - left
-  const height = bottom - top
-
-  return trendData.value.map((item, index) => {
-    const x = left + (trendData.value.length === 1 ? 0 : (width * index) / (trendData.value.length - 1))
-    const ratio = Math.max(0, Math.min(100, item.value)) / 100
-    const y = bottom - ratio * height
-    return { ...item, x, y }
-  })
-})
-
-const trendPolyline = computed(() => trendPoints.value.map((point) => `${point.x},${point.y}`).join(' '))
+const trendSeries = computed(() =>
+  trendData.value.map((item) => ({
+    key: item.key,
+    label: item.label,
+    value: item.value,
+    title: `${item.label} · 成功率 ${item.value}% · ${item.success}/${item.total}`
+  }))
+)
 
 const trendOverview = computed(() => {
   const latest = trendData.value.at(-1)?.value || 0
@@ -706,40 +683,10 @@ onBeforeUnmount(() => {
   gap: 10px;
 }
 
-.trend-chart {
-  width: 100%;
-  height: 240px;
+.trend-frame {
   border: 1px solid rgba(129, 140, 248, 0.12);
   border-radius: 12px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 255, 0.98));
-  display: block;
-}
-
-.trend-chart__axis {
-  fill: none;
-  stroke: #94a3b8;
-  stroke-width: 1;
-}
-
-.trend-chart__grid {
-  fill: none;
-  stroke: #e2e8f0;
-  stroke-dasharray: 3 6;
-  stroke-width: 1;
-}
-
-.trend-chart__line {
-  fill: none;
-  stroke: #0f766e;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 2.5;
-}
-
-.trend-chart__point {
-  fill: #0f766e;
-  stroke: #ffffff;
-  stroke-width: 1.5;
 }
 
 .trend-legend {

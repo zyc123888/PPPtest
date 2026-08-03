@@ -1,141 +1,265 @@
 <template>
-  <div class="app-page">
+  <div class="app-page api-case-page">
     <PageHeader title="接口用例" subtitle="维护 API 用例并投递执行任务">
       <template #actions>
-        <el-button v-if="canTest" type="primary" @click="handleCreate">新增接口用例</el-button>
+        <el-tooltip content="批量执行记录" placement="bottom">
+          <el-button :icon="Tickets" aria-label="批量执行记录" @click="openBatchHistory" />
+        </el-tooltip>
+        <el-tooltip content="导入接口用例" placement="bottom">
+          <el-button :icon="Upload" aria-label="导入接口用例" @click="openImportDialog" />
+        </el-tooltip>
+        <el-tooltip v-if="canTest" content="导入 OpenAPI / Postman" placement="bottom">
+          <el-button :icon="Connection" aria-label="导入 OpenAPI / Postman" @click="openSpecImportDialog" />
+        </el-tooltip>
+        <el-tooltip content="导出当前结果" placement="bottom">
+          <el-button :icon="Download" aria-label="导出当前结果" @click="exportCurrentCases" />
+        </el-tooltip>
+        <el-tooltip content="刷新" placement="bottom">
+          <el-button :icon="Refresh" aria-label="刷新接口用例" :loading="listLoading" @click="refreshAll" />
+        </el-tooltip>
+        <el-button v-if="canTest" type="primary" :icon="Plus" @click="handleCreate">新增接口用例</el-button>
       </template>
     </PageHeader>
 
-    <div class="api-hero section-gap">
-      <el-card class="page-card api-hero__main" shadow="never">
-        <div class="api-hero__kicker">Request Builder</div>
-        <div class="api-hero__title">接口构建器</div>
-        <div class="api-hero__subtitle">
-          Method、Path、Headers、Auth、Body、Assertion 按 Postman 习惯拆开，左侧编辑、右侧调试、下方元信息。
+    <section class="summary-strip section-gap" aria-label="接口用例概览">
+      <div class="summary-item">
+        <span class="summary-item__icon is-primary"><el-icon><DocumentCopy /></el-icon></span>
+        <div>
+          <span class="summary-item__label">用例总数</span>
+          <strong>{{ stats.total }}</strong>
         </div>
-      </el-card>
-      <el-card class="page-card api-hero__stat" shadow="never">
-        <el-statistic title="接口用例" :value="filteredList.length" />
-      </el-card>
-      <el-card class="page-card api-hero__stat" shadow="never">
-        <el-statistic title="支持 Body 的方法" :value="bodyMethodCount" />
-      </el-card>
-      <el-card class="page-card api-hero__stat" shadow="never">
-        <el-statistic title="当前筛选方法" :value="filters.method || 'ALL'" />
-      </el-card>
-      <el-card class="page-card api-hero__stat" shadow="never">
-        <el-statistic title="最近更新时间" :value="list.length ? Math.max(...list.map((item) => item.id)) : 0" />
-      </el-card>
-    </div>
+      </div>
+      <div class="summary-item">
+        <span class="summary-item__icon is-success"><el-icon><CircleCheck /></el-icon></span>
+        <div>
+          <span class="summary-item__label">启用</span>
+          <strong>{{ stats.active }}</strong>
+        </div>
+      </div>
+      <div class="summary-item">
+        <span class="summary-item__icon is-review"><el-icon><Finished /></el-icon></span>
+        <div>
+          <span class="summary-item__label">已评审</span>
+          <strong>{{ stats.approved }}</strong>
+        </div>
+      </div>
+      <div class="summary-item">
+        <span class="summary-item__icon is-rate"><el-icon><TrendCharts /></el-icon></span>
+        <div>
+          <span class="summary-item__label">最近成功率</span>
+          <strong>{{ recentSuccessRate }}</strong>
+        </div>
+      </div>
+    </section>
 
-    <el-card class="page-card section-gap" shadow="never">
-      <el-form :inline="true" class="query-form" label-position="top" :model="filters">
-        <el-form-item label="所属项目">
-          <el-select v-model="filters.projectId" clearable placeholder="全部" style="width: 200px">
+    <div class="case-layout">
+      <section class="workspace-panel case-layout__tree">
+        <FolderTree
+          v-model="selectedFolder"
+          :folders="folderTree.folders"
+          :total="folderTree.total"
+          :ungrouped="folderTree.ungrouped"
+          :can-rename="canTest"
+          @rename="handleFolderRename"
+          @refresh="loadFolders"
+        />
+      </section>
+
+      <section class="workspace-panel case-layout__main">
+        <div class="filter-bar">
+          <el-button class="tree-drawer-trigger" :icon="Files" aria-label="打开用例目录" @click="treeDrawerVisible = true" />
+          <el-select v-model="filters.projectId" clearable placeholder="全部项目" class="filter-control">
             <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
           </el-select>
+          <el-select v-model="filters.method" clearable placeholder="全部方法" class="filter-control filter-control--short">
+            <el-option v-for="item in methodOptions" :key="item" :label="item" :value="item" />
+          </el-select>
+          <el-select v-model="filters.status" clearable placeholder="全部状态" class="filter-control filter-control--short">
+            <el-option label="启用" value="ACTIVE" />
+            <el-option label="停用" value="DISABLED" />
+          </el-select>
+          <el-select v-model="filters.priority" clearable placeholder="全部优先级" class="filter-control filter-control--short">
+            <el-option v-for="item in ['P0', 'P1', 'P2']" :key="item" :label="item" :value="item" />
+          </el-select>
+          <el-select v-model="filters.reviewStatus" clearable placeholder="全部评审" class="filter-control filter-control--short">
+            <el-option label="草稿" value="DRAFT" />
+            <el-option label="评审中" value="IN_REVIEW" />
+            <el-option label="已通过" value="APPROVED" />
+            <el-option label="已拒绝" value="REJECTED" />
+          </el-select>
+          <el-input v-model="filters.keyword" clearable :prefix-icon="Search" placeholder="搜索名称、分组或路径" class="filter-search" />
+          <span class="filter-result">{{ total }} 条</span>
+        </div>
+
+        <div v-if="selectedRows.length" class="batch-bar">
+          <span class="batch-bar__count">已选 {{ selectedRows.length }} 条</span>
+          <el-button v-if="canTest" type="primary" size="small" :icon="VideoPlay" @click="openBatchRun">批量执行</el-button>
+          <el-button v-if="canTest" size="small" :icon="EditPen" @click="openBatchEdit">批量修改</el-button>
+          <el-button v-if="canAdmin" type="danger" plain size="small" :icon="Delete" @click="handleBatchDelete">批量删除</el-button>
+          <el-button text size="small" @click="clearSelection">取消选择</el-button>
+        </div>
+
+        <el-table
+          ref="tableRef"
+          v-loading="listLoading"
+          :data="list"
+          class="case-table"
+          row-key="id"
+          @row-dblclick="(row) => openCaseDetail(row)"
+          @selection-change="handleSelectionChange"
+        >
+          <el-table-column type="selection" width="42" :reserve-selection="true" />
+          <el-table-column label="序号" width="60" align="center">
+            <template #default="scope">{{ total - ((page - 1) * pageSize + scope.$index) }}</template>
+          </el-table-column>
+          <el-table-column label="用例" min-width="230">
+            <template #default="scope">
+              <button class="case-name" type="button" @click="openCaseDetail(scope.row)">{{ scope.row.name }}</button>
+              <div class="case-meta">
+                <span>{{ scope.row.folder_path || '未分组' }}</span>
+                <span>v{{ scope.row.version_no }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="项目" width="120" show-overflow-tooltip>
+            <template #default="scope">{{ projectMap[scope.row.project_id] || scope.row.project_id }}</template>
+          </el-table-column>
+          <el-table-column label="方法" width="86" align="center">
+            <template #default="scope"><el-tag size="small" :type="methodType(scope.row.method)">{{ scope.row.method }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="路径" prop="path" min-width="200" show-overflow-tooltip />
+          <el-table-column label="优先级" width="70" align="center">
+            <template #default="scope"><el-tag size="small" :type="priorityTag(scope.row.priority)">{{ scope.row.priority }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="状态" width="74" align="center">
+            <template #default="scope"><el-tag size="small" :type="scope.row.status === 'ACTIVE' ? 'success' : 'info'">{{ caseStatusText(scope.row.status) }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="评审" width="86" align="center">
+            <template #default="scope">
+              <el-tooltip :disabled="!scope.row.reviewed_by" placement="top" :content="reviewTooltip(scope.row)">
+                <el-tag size="small" effect="plain" :type="reviewTag(scope.row.review_status)">{{ reviewText(scope.row.review_status) }}</el-tag>
+              </el-tooltip>
+            </template>
+          </el-table-column>
+          <el-table-column label="最近执行" width="126">
+            <template #default="scope">
+              <div v-if="latestRunMap[scope.row.id]" class="last-run">
+                <el-tag size="small" :type="executionStatusTag(latestRunMap[scope.row.id].status)">{{ executionStatusText(latestRunMap[scope.row.id].status) }}</el-tag>
+                <span>{{ formatShortTime(latestRunMap[scope.row.id].created_at) }}</span>
+              </div>
+              <span v-else class="muted">未执行</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" align="right" width="164" fixed="right">
+            <template #default="scope">
+              <div class="row-actions">
+                <el-tooltip content="查看详情" placement="top"><el-button circle size="small" :icon="View" aria-label="查看接口用例" @click="openCaseDetail(scope.row)" /></el-tooltip>
+                <el-tooltip v-if="canTest" content="编辑" placement="top"><el-button circle size="small" :icon="Edit" aria-label="编辑接口用例" @click="handleEdit(scope.row)" /></el-tooltip>
+                <el-tooltip v-if="canTest" content="立即执行" placement="top"><el-button circle size="small" type="primary" :icon="VideoPlay" aria-label="执行接口用例" @click="handleRun(scope.row)" /></el-tooltip>
+                <el-tooltip v-if="canAdmin" content="删除" placement="top"><el-button circle size="small" type="danger" plain :icon="Delete" aria-label="删除接口用例" @click="handleDelete(scope.row)" /></el-tooltip>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <div class="mobile-cards">
+          <article v-for="(item, index) in list" :key="item.id" class="mobile-case">
+            <div class="mobile-case__title">
+              <span class="case-sequence">#{{ total - ((page - 1) * pageSize + index) }}</span>
+              <button class="case-name" type="button" @click="openCaseDetail(item)">{{ item.name }}</button>
+            </div>
+            <div class="mobile-case__tags">
+              <el-tag size="small" :type="methodType(item.method)">{{ item.method }}</el-tag>
+              <el-tag size="small" :type="priorityTag(item.priority)">{{ item.priority }}</el-tag>
+              <el-tag size="small" :type="item.status === 'ACTIVE' ? 'success' : 'info'">{{ caseStatusText(item.status) }}</el-tag>
+              <el-tag size="small" effect="plain" :type="reviewTag(item.review_status)">{{ reviewText(item.review_status) }}</el-tag>
+            </div>
+            <div class="mobile-case__url">{{ item.method }} {{ item.path }}</div>
+            <div class="row-actions">
+              <el-button size="small" :icon="View" @click="openCaseDetail(item)">详情</el-button>
+              <el-button v-if="canTest" size="small" type="primary" :icon="VideoPlay" @click="handleRun(item)">执行</el-button>
+            </div>
+          </article>
+        </div>
+
+        <div class="table-pagination">
+          <el-pagination
+            :current-page="page"
+            :page-size="pageSize"
+            layout="total, sizes, prev, pager, next"
+            :total="total"
+            :page-sizes="[10, 20, 50]"
+            @update:current-page="page = $event"
+            @update:page-size="handlePageSizeChange"
+          />
+        </div>
+      </section>
+    </div>
+
+    <el-drawer v-model="treeDrawerVisible" title="用例目录" direction="ltr" size="min(300px, 86vw)">
+      <FolderTree
+        :model-value="selectedFolder"
+        :folders="folderTree.folders"
+        :total="folderTree.total"
+        :ungrouped="folderTree.ungrouped"
+        :can-rename="canTest"
+        @update:model-value="(value) => { selectedFolder = value; treeDrawerVisible = false }"
+        @rename="handleFolderRename"
+        @refresh="loadFolders"
+      />
+    </el-drawer>
+
+    <BatchRunDialog
+      v-model="batchRunVisible"
+      title="批量执行接口用例"
+      :environments="batchEnvironments"
+      :count="selectedRows.length"
+      :submitting="batchSubmitting"
+      @submit="submitBatchRun"
+    />
+
+    <BatchRunDrawer
+      v-model="batchDrawerVisible"
+      case-type="API"
+      :batch-id="activeBatchId"
+      :project-id="filters.projectId || null"
+      :case-name-map="caseNameCache"
+      :can-test="canTest"
+      @open-run="handleOpenRunFromBatch"
+      @finished="getList"
+    />
+
+    <el-dialog v-model="batchEditVisible" title="批量修改用例" width="520px">
+      <p class="batch-edit-hint">将对已选的 <strong>{{ selectedRows.length }}</strong> 条用例应用以下修改；留空的字段不会变更。</p>
+      <el-form label-position="top" :model="batchEditForm">
+        <el-form-item label="移动到目录">
+          <el-tree-select
+            v-model="batchEditForm.folder_path"
+            :data="folderSelectOptions"
+            check-strictly
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            placeholder="选择已有目录或输入新路径"
+            style="width: 100%"
+          />
         </el-form-item>
-        <el-form-item label="请求方法">
-          <el-select v-model="filters.method" clearable placeholder="全部" style="width: 160px">
-            <el-option label="GET" value="GET" />
-            <el-option label="POST" value="POST" />
-            <el-option label="PUT" value="PUT" />
-            <el-option label="DELETE" value="DELETE" />
+        <el-form-item label="优先级">
+          <el-select v-model="batchEditForm.priority" clearable placeholder="不修改" style="width: 100%">
+            <el-option v-for="item in ['P0', 'P1', 'P2']" :key="item" :label="item" :value="item" />
           </el-select>
         </el-form-item>
-        <el-form-item label="关键字">
-          <el-input v-model="filters.keyword" clearable placeholder="名称/路径" style="width: 260px" />
-        </el-form-item>
-        <el-form-item label=" " class="query-actions">
-          <el-button type="primary" @click="handleSearch">查询</el-button>
-          <el-button @click="handleReset">重置</el-button>
+        <el-form-item label="用例状态">
+          <el-select v-model="batchEditForm.status" clearable placeholder="不修改" style="width: 100%">
+            <el-option label="启用" value="ACTIVE" />
+            <el-option label="停用" value="DISABLED" />
+          </el-select>
         </el-form-item>
       </el-form>
-    </el-card>
-
-    <el-card class="page-card" shadow="never">
-      <div class="toolbar section-gap">
-        <div />
-        <div class="toolbar-right">
-          <el-dropdown>
-            <el-button>
-              更多
-              <el-icon><ArrowDown /></el-icon>
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item disabled>导入</el-dropdown-item>
-                <el-dropdown-item disabled>导出</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-          <el-button @click="columnConfigVisible = true">列设置</el-button>
-          <el-button @click="getList">刷新</el-button>
-        </div>
-      </div>
-
-      <el-table v-loading="listLoading" :data="pagedList" border>
-        <el-table-column v-if="visibleColumns.includes('id')" label="ID" prop="id" align="center" width="80" />
-        <el-table-column v-if="visibleColumns.includes('project')" label="项目" width="160" show-overflow-tooltip>
-          <template #default="scope">
-            {{ projectMap[scope.row.project_id] || scope.row.project_id }}
-          </template>
-        </el-table-column>
-        <el-table-column v-if="visibleColumns.includes('name')" label="名称" prop="name" min-width="180" show-overflow-tooltip />
-        <el-table-column v-if="visibleColumns.includes('method')" label="方法" prop="method" width="110" align="center">
-          <template #default="scope">
-            <el-tag size="small" :type="methodType(scope.row.method)">{{ scope.row.method }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column v-if="visibleColumns.includes('path')" label="路径" prop="path" min-width="220" show-overflow-tooltip />
-        <el-table-column v-if="visibleColumns.includes('priority')" label="优先级" prop="priority" width="100" align="center" />
-        <el-table-column v-if="visibleColumns.includes('version')" label="版本" prop="version_no" width="100" align="center" />
-        <el-table-column v-if="visibleColumns.includes('review')" label="评审" prop="review_status" width="110" align="center" />
-        <el-table-column v-if="visibleColumns.includes('status')" label="状态" prop="status" width="100" align="center" />
-        <el-table-column v-if="visibleColumns.includes('expected')" label="预期状态码" prop="expected_status" width="120" align="center" />
-        <el-table-column label="操作" align="center" width="280">
-          <template #default="scope">
-            <el-button v-if="canTest" size="small" @click="handleEdit(scope.row)">编辑</el-button>
-            <el-button v-if="canTest" size="small" type="primary" @click="handleRun(scope.row)">立即执行</el-button>
-            <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-
-      <div class="mobile-cards">
-        <div v-for="item in pagedList" :key="item.id" class="mobile-card">
-          <div class="mobile-card-title">{{ item.name }}</div>
-          <div class="mobile-card-meta">项目：{{ projectMap[item.project_id] || item.project_id }}</div>
-          <div class="mobile-card-meta">方法：{{ item.method }} · {{ item.expected_status }}</div>
-          <div class="mobile-card-desc">{{ item.path }}</div>
-          <div class="mobile-card-actions">
-            <el-button v-if="canTest" size="small" type="primary" @click="handleRun(item)">立即执行</el-button>
-            <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(item)">删除</el-button>
-          </div>
-        </div>
-      </div>
-
-      <div class="table-pagination">
-        <el-pagination
-          layout="total, sizes, prev, pager, next"
-          :total="filteredList.length"
-          :page-sizes="[10, 20, 50]"
-          v-model:page-size="pageSize"
-          v-model:current-page="page"
-        />
-      </div>
-    </el-card>
-
-    <el-dialog v-model="columnConfigVisible" title="列显示设置" width="400px">
-      <div class="column-config-list">
-        <div v-for="col in allColumns" :key="col.key" class="column-config-item">
-          <el-checkbox v-model="col.visible" @change="saveColumnConfig">
-            {{ col.label }}
-          </el-checkbox>
-        </div>
-      </div>
       <template #footer>
-        <el-button @click="columnConfigVisible = false">确定</el-button>
+        <el-button @click="batchEditVisible = false">取消</el-button>
+        <el-button type="primary" :loading="batchEditSubmitting" @click="submitBatchEdit">保存修改</el-button>
       </template>
     </el-dialog>
 
@@ -424,7 +548,40 @@
                   <el-empty v-else-if="methodSupportsBody" description="none：不发送请求体" :image-size="72" />
                 </el-tab-pane>
                 <el-tab-pane label="Assertions" name="assertions">
-                  <el-form-item label="断言 JSON" prop="assertions_text">
+                  <div class="request-editor-toolbar">
+                    <el-radio-group :model-value="temp.assertions_mode" size="small" @update:model-value="handleAssertionsModeChange">
+                      <el-radio-button label="form">结构化</el-radio-button>
+                      <el-radio-button label="json">JSON 高级</el-radio-button>
+                    </el-radio-group>
+                    <el-button v-if="temp.assertions_mode === 'form'" size="small" @click="addAssertionRow">添加断言</el-button>
+                  </div>
+                  <template v-if="temp.assertions_mode === 'form'">
+                    <el-alert
+                      v-if="!temp.assertion_rows.length"
+                      title="未配置断言时，执行仅校验期望状态码"
+                      type="info"
+                      :closable="false"
+                      class="section-gap"
+                    />
+                    <div v-for="(row, index) in temp.assertion_rows" :key="index" class="assertion-row">
+                      <el-select v-model="row.type" class="assertion-type" @change="onAssertionTypeChange(row)">
+                        <el-option v-for="opt in assertionTypeOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+                      </el-select>
+                      <el-input
+                        v-if="assertionNeedsExpression(row.type)"
+                        v-model="row.expression"
+                        class="assertion-expression"
+                        :placeholder="row.type === 'json_path' ? '$.data.id' : 'content-type'"
+                      />
+                      <el-select v-if="assertionNeedsOperator(row.type)" v-model="row.operator" class="assertion-operator">
+                        <el-option v-for="opt in operatorOptionsFor(row.type)" :key="opt.value" :label="opt.label" :value="opt.value" />
+                      </el-select>
+                      <el-input v-if="assertionNeedsExpected(row)" v-model="row.expected" class="assertion-expected" placeholder="期望值" />
+                      <el-checkbox v-if="row.type === 'body_contains'" v-model="row.negate">取反</el-checkbox>
+                      <el-button size="small" type="danger" text @click="temp.assertion_rows.splice(index, 1)">移除</el-button>
+                    </div>
+                  </template>
+                  <el-form-item v-else label="断言 JSON" prop="assertions_text">
                     <el-input
                       v-model="temp.assertions_text"
                       type="textarea"
@@ -432,6 +589,144 @@
                       placeholder='[{"type": "status_code", "expected": 200}]'
                     />
                   </el-form-item>
+                </el-tab-pane>
+                <el-tab-pane label="提取变量" name="extractors">
+                  <el-alert
+                    title="从响应中提取变量：执行结果与调试面板会展示提取值；场景步骤中提取的变量可被后续步骤以 {{变量名}} 引用。"
+                    type="info"
+                    :closable="false"
+                    class="section-gap"
+                  />
+                  <div class="request-editor-toolbar">
+                    <span>响应 → 变量</span>
+                    <el-button size="small" @click="addExtractorRow">添加提取器</el-button>
+                  </div>
+                  <el-table :data="temp.extractor_rows" border size="small">
+                    <el-table-column label="变量名" min-width="130">
+                      <template #default="scope">
+                        <el-input v-model="scope.row.name" placeholder="token" />
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="来源" width="140">
+                      <template #default="scope">
+                        <el-select v-model="scope.row.source">
+                          <el-option label="JSONPath" value="json_path" />
+                          <el-option label="响应头" value="header" />
+                          <el-option label="正则" value="regex" />
+                          <el-option label="状态码" value="status_code" />
+                        </el-select>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="表达式" min-width="200">
+                      <template #default="scope">
+                        <el-input
+                          v-model="scope.row.expression"
+                          :disabled="scope.row.source === 'status_code'"
+                          :placeholder="extractorPlaceholder(scope.row.source)"
+                        />
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="操作" width="90" align="center">
+                      <template #default="scope">
+                        <el-button size="small" type="danger" @click="temp.extractor_rows.splice(scope.$index, 1)">移除</el-button>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </el-tab-pane>
+                <el-tab-pane :label="scenarioTabLabel" name="scenario">
+                  <el-alert
+                    title="配置场景步骤后，执行时按步骤顺序依次发送请求（失败即停），忽略上方单请求的 Params/Body/Assertions 配置；步骤提取的变量可在后续步骤通过 {{变量名}} 引用。"
+                    type="warning"
+                    :closable="false"
+                    class="section-gap"
+                  />
+                  <div class="request-editor-toolbar">
+                    <span>共 {{ temp.scenario_steps.length }} 个步骤</span>
+                    <el-button size="small" @click="addScenarioStep">添加步骤</el-button>
+                  </div>
+                  <el-empty v-if="!temp.scenario_steps.length" description="未配置步骤：按单请求模式执行" :image-size="72" />
+                  <div v-for="(step, index) in temp.scenario_steps" :key="index" class="scenario-step-card">
+                    <div class="scenario-step-header">
+                      <el-tag size="small" effect="plain">步骤 {{ index + 1 }}</el-tag>
+                      <el-input v-model="step.name" size="small" placeholder="步骤名称，如：登录取 token" class="scenario-step-name" />
+                      <div class="scenario-step-actions">
+                        <el-button size="small" text :disabled="index === 0" @click="moveScenarioStep(index, -1)">上移</el-button>
+                        <el-button size="small" text :disabled="index === temp.scenario_steps.length - 1" @click="moveScenarioStep(index, 1)">下移</el-button>
+                        <el-button size="small" type="danger" text @click="temp.scenario_steps.splice(index, 1)">删除</el-button>
+                      </div>
+                    </div>
+                    <div class="scenario-step-line">
+                      <el-select v-model="step.method" size="small" class="scenario-step-method">
+                        <el-option v-for="m in methodOptions" :key="m" :label="m" :value="m" />
+                      </el-select>
+                      <el-input v-model="step.path" size="small" placeholder="/api/v1/login，可引用 {{变量名}}" />
+                      <el-input-number v-model="step.expected_status" size="small" :min="100" :max="599" controls-position="right" class="scenario-step-status" />
+                    </div>
+                    <el-collapse class="scenario-step-advanced">
+                      <el-collapse-item :name="'adv-' + index" title="Headers / Body / 断言 / 提取（JSON）">
+                        <el-form-item label="Headers JSON">
+                          <el-input v-model="step.headers_text" type="textarea" :rows="2" placeholder='{"accept": "application/json"}' />
+                        </el-form-item>
+                        <el-form-item label="Body JSON">
+                          <el-input v-model="step.body_text" type="textarea" :rows="3" placeholder='{"username": "{{username}}"}' />
+                        </el-form-item>
+                        <el-form-item label="断言 JSON 数组">
+                          <el-input v-model="step.assertions_text" type="textarea" :rows="3" placeholder='[{"type": "json_path", "expression": "$.token", "operator": "exists"}]' />
+                        </el-form-item>
+                        <el-form-item label="提取器 JSON 数组">
+                          <el-input v-model="step.extractors_text" type="textarea" :rows="2" placeholder='[{"name": "token", "source": "json_path", "expression": "$.token"}]' />
+                        </el-form-item>
+                      </el-collapse-item>
+                    </el-collapse>
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane :label="dataDrivenTabLabel" name="datasets">
+                  <div class="request-editor-toolbar">
+                    <el-tooltip
+                      placement="top"
+                      content="数据驱动：填写多组变量后，执行时将按组循环发送同一用例，每组变量可在 Path/Headers/Body 中以 {{变量名}} 引用。任一组失败则用例整体失败。"
+                    >
+                      <span>多组数据参数化 <el-icon><QuestionFilled /></el-icon></span>
+                    </el-tooltip>
+                  </div>
+                  <el-form-item label="数据集 JSON">
+                    <el-input
+                      v-model="temp.datasets_text"
+                      type="textarea"
+                      :rows="8"
+                      placeholder='[
+  { "name": "普通用户", "data": { "username": "alice", "pwd": "123456" } },
+  { "name": "管理员", "data": { "username": "admin", "pwd": "admin123" } }
+]'
+                    />
+                  </el-form-item>
+                  <div class="editor-hint">留空则按普通单次执行；配置后将忽略上方单请求的场景步骤，按数据组逐次执行。</div>
+                </el-tab-pane>
+                <el-tab-pane label="Mock" name="mock">
+                  <div class="request-editor-toolbar">
+                    <el-tooltip
+                      placement="top"
+                      content="开启后，可通过 /api/v1/mock/{project_id}{path} 按本用例的 method+path 返回下方预设响应，无需登录。"
+                    >
+                      <span>轻量 Mock 响应 <el-icon><QuestionFilled /></el-icon></span>
+                    </el-tooltip>
+                    <el-switch v-model="temp.mock_enabled" active-text="启用 Mock" />
+                  </div>
+                  <template v-if="temp.mock_enabled">
+                    <el-form-item label="状态码">
+                      <el-input-number v-model="temp.mock_status_code" :min="100" :max="599" controls-position="right" />
+                      <span class="editor-hint" style="margin-left: 12px">延迟(ms)</span>
+                      <el-input-number v-model="temp.mock_delay_ms" :min="0" :max="10000" :step="100" controls-position="right" style="margin-left: 8px" />
+                    </el-form-item>
+                    <el-form-item label="响应头 JSON">
+                      <el-input v-model="temp.mock_headers_text" type="textarea" :rows="3" placeholder='{"Content-Type": "application/json"}' />
+                    </el-form-item>
+                    <el-form-item label="响应体">
+                      <el-input v-model="temp.mock_body_text" type="textarea" :rows="6" placeholder='{"code": 0, "data": {"id": 1}}' />
+                    </el-form-item>
+                    <div class="editor-hint">响应体为合法 JSON 时以 application/json 返回，否则作为纯文本返回。</div>
+                  </template>
+                  <el-empty v-else description="未启用 Mock" :image-size="72" />
                 </el-tab-pane>
               </el-tabs>
             </div>
@@ -456,6 +751,13 @@
                     <el-tag :type="debugResponse.response.status_code < 400 ? 'success' : 'danger'">
                       {{ debugResponse.response.status_code }}
                     </el-tag>
+                    <el-tag
+                      v-if="debugResponse.assertion_passed !== null && debugResponse.assertion_passed !== undefined"
+                      :type="debugResponse.assertion_passed ? 'success' : 'danger'"
+                      effect="plain"
+                    >
+                      {{ debugResponse.assertion_passed ? '断言通过' : '断言失败' }}
+                    </el-tag>
                     <span>{{ debugResponse.duration_ms }} ms</span>
                     <span>{{ debugResponse.response.size }} bytes</span>
                     <span>{{ debugResponse.request.method }} {{ debugResponse.request.url }}</span>
@@ -463,6 +765,25 @@
                   <el-tabs v-model="debugResponseTab">
                     <el-tab-pane label="Body" name="body">
                       <pre class="response-pre">{{ formatDebugBody(debugResponse.response.body) }}</pre>
+                    </el-tab-pane>
+                    <el-tab-pane
+                      v-if="debugResponse.assertion_results?.length || debugResponse.extractor_results?.length"
+                      label="断言/提取"
+                      name="assertions"
+                    >
+                      <div class="debug-assertion-list">
+                        <div v-for="(item, index) in debugResponse.assertion_results" :key="'a' + index" class="debug-assertion-item">
+                          <el-tag size="small" :type="item.ok ? 'success' : 'danger'">{{ item.ok ? 'PASS' : 'FAIL' }}</el-tag>
+                          <span>{{ item.message }}</span>
+                        </div>
+                        <template v-if="debugResponse.extractor_results?.length">
+                          <el-divider content-position="left">变量提取</el-divider>
+                          <div v-for="(item, index) in debugResponse.extractor_results" :key="'e' + index" class="debug-assertion-item">
+                            <el-tag size="small" :type="item.ok ? 'success' : 'danger'">{{ item.ok ? 'PASS' : 'FAIL' }}</el-tag>
+                            <span>{{ item.message }}</span>
+                          </div>
+                        </template>
+                      </div>
                     </el-tab-pane>
                     <el-tab-pane label="Headers" name="headers">
                       <pre class="response-pre">{{ JSON.stringify(debugResponse.response.headers, null, 2) }}</pre>
@@ -500,7 +821,17 @@
                   </el-select>
                 </el-form-item>
                 <el-form-item label="目录/分组">
-                  <el-input v-model="temp.folder_path" placeholder="例如：登录模块/健康检查" />
+                  <el-tree-select
+                    v-model="temp.folder_path"
+                    :data="folderSelectOptions"
+                    check-strictly
+                    filterable
+                    allow-create
+                    default-first-option
+                    clearable
+                    placeholder="选择已有目录或输入新路径，如：登录模块/健康检查"
+                    style="width: 100%"
+                  />
                 </el-form-item>
                 <el-form-item label="优先级" prop="priority">
                   <el-select v-model="temp.priority" style="width: 100%">
@@ -515,20 +846,18 @@
                     <el-option label="DISABLED" value="DISABLED" />
                   </el-select>
                 </el-form-item>
-                <el-form-item label="评审状态">
-                  <el-select v-model="temp.review_status" style="width: 100%">
-                    <el-option label="DRAFT" value="DRAFT" />
-                    <el-option label="IN_REVIEW" value="IN_REVIEW" />
-                    <el-option label="APPROVED" value="APPROVED" />
-                    <el-option label="REJECTED" value="REJECTED" />
-                  </el-select>
+                <el-form-item label="评审状态（只读）">
+                  <div class="review-readonly">
+                    <el-tag effect="plain" :type="reviewTag(temp.review_status)">{{ reviewText(temp.review_status) }}</el-tag>
+                    <span>评审在详情页进行；内容变更会自动重置为草稿</span>
+                  </div>
                 </el-form-item>
                 <el-form-item label="当前版本">
                   <el-input v-model="temp.version_no" disabled />
                 </el-form-item>
-                <div class="meta-grid-span-2">
-                  <el-form-item label="评审备注">
-                    <el-input v-model="temp.review_note" type="textarea" :rows="3" placeholder="例如：通过接口自检，待计划回归；或填写拒绝原因" />
+                <div v-if="temp.review_note" class="meta-grid-span-2">
+                  <el-form-item label="评审意见（只读）">
+                    <p class="review-note-readonly">{{ temp.review_note }}</p>
                   </el-form-item>
                 </div>
                 <div class="meta-grid-span-2">
@@ -590,16 +919,156 @@
         <el-button type="primary" @click="submitRun">确认执行</el-button>
       </template>
     </el-dialog>
+
+    <el-drawer v-model="detailVisible" :title="currentCase ? currentCase.name : '用例详情'" size="min(720px, 96vw)" @closed="stopPolling">
+      <div v-if="currentCase" class="case-detail">
+        <el-tabs v-model="detailTab">
+          <el-tab-pane label="定义" name="definition">
+            <div class="detail-section">
+              <h4 class="drawer-title">基本信息</h4>
+              <dl class="definition-list">
+                <div><dt>请求</dt><dd><el-tag size="small" :type="methodType(currentCase.method)">{{ currentCase.method }}</el-tag> {{ currentCase.path }}</dd></div>
+                <div><dt>项目</dt><dd>{{ projectMap[currentCase.project_id] || currentCase.project_id }}</dd></div>
+                <div><dt>目录</dt><dd>{{ currentCase.folder_path || '未分组' }}</dd></div>
+                <div><dt>优先级</dt><dd><el-tag size="small" :type="priorityTag(currentCase.priority)">{{ currentCase.priority }}</el-tag></dd></div>
+                <div><dt>状态</dt><dd><el-tag size="small" :type="currentCase.status === 'ACTIVE' ? 'success' : 'info'">{{ caseStatusText(currentCase.status) }}</el-tag></dd></div>
+                <div><dt>预期状态码</dt><dd>{{ currentCase.expected_status }}</dd></div>
+                <div><dt>版本</dt><dd>v{{ currentCase.version_no }}</dd></div>
+              </dl>
+              <div class="detail-actions">
+                <el-button v-if="canTest" :icon="Edit" @click="handleEdit(currentCase)">编辑</el-button>
+                <el-button v-if="canTest" type="primary" :icon="VideoPlay" @click="handleRun(currentCase)">立即执行</el-button>
+              </div>
+            </div>
+          </el-tab-pane>
+          <el-tab-pane label="评审" name="review">
+            <ReviewPanel
+              :case-data="currentCase"
+              case-type="API"
+              :can-test="canTest"
+              :current-user-id="currentUserId"
+              @changed="refreshCurrentCase"
+            />
+          </el-tab-pane>
+          <el-tab-pane label="执行记录" name="runs">
+            <div class="detail-section">
+              <el-table :data="caseRuns" size="small" @row-click="selectRun">
+                <el-table-column label="状态" width="96">
+                  <template #default="scope"><el-tag size="small" :type="executionStatusTag(scope.row.status)">{{ executionStatusText(scope.row.status) }}</el-tag></template>
+                </el-table-column>
+                <el-table-column label="时间" min-width="150">
+                  <template #default="scope">{{ formatShortTime(scope.row.created_at) }}</template>
+                </el-table-column>
+                <el-table-column label="耗时" width="90">
+                  <template #default="scope">{{ formatDuration(scope.row.duration_ms) }}</template>
+                </el-table-column>
+              </el-table>
+              <div v-if="currentRun" class="run-detail">
+                <h4 class="drawer-title">执行详情</h4>
+                <div class="run-technical">
+                  <div class="run-technical__block">
+                    <span class="run-technical__label">响应</span>
+                    <pre>{{ formatDebugBody(currentRun.response_payload) || '（无响应内容）' }}</pre>
+                  </div>
+                  <div v-if="currentRun.stderr" class="run-technical__block">
+                    <span class="run-technical__label">错误输出</span>
+                    <pre>{{ currentRun.stderr }}</pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </el-tab-pane>
+        </el-tabs>
+      </div>
+    </el-drawer>
+
+    <el-dialog v-model="importVisible" title="导入接口用例" width="520px">
+      <el-alert type="info" :closable="false" show-icon class="section-gap" title="支持导入平台导出的 JSON 文件，同名用例将新增为新版本。" />
+      <input ref="importInputRef" type="file" accept="application/json,.json" style="display: none" @change="handleImportFile" />
+      <el-button :icon="Upload" @click="importInputRef?.click()">选择文件</el-button>
+      <span v-if="importFileName" class="import-file-name">{{ importFileName }}</span>
+      <div v-if="importPreview" class="import-editor">
+        <p>共解析出 <strong>{{ importPreview.length }}</strong> 条用例。</p>
+      </div>
+      <template #footer>
+        <el-button @click="importVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!importPreview" :loading="importSubmitting" @click="submitImportCases">开始导入</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="specImportVisible" title="导入 OpenAPI / Postman" width="640px">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        class="section-gap"
+        title="支持 OpenAPI/Swagger (JSON/YAML) 与 Postman Collection v2 (JSON)，解析后批量生成接口用例。"
+      />
+      <el-form label-width="96px">
+        <el-form-item label="目标项目">
+          <el-select v-model="specImportForm.project_id" placeholder="选择项目" style="width: 100%">
+            <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="来源类型">
+          <el-radio-group v-model="specImportForm.source_type">
+            <el-radio-button label="openapi">OpenAPI / Swagger</el-radio-button>
+            <el-radio-button label="postman">Postman Collection</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="目录前缀">
+          <el-input v-model="specImportForm.folder_path" placeholder="可选，导入用例将放入该目录下" clearable />
+        </el-form-item>
+        <el-form-item label="文档内容">
+          <input ref="specImportInputRef" type="file" accept=".json,.yaml,.yml,application/json" style="display: none" @change="handleSpecFile" />
+          <div style="width: 100%">
+            <el-button :icon="Upload" size="small" @click="specImportInputRef?.click()">选择文件</el-button>
+            <span v-if="specImportFileName" class="import-file-name">{{ specImportFileName }}</span>
+            <el-input
+              v-model="specImportForm.content"
+              type="textarea"
+              :rows="8"
+              placeholder="粘贴 OpenAPI / Postman 文档，或上传文件"
+              style="margin-top: 8px"
+            />
+          </div>
+        </el-form-item>
+      </el-form>
+      <div v-if="specImportPreview" class="import-editor">
+        <p>解析出 <strong>{{ specImportPreview.detected_count }}</strong> 个接口<span v-if="specImportPreview.dry_run">（预览，未写入）</span><span v-else>，已创建 <strong>{{ specImportPreview.created_count }}</strong> 条</span>。</p>
+        <el-alert v-for="(w, i) in specImportPreview.warnings" :key="i" type="warning" :closable="false" :title="w" style="margin-bottom: 6px" />
+        <el-table v-if="specImportPreview.items?.length" :data="specImportPreview.items" border size="small" max-height="260">
+          <el-table-column prop="method" label="Method" width="90" />
+          <el-table-column prop="path" label="Path" min-width="200" show-overflow-tooltip />
+          <el-table-column prop="name" label="名称" min-width="160" show-overflow-tooltip />
+          <el-table-column prop="folder_path" label="目录" min-width="120" show-overflow-tooltip />
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="specImportVisible = false">取消</el-button>
+        <el-button :loading="specImportLoading" @click="previewSpecImport">解析预览</el-button>
+        <el-button type="primary" :loading="specImportSubmitting" @click="submitSpecImport">开始导入</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, nextTick, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, nextTick, reactive, ref, watch } from 'vue'
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown } from '@element-plus/icons-vue'
+import {
+  CircleCheck, Delete, DocumentCopy, Download, Edit, EditPen, Files, Finished, Plus,
+  QuestionFilled, Refresh, Search, Tickets, TrendCharts, Upload, VideoPlay, View, Connection
+} from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
+import FolderTree from '../ui/components/FolderTree.vue'
+import BatchRunDialog from '../ui/components/BatchRunDialog.vue'
+import BatchRunDrawer from '../ui/components/BatchRunDrawer.vue'
+import ReviewPanel from '../ui/components/ReviewPanel.vue'
 import { usePermissions } from '@/lib/permissions'
+import { useAuthStore } from '@/stores/auth'
+import { executionStatusTag, executionStatusText } from '@/lib/execution'
 
 const list = ref([])
 const projects = ref([])
@@ -607,7 +1076,6 @@ const environments = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
 const runDialogVisible = ref(false)
-const columnConfigVisible = ref(false)
 const isEditing = ref(false)
 const editingCaseId = ref(undefined)
 const dataFormRef = ref(null)
@@ -620,6 +1088,53 @@ const debugResponse = ref(null)
 const debugResponseTab = ref('body')
 const editorMetaPanels = ref([])
 const { canAdmin, canTest } = usePermissions()
+const authStore = useAuthStore()
+const currentUserId = computed(() => authStore.user?.id || null)
+
+const total = ref(0)
+const stats = reactive({ total: 0, active: 0, approved: 0, recent_success_rate: 0 })
+const folderTree = reactive({ total: 0, ungrouped: 0, folders: [] })
+const selectedFolder = ref('')
+const treeDrawerVisible = ref(false)
+const latestRunMap = ref({})
+const caseNameCache = ref({})
+const tableRef = ref(null)
+const selectedRows = ref([])
+
+const batchRunVisible = ref(false)
+const batchSubmitting = ref(false)
+const batchEnvironments = ref([])
+const batchDrawerVisible = ref(false)
+const activeBatchId = ref(null)
+const batchEditVisible = ref(false)
+const batchEditSubmitting = ref(false)
+const batchEditForm = reactive({ folder_path: '', priority: '', status: '' })
+
+const detailVisible = ref(false)
+const detailTab = ref('definition')
+const currentCase = ref(null)
+const caseRuns = ref([])
+const currentRun = ref(null)
+let pollTimer = null
+let keywordTimer = null
+
+const importVisible = ref(false)
+const importInputRef = ref(null)
+const importFileName = ref('')
+const importPreview = ref(null)
+const importSubmitting = ref(false)
+const specImportVisible = ref(false)
+const specImportInputRef = ref(null)
+const specImportFileName = ref('')
+const specImportPreview = ref(null)
+const specImportLoading = ref(false)
+const specImportSubmitting = ref(false)
+const specImportForm = reactive({
+  project_id: undefined,
+  source_type: 'openapi',
+  content: '',
+  folder_path: ''
+})
 const methodOptions = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 const bodyModes = new Set(['none', 'form-data', 'x-www-form-urlencoded', 'raw', 'binary', 'graphql'])
 const methodProfiles = {
@@ -632,29 +1147,17 @@ const methodProfiles = {
   OPTIONS: { supportsBody: false, defaultBodyMode: 'none', tip: 'OPTIONS 通常用于能力探测；保存时不会发送 Body。' }
 }
 
-const allColumns = ref([
-  { label: 'ID', key: 'id', visible: true },
-  { label: '项目', key: 'project', visible: true },
-  { label: '名称', key: 'name', visible: true },
-  { label: '方法', key: 'method', visible: true },
-  { label: '路径', key: 'path', visible: true },
-  { label: '优先级', key: 'priority', visible: true },
-  { label: '版本', key: 'version', visible: true },
-  { label: '评审', key: 'review', visible: true },
-  { label: '状态', key: 'status', visible: true },
-  { label: '预期状态码', key: 'expected', visible: true },
-])
-
-const visibleColumns = computed(() => allColumns.value.filter(c => c.visible).map(c => c.key))
-
 const filters = reactive({
   projectId: undefined,
   method: '',
+  status: '',
+  priority: '',
+  reviewStatus: '',
   keyword: ''
 })
 
 const page = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(20)
 
 const temp = reactive({
   project_id: undefined,
@@ -686,6 +1189,16 @@ const temp = reactive({
   graphql_query: '',
   graphql_variables_text: '{}',
   assertions_text: '[\n  { "type": "status_code", "expected": 200 }\n]',
+  assertions_mode: 'form',
+  assertion_rows: [],
+  extractor_rows: [],
+  scenario_steps: [],
+  datasets_text: '',
+  mock_enabled: false,
+  mock_status_code: 200,
+  mock_headers_text: '{\n  "Content-Type": "application/json"\n}',
+  mock_body_text: '',
+  mock_delay_ms: 0,
   priority: 'P2',
   status: 'ACTIVE',
   expected_status: 200,
@@ -762,6 +1275,228 @@ const tagOptions = computed(() => {
 const runEnvironmentOptions = computed(() => environments.value.filter((item) => item.project_id === runForm.project_id))
 const debugEnvironmentOptions = computed(() => environments.value.filter((item) => item.project_id === temp.project_id))
 
+const assertionTypeOptions = [
+  { label: '状态码', value: 'status_code' },
+  { label: 'JSONPath', value: 'json_path' },
+  { label: '响应体包含', value: 'body_contains' },
+  { label: '响应体正则', value: 'body_regex' },
+  { label: '响应头', value: 'header' },
+  { label: '响应耗时(ms)', value: 'response_time_ms' }
+]
+
+const comparableOperators = [
+  { label: '等于', value: 'eq' },
+  { label: '不等于', value: 'ne' },
+  { label: '包含', value: 'contains' },
+  { label: '不包含', value: 'not_contains' },
+  { label: '匹配正则', value: 'regex' },
+  { label: '>', value: 'gt' },
+  { label: '>=', value: 'gte' },
+  { label: '<', value: 'lt' },
+  { label: '<=', value: 'lte' },
+  { label: '存在', value: 'exists' },
+  { label: '不存在', value: 'not_exists' },
+  { label: '长度等于', value: 'length_eq' },
+  { label: '长度大于', value: 'length_gt' },
+  { label: '长度小于', value: 'length_lt' }
+]
+
+const numericOperators = comparableOperators.filter((item) => ['eq', 'ne', 'gt', 'gte', 'lt', 'lte'].includes(item.value))
+
+const operatorOptionsFor = (type) => {
+  if (type === 'status_code' || type === 'response_time_ms') return numericOperators
+  if (type === 'header') return comparableOperators.filter((item) => !item.value.startsWith('length'))
+  return comparableOperators
+}
+
+const assertionNeedsExpression = (type) => type === 'json_path' || type === 'header'
+const assertionNeedsOperator = (type) => ['status_code', 'json_path', 'header', 'response_time_ms'].includes(type)
+const assertionNeedsExpected = (row) => !['exists', 'not_exists'].includes(row.operator || '')
+
+const defaultAssertionRow = () => ({ type: 'json_path', expression: '', operator: 'eq', expected: '', negate: false })
+
+const addAssertionRow = () => {
+  temp.assertion_rows.push(defaultAssertionRow())
+}
+
+const onAssertionTypeChange = (row) => {
+  if (row.type === 'response_time_ms') row.operator = 'lte'
+  else if (!operatorOptionsFor(row.type).some((item) => item.value === row.operator)) row.operator = 'eq'
+}
+
+const coerceExpectedValue = (value) => {
+  if (typeof value !== 'string') return value
+  const text = value.trim()
+  if (text !== '' && /^-?\d+(\.\d+)?$/.test(text)) return Number(text)
+  return value
+}
+
+const assertionRowsToJson = (rows) => rows
+  .filter((row) => row.type)
+  .map((row) => {
+    const entry = { type: row.type }
+    if (assertionNeedsExpression(row.type)) {
+      if (row.type === 'header') entry.name = row.expression
+      else entry.expression = row.expression
+    }
+    if (assertionNeedsOperator(row.type) && row.operator) entry.operator = row.operator
+    if (assertionNeedsExpected(row)) entry.expected = coerceExpectedValue(row.expected)
+    if (row.type === 'body_contains' && row.negate) entry.negate = true
+    return entry
+  })
+
+const assertionJsonToRows = (items) => {
+  if (!Array.isArray(items)) return null
+  const known = new Set(assertionTypeOptions.map((item) => item.value))
+  const rows = []
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || !known.has(item.type)) return null
+    rows.push({
+      type: item.type,
+      expression: item.type === 'header' ? (item.name || item.expression || '') : (item.expression || ''),
+      operator: item.operator || (item.type === 'response_time_ms' ? 'lte' : 'eq'),
+      expected: item.expected === undefined || item.expected === null ? '' : String(item.expected),
+      negate: Boolean(item.negate)
+    })
+  }
+  return rows
+}
+
+const handleAssertionsModeChange = (mode) => {
+  if (mode === temp.assertions_mode) return
+  if (mode === 'json') {
+    temp.assertions_text = JSON.stringify(assertionRowsToJson(temp.assertion_rows), null, 2)
+    temp.assertions_mode = 'json'
+    return
+  }
+  try {
+    const parsed = temp.assertions_text ? JSON.parse(temp.assertions_text) : []
+    const rows = assertionJsonToRows(parsed)
+    if (rows === null) {
+      ElMessage.warning('当前 JSON 包含结构化编辑器不支持的字段，请继续使用 JSON 高级模式')
+      return
+    }
+    temp.assertion_rows = rows
+    temp.assertions_mode = 'form'
+  } catch (e) {
+    ElMessage.warning('断言 JSON 格式错误，无法切换到结构化模式')
+  }
+}
+
+const hydrateAssertionEditors = (assertionsJson) => {
+  const rows = assertionJsonToRows(assertionsJson || [])
+  if (rows === null) {
+    temp.assertions_mode = 'json'
+    temp.assertion_rows = []
+    temp.assertions_text = JSON.stringify(assertionsJson, null, 2)
+  } else {
+    temp.assertions_mode = 'form'
+    temp.assertion_rows = rows
+    temp.assertions_text = assertionsJson ? JSON.stringify(assertionsJson, null, 2) : '[\n  { "type": "status_code", "expected": 200 }\n]'
+  }
+}
+
+const addExtractorRow = () => {
+  temp.extractor_rows.push({ name: '', source: 'json_path', expression: '' })
+}
+
+const extractorPlaceholder = (source) => {
+  if (source === 'json_path') return '$.data.token'
+  if (source === 'header') return 'x-trace-id'
+  if (source === 'regex') return 'order_no=(\\w+)'
+  return '无需表达式'
+}
+
+const hydrateExtractorRows = (extractorsJson) => {
+  temp.extractor_rows = (extractorsJson || []).map((item) => ({
+    name: item.name || '',
+    source: item.source || 'json_path',
+    expression: item.expression || ''
+  }))
+}
+
+const buildExtractorsJson = () => {
+  const rows = temp.extractor_rows
+    .filter((row) => row.name && row.name.trim())
+    .map((row) => ({
+      name: row.name.trim(),
+      source: row.source,
+      ...(row.source === 'status_code' ? {} : { expression: row.expression || '' })
+    }))
+  return rows.length ? rows : null
+}
+
+const scenarioTabLabel = computed(() => (temp.scenario_steps.length ? `场景步骤（${temp.scenario_steps.length}）` : '场景步骤'))
+
+const addScenarioStep = () => {
+  temp.scenario_steps.push({
+    name: '',
+    method: 'GET',
+    path: '',
+    expected_status: 200,
+    headers_text: '',
+    body_text: '',
+    assertions_text: '',
+    extractors_text: ''
+  })
+}
+
+const moveScenarioStep = (index, offset) => {
+  const target = index + offset
+  if (target < 0 || target >= temp.scenario_steps.length) return
+  const steps = temp.scenario_steps
+  ;[steps[index], steps[target]] = [steps[target], steps[index]]
+}
+
+const hydrateScenarioSteps = (stepsJson) => {
+  temp.scenario_steps = (stepsJson || []).map((step) => ({
+    name: step.name || '',
+    method: (step.method || 'GET').toUpperCase(),
+    path: step.path || '',
+    expected_status: step.expected_status || 200,
+    headers_text: step.headers_json ? JSON.stringify(step.headers_json, null, 2) : '',
+    body_text: step.body_json ? JSON.stringify(step.body_json, null, 2) : '',
+    assertions_text: step.assertions?.length ? JSON.stringify(step.assertions, null, 2) : '',
+    extractors_text: step.extractors?.length ? JSON.stringify(step.extractors, null, 2) : ''
+  }))
+}
+
+const parseStepJsonField = (text, label, stepNo, expectArray = false) => {
+  const trimmed = (text || '').trim()
+  if (!trimmed) return null
+  let parsed
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch (e) {
+    throw new Error(`步骤 ${stepNo} 的${label}不是合法 JSON`)
+  }
+  if (expectArray && !Array.isArray(parsed)) throw new Error(`步骤 ${stepNo} 的${label}必须是 JSON 数组`)
+  return parsed
+}
+
+const buildStepsJson = () => {
+  if (!temp.scenario_steps.length) return null
+  return temp.scenario_steps.map((step, index) => {
+    const stepNo = index + 1
+    if (!step.path || !step.path.trim()) throw new Error(`步骤 ${stepNo} 的请求路径不能为空`)
+    const entry = {
+      name: step.name || `步骤 ${stepNo}`,
+      method: step.method || 'GET',
+      path: step.path.trim(),
+      expected_status: step.expected_status || 200
+    }
+    const headers = parseStepJsonField(step.headers_text, 'Headers', stepNo)
+    const body = parseStepJsonField(step.body_text, 'Body', stepNo)
+    const assertions = parseStepJsonField(step.assertions_text, '断言', stepNo, true)
+    const extractors = parseStepJsonField(step.extractors_text, '提取器', stepNo, true)
+    if (headers) entry.headers_json = headers
+    if (body) entry.body_json = body
+    if (assertions) entry.assertions = assertions
+    if (extractors) entry.extractors = extractors
+    return entry
+  })
+}
+
 const currentMethodProfile = computed(() => methodProfiles[temp.method] || methodProfiles.GET)
 const methodSupportsBody = computed(() => currentMethodProfile.value.supportsBody)
 const bodyTabLabel = computed(() => (methodSupportsBody.value ? 'Body' : 'Body（不适用）'))
@@ -778,6 +1513,38 @@ const methodType = (method) => {
     OPTIONS: 'info'
   }
   return map[method] || 'info'
+}
+
+const recentSuccessRate = computed(() => {
+  const rate = stats.recent_success_rate
+  if (rate === null || rate === undefined) return '—'
+  return `${Math.round(rate * 100)}%`
+})
+
+const mapFolderNode = (node) => ({
+  value: node.path,
+  label: node.name || node.path,
+  children: (node.children || []).map(mapFolderNode)
+})
+const folderSelectOptions = computed(() => folderTree.folders.map(mapFolderNode))
+
+const priorityTag = (priority) => ({ P0: 'danger', P1: 'warning', P2: '', P3: 'info' }[priority] || 'info')
+const caseStatusText = (status) => ({ ACTIVE: '启用', DISABLED: '停用', INACTIVE: '停用' }[status] || status)
+const reviewText = (status) => ({ DRAFT: '草稿', IN_REVIEW: '评审中', APPROVED: '已通过', REJECTED: '已拒绝' }[status] || status || '草稿')
+const reviewTag = (status) => ({ DRAFT: 'info', IN_REVIEW: 'warning', APPROVED: 'success', REJECTED: 'danger' }[status] || 'info')
+const reviewTooltip = (row) => (row.reviewed_by ? `用户#${row.reviewed_by} · ${formatShortTime(row.reviewed_at)}` : '')
+
+const formatShortTime = (value) => {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+const formatDuration = (ms) => {
+  if (ms === null || ms === undefined) return '—'
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
 }
 
 const parseQueryParams = (path) => {
@@ -1208,17 +1975,51 @@ const applyMethodBodyProfile = () => {
   syncContentTypeForBodyMode()
 }
 
+const buildListQuery = () => {
+  const params = new URLSearchParams()
+  params.set('page', page.value)
+  params.set('page_size', pageSize.value)
+  if (filters.projectId) params.set('project_id', filters.projectId)
+  if (filters.status) params.set('status', filters.status)
+  if (filters.priority) params.set('priority', filters.priority)
+  if (filters.reviewStatus) params.set('review_status', filters.reviewStatus)
+  if (filters.method) params.set('method', filters.method)
+  if (selectedFolder.value) params.set('folder', selectedFolder.value)
+  const keyword = filters.keyword.trim()
+  if (keyword) params.set('keyword', keyword)
+  return params.toString()
+}
+
+const loadLatestRuns = async (ids) => {
+  if (!ids.length) { latestRunMap.value = {}; return }
+  try {
+    const params = new URLSearchParams()
+    params.set('case_type', 'API')
+    params.set('case_ids', ids.join(','))
+    const data = await api.get(`/executions/runs/latest?${params.toString()}`)
+    const map = {}
+    ;(data || []).forEach((run) => { map[run.case_id] = run })
+    latestRunMap.value = map
+  } catch (error) {
+    latestRunMap.value = {}
+  }
+}
+
 const getList = async () => {
   listLoading.value = true
   try {
-    const [caseData, projectData, environmentData] = await Promise.all([
-      api.get('/api-cases'),
-      api.get('/projects'),
-      api.get('/environments')
-    ])
-    list.value = caseData
-    projects.value = projectData
-    environments.value = environmentData
+    const data = await api.get(`/api-cases?${buildListQuery()}`)
+    const items = data.items || []
+    list.value = items
+    total.value = data.total ?? items.length
+    const cache = { ...caseNameCache.value }
+    items.forEach((item) => { cache[item.id] = item.name })
+    caseNameCache.value = cache
+    await loadLatestRuns(items.map((item) => item.id))
+    if (currentCase.value) {
+      const fresh = items.find((item) => item.id === currentCase.value.id)
+      if (fresh) currentCase.value = fresh
+    }
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
@@ -1226,30 +2027,349 @@ const getList = async () => {
   }
 }
 
-const filteredList = computed(() => {
-  const keyword = filters.keyword.trim().toLowerCase()
-  return list.value
-    .filter((c) => {
-      if (filters.projectId && c.project_id !== filters.projectId) return false
-      if (filters.method && c.method !== filters.method) return false
-      if (!keyword) return true
-      return (
-        String(c.name || '').toLowerCase().includes(keyword) ||
-        String(c.path || '').toLowerCase().includes(keyword)
-      )
+const loadStats = async () => {
+  try {
+    const params = filters.projectId ? `?project_id=${filters.projectId}` : ''
+    const data = await api.get(`/api-cases/stats${params}`)
+    Object.assign(stats, data)
+  } catch (error) {
+    Object.assign(stats, { total: 0, active: 0, approved: 0, recent_success_rate: 0 })
+  }
+}
+
+const loadFolders = async () => {
+  try {
+    const params = filters.projectId ? `?project_id=${filters.projectId}` : ''
+    const data = await api.get(`/api-cases/folders${params}`)
+    folderTree.total = data.total
+    folderTree.ungrouped = data.ungrouped
+    folderTree.folders = data.folders || []
+  } catch (error) {
+    folderTree.folders = []
+  }
+}
+
+const loadProjects = async () => {
+  try {
+    const [projectData, environmentData] = await Promise.all([
+      api.get('/projects'),
+      api.get('/environments')
+    ])
+    projects.value = projectData
+    environments.value = environmentData
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const refreshAll = () => Promise.all([getList(), loadStats(), loadFolders()])
+
+const handleFolderRename = async ({ oldPath, newPath }) => {
+  if (!filters.projectId) {
+    ElMessage.warning('请先选择项目后再重命名目录')
+    return
+  }
+  try {
+    const data = await api.post('/api-cases/folders/rename', {
+      project_id: filters.projectId,
+      old_path: oldPath,
+      new_path: newPath
     })
-    .sort((a, b) => b.id - a.id)
-})
+    ElMessage.success(`已更新 ${data.affected} 条用例`)
+    if (selectedFolder.value === oldPath) selectedFolder.value = newPath
+    await refreshAll()
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
 
-const pagedList = computed(() => {
-  const start = (page.value - 1) * pageSize.value
-  return filteredList.value.slice(start, start + pageSize.value)
-})
+const handleSelectionChange = (rows) => { selectedRows.value = rows }
+const clearSelection = () => { tableRef.value?.clearSelection(); selectedRows.value = [] }
+const handlePageSizeChange = (size) => { pageSize.value = size; page.value = 1 }
 
-const bodyMethodCount = computed(() => {
-  const methods = new Set(list.value.filter((item) => methodProfiles[item.method]?.supportsBody).map((item) => item.method))
-  return methods.size
-})
+const openBatchRun = () => {
+  const projectIds = new Set(selectedRows.value.map((row) => row.project_id))
+  if (projectIds.size > 1) {
+    ElMessage.warning('批量执行需选择同一项目下的用例')
+    return
+  }
+  const inactive = selectedRows.value.filter((row) => row.status !== 'ACTIVE')
+  if (inactive.length) {
+    ElMessage.warning(`有 ${inactive.length} 条用例未启用，请先启用后再执行`)
+    return
+  }
+  const projectId = selectedRows.value[0].project_id
+  batchEnvironments.value = environments.value.filter((item) => item.project_id === projectId)
+  batchRunVisible.value = true
+}
+
+const submitBatchRun = async (payload) => {
+  batchSubmitting.value = true
+  try {
+    const data = await api.post('/executions/api/batch-run', {
+      case_ids: selectedRows.value.map((row) => row.id),
+      ...payload
+    })
+    ElMessage.success('已提交批量执行')
+    batchRunVisible.value = false
+    clearSelection()
+    activeBatchId.value = data.batch_id || data.id
+    batchDrawerVisible.value = true
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    batchSubmitting.value = false
+  }
+}
+
+const openBatchHistory = () => {
+  activeBatchId.value = null
+  batchDrawerVisible.value = true
+}
+
+const handleOpenRunFromBatch = async (run) => {
+  batchDrawerVisible.value = false
+  await openCaseDetail({ id: run.case_id }, 'runs')
+  await selectRun(run)
+}
+
+const openBatchEdit = () => {
+  batchEditForm.folder_path = ''
+  batchEditForm.priority = ''
+  batchEditForm.status = ''
+  batchEditVisible.value = true
+}
+
+const submitBatchEdit = async () => {
+  const patch = {}
+  if (batchEditForm.folder_path) patch.folder_path = batchEditForm.folder_path
+  if (batchEditForm.priority) patch.priority = batchEditForm.priority
+  if (batchEditForm.status) patch.status = batchEditForm.status
+  if (!Object.keys(patch).length) {
+    ElMessage.warning('请至少选择一个要修改的字段')
+    return
+  }
+  batchEditSubmitting.value = true
+  try {
+    const data = await api.put('/api-cases/batch', {
+      case_ids: selectedRows.value.map((row) => row.id),
+      patch
+    })
+    ElMessage.success(`已修改 ${data.affected} 条用例`)
+    batchEditVisible.value = false
+    clearSelection()
+    await refreshAll()
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    batchEditSubmitting.value = false
+  }
+}
+
+const handleBatchDelete = async () => {
+  try {
+    await ElMessageBox.confirm(`确认删除已选的 ${selectedRows.value.length} 条用例？该操作不可恢复。`, '批量删除', {
+      type: 'warning'
+    })
+    const data = await api.delete('/api-cases/batch', { case_ids: selectedRows.value.map((row) => row.id) })
+    ElMessage.success(`已删除 ${data.affected} 条用例`)
+    clearSelection()
+    await refreshAll()
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(error.message)
+  }
+}
+
+const refreshCurrentCase = async () => {
+  if (!currentCase.value) return
+  try {
+    currentCase.value = await api.get(`/api-cases/${currentCase.value.id}`)
+    await getList()
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const openCaseDetail = async (row, tab = 'definition') => {
+  detailTab.value = tab
+  currentRun.value = null
+  detailVisible.value = true
+  try {
+    currentCase.value = await api.get(`/api-cases/${row.id}`)
+    caseRuns.value = await api.get(`/executions/runs?case_type=API&case_id=${row.id}&limit=100`)
+    if (tab === 'runs' && caseRuns.value.length) await selectRun(caseRuns.value[0])
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
+
+const selectRun = async (run) => {
+  if (!run) return
+  try {
+    currentRun.value = await api.get(`/executions/runs/${run.id}`)
+  } catch (error) {
+    currentRun.value = run
+  }
+}
+
+const startPolling = () => {
+  stopPolling()
+  pollTimer = setInterval(async () => {
+    if (!detailVisible.value || !currentCase.value) { stopPolling(); return }
+    try {
+      const data = await api.get(`/executions/runs?case_type=API&case_id=${currentCase.value.id}&limit=100`)
+      caseRuns.value = data || []
+      const running = (data || []).some((run) => run.status === 'RUNNING' || run.status === 'PENDING')
+      if (!running) { stopPolling(); await loadLatestRuns(list.value.map((item) => item.id)) }
+    } catch (error) {
+      stopPolling()
+    }
+  }, 2000)
+}
+
+const stopPolling = () => {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+}
+
+const exportCurrentCases = async () => {
+  try {
+    const params = new URLSearchParams()
+    params.set('case_type', 'API')
+    if (filters.projectId) params.set('project_id', String(filters.projectId))
+    if (filters.status) params.set('status', filters.status)
+    if (filters.priority) params.set('priority', filters.priority)
+    if (selectedFolder.value) params.set('folder', selectedFolder.value)
+    if (filters.keyword.trim()) params.set('keyword', filters.keyword.trim())
+    const payload = await api.get(`/cases/export?${params.toString()}`)
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `api-cases-${Date.now()}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success(`已导出 ${payload.count || 0} 条接口用例`)
+  } catch (error) {
+    ElMessage.error(error.message || '导出失败')
+  }
+}
+
+const openImportDialog = () => {
+  importFileName.value = ''
+  importPreview.value = null
+  importVisible.value = true
+}
+
+const handleImportFile = (event) => {
+  const file = event.target.files?.[0]
+  if (!file) return
+  importFileName.value = file.name
+  const reader = new FileReader()
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(reader.result)
+      const items = parsed.items || parsed.cases || (Array.isArray(parsed) ? parsed : [])
+      if (!Array.isArray(items) || !items.length) throw new Error('文件中未找到用例')
+      if (items.some((item) => item.case_type && item.case_type !== 'API')) throw new Error('导入文件只能包含接口用例')
+      importPreview.value = items
+    } catch (error) {
+      importPreview.value = null
+      ElMessage.error(`解析失败：${error.message}`)
+    }
+  }
+  reader.readAsText(file)
+  event.target.value = ''
+}
+
+const submitImportCases = async () => {
+  if (!importPreview.value) return
+  importSubmitting.value = true
+  try {
+    const items = importPreview.value.map((item) => ({ ...item, case_type: 'API' }))
+    await api.post('/cases/import', { items })
+    ElMessage.success(`成功导入 ${items.length} 条用例`)
+    importVisible.value = false
+    await refreshAll()
+  } catch (error) {
+    ElMessage.error(error.message || '导入失败')
+  } finally {
+    importSubmitting.value = false
+  }
+}
+
+const openSpecImportDialog = () => {
+  specImportForm.project_id = filters.projectId || (projects.value.length ? projects.value[0].id : undefined)
+  specImportForm.source_type = 'openapi'
+  specImportForm.content = ''
+  specImportForm.folder_path = ''
+  specImportFileName.value = ''
+  specImportPreview.value = null
+  specImportVisible.value = true
+}
+
+const handleSpecFile = (event) => {
+  const file = event.target.files?.[0]
+  if (!file) return
+  specImportFileName.value = file.name
+  if (/\.ya?ml$/i.test(file.name)) {
+    specImportForm.source_type = 'openapi'
+  }
+  const reader = new FileReader()
+  reader.onload = () => {
+    specImportForm.content = String(reader.result || '')
+  }
+  reader.readAsText(file)
+  event.target.value = ''
+}
+
+const runSpecImport = async (dryRun) => {
+  if (!specImportForm.project_id) {
+    ElMessage.warning('请选择目标项目')
+    return null
+  }
+  if (!specImportForm.content.trim()) {
+    ElMessage.warning('请粘贴或上传文档内容')
+    return null
+  }
+  return api.post('/api-cases/import-spec', {
+    project_id: specImportForm.project_id,
+    source_type: specImportForm.source_type,
+    content: specImportForm.content,
+    folder_path: specImportForm.folder_path || null,
+    dry_run: dryRun
+  })
+}
+
+const previewSpecImport = async () => {
+  specImportLoading.value = true
+  try {
+    const result = await runSpecImport(true)
+    if (result) {
+      specImportPreview.value = result
+      if (!result.detected_count) ElMessage.warning('未解析出任何接口')
+    }
+  } catch (error) {
+    ElMessage.error(error.message || '解析失败')
+  } finally {
+    specImportLoading.value = false
+  }
+}
+
+const submitSpecImport = async () => {
+  specImportSubmitting.value = true
+  try {
+    const result = await runSpecImport(false)
+    if (result) {
+      specImportPreview.value = result
+      ElMessage.success(`成功导入 ${result.created_count} 条接口用例`)
+      specImportVisible.value = false
+      await refreshAll()
+    }
+  } catch (error) {
+    ElMessage.error(error.message || '导入失败')
+  } finally {
+    specImportSubmitting.value = false
+  }
+}
 
 const handleCreate = () => {
   temp.project_id = projects.value.length > 0 ? projects.value[0].id : undefined
@@ -1272,6 +2392,11 @@ const handleCreate = () => {
   temp.auth_api_key_in = 'header'
   resetBodyFields('none')
   temp.assertions_text = '[\n  { "type": "status_code", "expected": 200 }\n]'
+  temp.assertions_mode = 'form'
+  temp.assertion_rows = []
+  temp.extractor_rows = []
+  temp.scenario_steps = []
+  resetDataDrivenAndMock()
   temp.priority = 'P2'
   temp.status = 'ACTIVE'
   temp.expected_status = 200
@@ -1286,17 +2411,6 @@ const handleCreate = () => {
   nextTick(() => {
     dataFormRef.value?.clearValidate()
   })
-}
-
-const handleSearch = () => {
-  page.value = 1
-}
-
-const handleReset = () => {
-  filters.projectId = undefined
-  filters.method = ''
-  filters.keyword = ''
-  page.value = 1
 }
 
 const handleEdit = (row) => {
@@ -1314,7 +2428,10 @@ const handleEdit = (row) => {
   hydrateAuthFromHeaders()
   hydrateBody(row.body_json)
   applyMethodBodyProfile()
-  temp.assertions_text = row.assertions_json ? JSON.stringify(row.assertions_json, null, 2) : '[\n  { "type": "status_code", "expected": 200 }\n]'
+  hydrateAssertionEditors(row.assertions_json)
+  hydrateExtractorRows(row.extractors_json)
+  hydrateScenarioSteps(row.steps_json)
+  hydrateDataDrivenAndMock(row)
   temp.priority = row.priority
   temp.status = row.status
   temp.expected_status = row.expected_status
@@ -1331,6 +2448,102 @@ const handleEdit = (row) => {
   })
 }
 
+const buildAssertionsJson = () => {
+  if (temp.assertions_mode === 'form') {
+    const items = assertionRowsToJson(temp.assertion_rows)
+    return items.length ? items : null
+  }
+  return temp.assertions_text ? JSON.parse(temp.assertions_text) : null
+}
+
+const dataDrivenTabLabel = computed(() => {
+  const parsed = parseDatasetsSafe(temp.datasets_text)
+  return parsed && parsed.length ? `数据驱动（${parsed.length}）` : '数据驱动'
+})
+
+function parseDatasetsSafe(text) {
+  const raw = (text || '').trim()
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+const resetDataDrivenAndMock = () => {
+  temp.datasets_text = ''
+  temp.mock_enabled = false
+  temp.mock_status_code = 200
+  temp.mock_headers_text = '{\n  "Content-Type": "application/json"\n}'
+  temp.mock_body_text = ''
+  temp.mock_delay_ms = 0
+}
+
+const hydrateDataDrivenAndMock = (row) => {
+  temp.datasets_text = Array.isArray(row.datasets_json) && row.datasets_json.length
+    ? JSON.stringify(row.datasets_json, null, 2)
+    : ''
+  temp.mock_enabled = !!row.mock_enabled
+  const config = row.mock_config_json || {}
+  temp.mock_status_code = Number(config.status_code) || 200
+  temp.mock_delay_ms = Number(config.delay_ms) || 0
+  temp.mock_headers_text = config.headers
+    ? JSON.stringify(config.headers, null, 2)
+    : '{\n  "Content-Type": "application/json"\n}'
+  if (config.body === undefined || config.body === null) {
+    temp.mock_body_text = ''
+  } else if (typeof config.body === 'string') {
+    temp.mock_body_text = config.body
+  } else {
+    temp.mock_body_text = JSON.stringify(config.body, null, 2)
+  }
+}
+
+const buildDatasetsJson = () => {
+  const raw = (temp.datasets_text || '').trim()
+  if (!raw) return null
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('数据集 JSON 格式错误，请检查后重试')
+  }
+  if (!Array.isArray(parsed)) throw new Error('数据集必须为 JSON 数组')
+  return parsed.length ? parsed : null
+}
+
+const buildMockConfigJson = () => {
+  if (!temp.mock_enabled) return null
+  let headers = null
+  const headersRaw = (temp.mock_headers_text || '').trim()
+  if (headersRaw) {
+    try {
+      headers = JSON.parse(headersRaw)
+    } catch {
+      throw new Error('Mock 响应头 JSON 格式错误')
+    }
+  }
+  let body = temp.mock_body_text
+  const bodyRaw = (temp.mock_body_text || '').trim()
+  if (bodyRaw) {
+    try {
+      body = JSON.parse(bodyRaw)
+    } catch {
+      body = temp.mock_body_text
+    }
+  } else {
+    body = null
+  }
+  return {
+    status_code: temp.mock_status_code,
+    headers: headers || {},
+    body,
+    delay_ms: temp.mock_delay_ms || 0
+  }
+}
+
 const buildCasePayload = () => ({
   project_id: temp.project_id,
   name: temp.name || `${temp.method} ${pathWithoutQuery(temp.path) || '/'}`,
@@ -1343,7 +2556,12 @@ const buildCasePayload = () => ({
   review_note: temp.review_note || null,
   headers_json: buildHeadersJson(),
   body_json: buildBodyJson(),
-  assertions_json: temp.assertions_text ? JSON.parse(temp.assertions_text) : null,
+  assertions_json: buildAssertionsJson(),
+  extractors_json: buildExtractorsJson(),
+  steps_json: buildStepsJson(),
+  datasets_json: buildDatasetsJson(),
+  mock_enabled: temp.mock_enabled,
+  mock_config_json: buildMockConfigJson(),
   priority: temp.priority,
   status: temp.status,
   expected_status: temp.expected_status
@@ -1364,7 +2582,7 @@ const sendDebugRequest = () => {
         environment_id: temp.debug_environment_id || null,
         timeout_seconds: temp.debug_timeout_seconds
       })
-      debugResponseTab.value = 'body'
+      debugResponseTab.value = debugResponse.value.assertion_passed === false ? 'assertions' : 'body'
       ElMessage.success('调试请求完成')
     } catch (error) {
       ElMessage.error(error.message)
@@ -1386,7 +2604,7 @@ const saveData = () => {
         }
         dialogVisible.value = false
         ElMessage.success(isEditing.value ? '更新成功' : '创建成功')
-        getList()
+        refreshAll()
       } catch (error) {
         ElMessage.error(error.message)
       }
@@ -1420,6 +2638,11 @@ const submitRun = async () => {
     })
     runDialogVisible.value = false
     ElMessage.success('任务已投递')
+    const row = list.value.find((item) => item.id === runForm.case_id)
+    if (row) {
+      await openCaseDetail(row, 'runs')
+      startPolling()
+    }
   } catch (error) {
     ElMessage.error(error.message)
   }
@@ -1457,7 +2680,7 @@ const handleDelete = async (row) => {
     )
     await api.delete(`/api-cases/${row.id}`)
     ElMessage.success('删除成功')
-    getList()
+    refreshAll()
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     ElMessage.error(error.message)
@@ -1483,29 +2706,42 @@ watch(() => temp.body_raw_type, () => {
   syncContentTypeForBodyMode()
 })
 
-const saveColumnConfig = () => {
-  const config = allColumns.value.map(c => ({ key: c.key, visible: c.visible }))
-  localStorage.setItem('api_case_columns', JSON.stringify(config))
-}
+watch(() => filters.projectId, () => {
+  selectedFolder.value = ''
+  page.value = 1
+  refreshAll()
+})
 
-const loadColumnConfig = () => {
-  const saved = localStorage.getItem('api_case_columns')
-  if (saved) {
-    try {
-      const config = JSON.parse(saved)
-      allColumns.value.forEach(col => {
-        const savedCol = config.find(s => s.key === col.key)
-        if (savedCol) col.visible = savedCol.visible
-      })
-    } catch (e) {
-      console.error('Load column config failed', e)
-    }
-  }
-}
-
-onMounted(() => {
-  loadColumnConfig()
+watch([() => filters.status, () => filters.priority, () => filters.reviewStatus, () => filters.method], () => {
+  page.value = 1
   getList()
+})
+
+watch(() => filters.keyword, () => {
+  if (keywordTimer) clearTimeout(keywordTimer)
+  keywordTimer = setTimeout(() => {
+    page.value = 1
+    getList()
+  }, 300)
+})
+
+watch(() => selectedFolder.value, () => {
+  page.value = 1
+  getList()
+})
+
+watch(() => page.value, () => {
+  getList()
+})
+
+onMounted(async () => {
+  await loadProjects()
+  await refreshAll()
+})
+
+onUnmounted(() => {
+  stopPolling()
+  if (keywordTimer) clearTimeout(keywordTimer)
 })
 </script>
 
@@ -2122,6 +3358,13 @@ onMounted(() => {
   font-size: 12px;
 }
 
+.editor-hint {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 4px;
+}
+
 .body-mode-bar {
   margin-bottom: 14px;
   overflow-x: auto;
@@ -2253,6 +3496,96 @@ onMounted(() => {
   flex-wrap: wrap;
   color: var(--color-text-secondary);
   font-size: 12px;
+}
+
+.debug-assertion-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.debug-assertion-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+
+.assertion-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.assertion-row .assertion-type {
+  width: 140px;
+  flex-shrink: 0;
+}
+
+.assertion-row .assertion-expression {
+  width: 180px;
+  flex-shrink: 0;
+}
+
+.assertion-row .assertion-operator {
+  width: 130px;
+  flex-shrink: 0;
+}
+
+.assertion-row .assertion-expected {
+  flex: 1;
+  min-width: 140px;
+}
+
+.scenario-step-card {
+  border: 1px solid var(--color-border, #e4e7ed);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.scenario-step-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.scenario-step-name {
+  width: 220px;
+}
+
+.scenario-step-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
+.scenario-step-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scenario-step-method {
+  width: 110px;
+  flex-shrink: 0;
+}
+
+.scenario-step-status {
+  width: 130px;
+  flex-shrink: 0;
+}
+
+.scenario-step-advanced {
+  margin-top: 8px;
+  border: none;
 }
 
 .response-pre {
@@ -2398,8 +3731,272 @@ onMounted(() => {
   grid-column: span 2;
 }
 
+/* ========== 概览统计条 ========== */
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-12);
+}
+
+.summary-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff, rgba(248, 250, 255, 0.6));
+  border: 1px solid rgba(129, 140, 248, 0.1);
+  box-shadow: 0 8px 24px rgba(99, 102, 241, 0.06);
+}
+
+.summary-item__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  font-size: 20px;
+}
+
+.summary-item__icon.is-primary { background: rgba(99, 102, 241, 0.12); color: #4f46e5; }
+.summary-item__icon.is-success { background: rgba(16, 185, 129, 0.12); color: #059669; }
+.summary-item__icon.is-review { background: rgba(245, 158, 11, 0.14); color: #b45309; }
+.summary-item__icon.is-rate { background: rgba(56, 189, 248, 0.14); color: #0284c7; }
+
+.summary-item__label {
+  display: block;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.summary-item strong {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+/* ========== 左树右表布局 ========== */
+.case-layout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: var(--space-16);
+  align-items: start;
+}
+
+.workspace-panel {
+  border-radius: 16px;
+  border: 1px solid rgba(129, 140, 248, 0.1);
+  box-shadow: 0 8px 24px rgba(99, 102, 241, 0.06);
+  background: linear-gradient(180deg, #ffffff, rgba(248, 250, 255, 0.6));
+  padding: 16px;
+}
+
+.case-layout__tree {
+  position: sticky;
+  top: 12px;
+}
+
+.case-layout__main {
+  min-width: 0;
+}
+
+/* ========== 筛选栏 ========== */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.tree-drawer-trigger { display: none; }
+
+.filter-control { width: 150px; }
+.filter-control--short { width: 118px; }
+.filter-search { width: 220px; flex: 1 1 200px; }
+.filter-result {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+/* ========== 批量操作栏 ========== */
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  background: rgba(99, 102, 241, 0.06);
+  border: 1px solid rgba(129, 140, 248, 0.16);
+}
+
+.batch-bar__count {
+  font-weight: 600;
+  color: #4f46e5;
+}
+
+/* ========== 表格内元素 ========== */
+.case-name {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: #4f46e5;
+  font-weight: 600;
+  font-size: 14px;
+  text-align: left;
+}
+
+.case-name:hover { text-decoration: underline; }
+
+.case-meta {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.last-run {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.muted { color: var(--color-text-secondary); font-size: 12px; }
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.review-readonly {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.review-note-readonly {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(99, 102, 241, 0.05);
+  border: 1px solid rgba(129, 140, 248, 0.12);
+  white-space: pre-wrap;
+  color: var(--color-text);
+}
+
+/* ========== 详情抽屉 ========== */
+.drawer-title {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #312e81;
+}
+
+.detail-section { margin-bottom: 18px; }
+
+.definition-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 20px;
+  margin: 0;
+}
+
+.definition-list div { display: flex; flex-direction: column; gap: 4px; }
+.definition-list dt { font-size: 12px; color: var(--color-text-secondary); }
+.definition-list dd { margin: 0; font-size: 14px; color: var(--color-text); }
+
+.detail-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.run-detail { margin-top: 16px; }
+
+.run-technical {
+  display: grid;
+  gap: 12px;
+}
+
+.run-technical__block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.run-technical__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.run-technical pre {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow: auto;
+  max-height: 320px;
+}
+
+.batch-edit-hint {
+  margin: 0 0 14px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+.batch-edit-hint strong { color: var(--el-color-primary); }
+
+.import-file-name {
+  margin-left: 12px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.import-editor { margin-top: 12px; font-size: 13px; }
+
+/* ========== 移动端卡片（默认桌面隐藏） ========== */
+.mobile-cards { display: none; }
+.mobile-case {
+  background: #ffffff;
+  border: 1px solid rgba(129, 140, 248, 0.14);
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+  display: grid;
+  gap: 10px;
+}
+.mobile-case__title { display: flex; align-items: center; gap: 10px; }
+.mobile-case__tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.mobile-case__url { font-size: 12px; color: var(--color-text-secondary); word-break: break-all; }
+.case-sequence { font-size: 12px; color: var(--color-text-secondary); }
+
 /* ========== 响应式 ========== */
 @media (max-width: 960px) {
+  .summary-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .case-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .case-layout__tree { display: none; }
+
+  .tree-drawer-trigger { display: inline-flex; }
+
   .api-hero {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2429,7 +4026,7 @@ onMounted(() => {
     gap: 10px;
   }
 
-  .el-table {
+  .case-table {
     display: none;
   }
 
