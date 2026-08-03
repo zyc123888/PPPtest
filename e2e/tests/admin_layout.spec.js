@@ -51,7 +51,8 @@ test('企业级后台首页加载与导航验证', async ({ page }) => {
   // 切换到 UI 用例
   await page.getByRole('menuitem', { name: 'UI 用例' }).click()
   await expect(page).toHaveURL(/\/case\/ui/)
-  await expect(page.getByRole('button', { name: '新增 UI 用例' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '高级创建' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'AI 创建' })).toBeVisible()
   
   // 切换到执行中心
   await page.getByRole('menuitem', { name: '执行中心' }).click()

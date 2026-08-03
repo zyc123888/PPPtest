@@ -1,0 +1,175 @@
+name: Publish and Deploy
+
+on:
+  workflow_run:
+    workflows:
+      - Stack Tests
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/ppptest
+
+jobs:
+  publish:
+    name: Publish production images
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'master') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.release.outputs.image_tag }}
+      release_sha: ${{ steps.release.outputs.release_sha }}
+    steps:
+      - name: Resolve release revision
+        id: release
+        env:
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          release_sha="${WORKFLOW_SHA:-${DISPATCH_SHA}}"
+          echo "release_sha=${release_sha}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=sha-${release_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out tested revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.release.outputs.release_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          target: runtime
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-backend:${{ steps.release.outputs.image_tag }}
+            ${{ env.IMAGE_PREFIX }}-backend:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.release.outputs.release_sha }}
+          cache-from: type=gha,scope=backend-runtime
+          cache-to: type=gha,mode=max,scope=backend-runtime
+
+      - name: Build and publish browser worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          target: execution
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-worker:${{ steps.release.outputs.image_tag }}
+            ${{ env.IMAGE_PREFIX }}-worker:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.release.outputs.release_sha }}
+          cache-from: type=gha,scope=backend-execution
+          cache-to: type=gha,mode=max,scope=backend-execution
+
+      - name: Build and publish frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-frontend:${{ steps.release.outputs.image_tag }}
+            ${{ env.IMAGE_PREFIX }}-frontend:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.release.outputs.release_sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  deploy:
+    name: Deploy production
+    needs:
+      - publish
+    if: >-
+      needs.publish.result == 'success' &&
+      vars.PRODUCTION_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+    concurrency:
+      group: omnitest-production
+      cancel-in-progress: false
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      IMAGE_TAG: ${{ needs.publish.outputs.image_tag }}
+    steps:
+      - name: Check out deployed revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.publish.outputs.release_sha }}
+
+      - name: Validate deployment configuration
+        run: |
+          missing=0
+          for name in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing GitHub production secret: ${name}" >&2
+              missing=1
+            fi
+          done
+          if [[ "${missing}" -ne 0 ]]; then
+            exit 1
+          fi
+          echo "DEPLOY_PORT=${DEPLOY_PORT:-22}" >> "$GITHUB_ENV"
+          echo "DEPLOY_PATH=${DEPLOY_PATH:-/opt/omnitest}" >> "$GITHUB_ENV"
+
+      - name: Configure SSH
+        run: |
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/omnitest_deploy
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 0600 ~/.ssh/omnitest_deploy ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host omnitest-production
+            HostName ${DEPLOY_HOST}
+            User ${DEPLOY_USER}
+            Port ${DEPLOY_PORT}
+            IdentityFile ~/.ssh/omnitest_deploy
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+          EOF
+          chmod 0600 ~/.ssh/config
+
+      - name: Upload deployment definition
+        run: |
+          # DEPLOY_PATH is a repository variable intentionally expanded locally.
+          # shellcheck disable=SC2029
+          ssh omnitest-production "mkdir -p '${DEPLOY_PATH}'"
+          scp deploy/compose.production.yml deploy/deploy.sh \
+            omnitest-production:"${DEPLOY_PATH}/"
+
+      - name: Deploy and verify
+        run: |
+          # DEPLOY_PATH and IMAGE_TAG are trusted workflow values expanded locally.
+          # shellcheck disable=SC2029
+          ssh omnitest-production \
+            "cd '${DEPLOY_PATH}' && chmod 0750 deploy.sh && ./deploy.sh '${IMAGE_TAG}'"

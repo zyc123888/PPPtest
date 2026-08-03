@@ -22,6 +22,9 @@ test-results/
 e2e/test-results*/
 e2e/reports/
 .env
+deploy/.env.production
+deploy/.last-successful-image-tag
+deploy/.deploy-lock/
 *.zip
 
 # Local assistant and backup artifacts
