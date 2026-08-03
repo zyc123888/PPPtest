@@ -26,7 +26,7 @@ RUN apt-get update \
     && addgroup --system app \
     && adduser --system --ingroup app --home /home/app app \
     && adduser app dialout \
-    && mkdir -p /home/app /app /app/reports /ms-playwright \
+    && mkdir -p /home/app /app /app/reports /app/uploads /app/celery /ms-playwright \
     && chown -R app:app /home/app /app /ms-playwright \
     && chmod 0775 /app/reports \
     && apt-get purge -y gcc \

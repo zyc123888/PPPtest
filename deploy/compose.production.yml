@@ -1,0 +1,197 @@
+x-app-environment: &app-environment
+  APP_ENV: production
+  DATABASE_URL: "${DOCKER_DATABASE_URL}"
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/0
+  BACKEND_INTERNAL_URL: http://backend:8000
+  FRONTEND_INTERNAL_URL: http://frontend:3000
+  BACKEND_PUBLIC_URL: "${PUBLIC_URL}"
+  FRONTEND_PUBLIC_URL: "${PUBLIC_URL}"
+  CORS_ORIGINS: "${PUBLIC_URL}"
+  APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
+  INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD}"
+  AUTO_BOOTSTRAP_ON_STARTUP: "true"
+  SEED_DEMO_DATA_ON_BOOTSTRAP: "${SEED_DEMO_DATA_ON_BOOTSTRAP:-false}"
+  CASE_GENERATION_RULES_DIR: claw_5skill_final
+  CASE_GENERATION_UNIFIED_RULES_DIR: claw_5skill_unified
+  UI_CASE_SKILL_DIR: ui_case_skills
+  CASE_GEN_WATCHDOG_ENABLED: "true"
+  CASE_GEN_MAX_CONCURRENCY: "${CASE_GEN_MAX_CONCURRENCY:-4}"
+  CASE_GEN_REQUIREMENT_MAX_TOKENS: "${CASE_GEN_REQUIREMENT_MAX_TOKENS:-8000}"
+  CASE_GEN_REQUIREMENT_BATCH_CONCURRENCY: "${CASE_GEN_REQUIREMENT_BATCH_CONCURRENCY:-2}"
+  CASE_GEN_TESTCASE_REPAIR_MAX_ROUNDS: "${CASE_GEN_TESTCASE_REPAIR_MAX_ROUNDS:-1}"
+  CASE_GEN_TRUSTED_SHARD_CONCURRENCY: "${CASE_GEN_TRUSTED_SHARD_CONCURRENCY:-2}"
+  CASE_GEN_SCOPE_INDEX_CONCURRENCY: "${CASE_GEN_SCOPE_INDEX_CONCURRENCY:-2}"
+  CASE_GEN_SCOPE_INDEX_TWO_PHASE_TRIGGER_SECTIONS: "${CASE_GEN_SCOPE_INDEX_TWO_PHASE_TRIGGER_SECTIONS:-16}"
+  CASE_GEN_SCOPE_INDEX_TWO_PHASE_TRIGGER_TEXT: "${CASE_GEN_SCOPE_INDEX_TWO_PHASE_TRIGGER_TEXT:-48000}"
+  CASE_GEN_TRUSTED_MODEL_GATE_ENABLED: "${CASE_GEN_TRUSTED_MODEL_GATE_ENABLED:-false}"
+  CASE_GEN_TRUSTED_SHARD_MAX_ATTEMPTS: "${CASE_GEN_TRUSTED_SHARD_MAX_ATTEMPTS:-2}"
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks:
+    - omnitest-network
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  mysql:
+    <<: *service-defaults
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: "${MARIADB_DATABASE}"
+      MARIADB_USER: "${MARIADB_USER}"
+      MARIADB_PASSWORD: "${MARIADB_PASSWORD}"
+      MARIADB_ROOT_PASSWORD: "${MARIADB_ROOT_PASSWORD}"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u$${MARIADB_USER} -p$${MARIADB_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    <<: *service-defaults
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  backend:
+    <<: *service-defaults
+    image: "${IMAGE_PREFIX}-backend:${IMAGE_TAG:-latest}"
+    environment:
+      <<: *app-environment
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - reports_data:/app/reports
+      - uploads_data:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/v1/system/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: "1.5"
+
+  worker:
+    <<: *service-defaults
+    image: "${IMAGE_PREFIX}-worker:${IMAGE_TAG:-latest}"
+    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=solo -Q execution,celery -n execution@%h'
+    environment:
+      <<: *app-environment
+      MIDSCENE_NODE_BIN: /usr/local/bin/node
+      MIDSCENE_RUNNER_PATH: /app/midscene/midscene_runner.js
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - reports_data:/app/reports
+      - uploads_data:/app/uploads
+    shm_size: 512M
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: "2.0"
+
+  case-worker:
+    <<: *service-defaults
+    image: "${IMAGE_PREFIX}-backend:${IMAGE_TAG:-latest}"
+    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=prefork --concurrency=1 -Q case_generation -n case-generation@%h'
+    environment:
+      <<: *app-environment
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - reports_data:/app/reports
+      - uploads_data:/app/uploads
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: "1.5"
+
+  beat:
+    <<: *service-defaults
+    image: "${IMAGE_PREFIX}-backend:${IMAGE_TAG:-latest}"
+    command: sh -c 'exec celery -A app.core.celery_app.celery_app beat -l info --schedule /app/celery/celerybeat-schedule'
+    environment:
+      <<: *app-environment
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - beat_data:/app/celery
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+  frontend:
+    <<: *service-defaults
+    image: "${IMAGE_PREFIX}-frontend:${IMAGE_TAG:-latest}"
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${PUBLIC_HTTP_PORT:-80}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+
+volumes:
+  mysql_data:
+  redis_data:
+  reports_data:
+  uploads_data:
+  beat_data:
+
+networks:
+  omnitest-network:
+    driver: bridge

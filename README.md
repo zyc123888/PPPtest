@@ -10,6 +10,7 @@
 - pytest 接口自测
 - Playwright 前端自测
 - Docker Compose 一键部署
+- GitHub Actions 构建 GHCR 镜像并自动部署到生产服务器
 
 ## 技术栈
 
@@ -190,6 +191,10 @@ docker-compose down -v
 - `POST /api/v1/tools/base64/encode`：Base64 编码
 - `POST /api/v1/tools/base64/decode`：Base64 解码
 - `POST /api/v1/tools/timestamp/convert`：时间戳转换
+
+## 生产部署
+
+生产环境采用 GitHub Actions、GitHub Container Registry 和远程 Docker Compose。完整初始化、Secrets、自动回滚与备份说明见 [生产部署文档](docs/production_deployment.md)。
 
 ## 说明
 
