@@ -51,7 +51,8 @@ describe('generator2 component boundaries', () => {
         trusted: true,
         generationMetrics,
         gateIssues
-      }
+      },
+      global: { renderStubDefaultSlot: true }
     })
 
     expect(wrapper.findComponent(MetricsPanel).props('generationMetrics')).toEqual(generationMetrics)

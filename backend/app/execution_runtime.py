@@ -9,14 +9,73 @@ from __future__ import annotations
 
 import base64
 import json
+import random
 import re
+import string
+import time
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from urllib.parse import urljoin
 
 from app.models import Environment, Project
 
 
 _TEMPLATE_VAR_PATTERN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+
+# 内置动态变量名，可在模板中直接使用（如 {{timestamp}}、{{uuid}}）。
+# 用户在项目/环境变量池中定义的同名变量会覆盖内置值。
+_DYNAMIC_VARIABLE_NAMES = (
+    "timestamp",
+    "timestamp_ms",
+    "datetime",
+    "date",
+    "uuid",
+    "random_int",
+    "random_string",
+)
+
+
+def build_dynamic_variables() -> dict:
+    """生成内置动态变量的一组实时值（每次调用重新计算）。
+
+    - timestamp: 当前 Unix 秒级时间戳
+    - timestamp_ms: 当前 Unix 毫秒级时间戳
+    - datetime: 当前 UTC ISO8601 时间
+    - date: 当前 UTC 日期（YYYY-MM-DD）
+    - uuid: 随机 UUID4
+    - random_int: 0-999999 随机整数
+    - random_string: 12 位随机字母数字串
+    """
+    now = datetime.now(timezone.utc)
+    return {
+        "timestamp": int(time.time()),
+        "timestamp_ms": int(time.time() * 1000),
+        "datetime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "date": now.strftime("%Y-%m-%d"),
+        "uuid": str(uuid.uuid4()),
+        "random_int": random.randint(0, 999999),
+        "random_string": "".join(random.choices(string.ascii_letters + string.digits, k=12)),
+    }
+
+
+def build_variable_context(
+    project: Project | None = None,
+    environment: Environment | None = None,
+    extra: dict | None = None,
+) -> dict:
+    """合并生成运行时变量上下文。
+
+    优先级（后者覆盖前者）：内置动态变量 < 项目级变量池 < 环境级变量 < extra（数据集/运行时覆盖）。
+    """
+    variables: dict = build_dynamic_variables()
+    if project is not None and getattr(project, "variables_json", None):
+        variables.update(project.variables_json)
+    if environment is not None and getattr(environment, "variables_json", None):
+        variables.update(environment.variables_json)
+    if extra:
+        variables.update(extra)
+    return variables
 
 
 class MissingTemplateVariableError(ValueError):

@@ -83,6 +83,26 @@
           </el-form-item>
         </div>
         <el-form-item label="故事点"><el-input-number v-model="form.story_points" :min="0" :step="1" /></el-form-item>
+        <div class="form-row2">
+          <el-form-item label="负责人">
+            <el-select v-model="form.owner_id" clearable filterable style="width: 100%" placeholder="选择负责人">
+              <el-option v-for="m in members" :key="m.user_id" :label="memberLabel(m.user_id)" :value="m.user_id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="协作人（多选）">
+            <el-select v-model="form.assignees_json" multiple filterable collapse-tags style="width: 100%" placeholder="选择协作人">
+              <el-option v-for="m in members" :key="m.user_id" :label="memberLabel(m.user_id)" :value="m.user_id" />
+            </el-select>
+          </el-form-item>
+        </div>
+        <div class="form-row2">
+          <el-form-item label="截止时间">
+            <el-date-picker v-model="form.due_date" type="date" value-format="YYYY-MM-DD" style="width: 100%" placeholder="选择日期" />
+          </el-form-item>
+          <el-form-item label="标签">
+            <el-select v-model="form.tags_json" multiple filterable allow-create default-first-option style="width: 100%" placeholder="回车添加标签" />
+          </el-form-item>
+        </div>
       </el-form>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
@@ -102,6 +122,30 @@
           </div>
           <div class="ds-row"><span class="ds-label">优先级</span><el-tag :type="priorityType[current.priority]" effect="plain">{{ current.priority }}</el-tag></div>
           <div class="ds-row"><span class="ds-label">迭代</span><span>{{ iterationMap[current.iteration_id] || '未规划' }}</span></div>
+          <div class="ds-row">
+            <span class="ds-label">负责人</span>
+            <el-select v-model="current.owner_id" :disabled="!canEdit" clearable filterable size="small" style="width: 200px" placeholder="选择负责人" @change="(val) => updateField('owner_id', val)">
+              <el-option v-for="m in members" :key="m.user_id" :label="memberLabel(m.user_id)" :value="m.user_id" />
+            </el-select>
+          </div>
+          <div class="ds-row">
+            <span class="ds-label">协作人</span>
+            <el-select v-model="current.assignees_json" :disabled="!canEdit" multiple filterable collapse-tags size="small" style="width: 260px" placeholder="选择协作人" @change="(val) => updateField('assignees_json', val)">
+              <el-option v-for="m in members" :key="m.user_id" :label="memberLabel(m.user_id)" :value="m.user_id" />
+            </el-select>
+          </div>
+          <div class="ds-row">
+            <span class="ds-label">截止时间</span>
+            <el-date-picker v-model="current.due_date" :disabled="!canEdit" type="date" value-format="YYYY-MM-DD" size="small" style="width: 200px" placeholder="选择日期" @change="(val) => updateField('due_date', val)" />
+          </div>
+          <div class="ds-row"><span class="ds-label">创建人</span><span>{{ memberLabel(current.reporter_id) }}</span></div>
+          <div class="ds-row">
+            <span class="ds-label">标签</span>
+            <div class="ds-tags">
+              <el-tag v-for="t in (current.tags_json || [])" :key="t" size="small" effect="plain">{{ t }}</el-tag>
+              <span v-if="!current.tags_json?.length">-</span>
+            </div>
+          </div>
           <div class="ds-row"><span class="ds-label">描述</span><span>{{ current.description || '-' }}</span></div>
         </div>
 
@@ -163,6 +207,14 @@ const typeOptions = REQUIREMENT_TYPE_OPTIONS
 
 const canEdit = computed(() => ['owner', 'manager', 'member'].includes(props.myRole))
 
+const members = ref([])
+const memberMap = computed(() => {
+  const m = {}
+  members.value.forEach((it) => { m[it.user_id] = it.display_name || it.username || ('#' + it.user_id) })
+  return m
+})
+function memberLabel(id) { return id ? (memberMap.value[id] || ('#' + id)) : '-' }
+
 const loading = ref(false)
 const viewMode = ref('board')
 const items = ref([])
@@ -174,11 +226,12 @@ const filters = reactive({ keyword: '', priority: '', iteration_id: null })
 
 const createVisible = ref(false)
 const createFormRef = ref(null)
-const form = reactive({ title: '', description: '', priority: 'P2', type: 'FEATURE', iteration_id: null, story_points: 0 })
+const form = reactive({ title: '', description: '', priority: 'P2', type: 'FEATURE', iteration_id: null, story_points: 0, owner_id: null, assignees_json: [], due_date: null, tags_json: [] })
 const rules = { title: [{ required: true, message: '标题必填', trigger: 'blur' }] }
 
 const drawerVisible = ref(false)
 const current = ref(null)
+const currentSnapshot = ref(null)
 const linkedCases = ref([])
 const comments = ref([])
 const linkForm = reactive({ case_type: 'API', case_id: 1 })
@@ -191,6 +244,7 @@ const iterationMap = computed(() => {
 })
 
 function formatTime(t) { return t ? String(t).replace('T', ' ').slice(0, 19) : '' }
+function cloneValue(value) { return value == null ? value : JSON.parse(JSON.stringify(value)) }
 
 async function fetchList() {
   loading.value = true
@@ -213,10 +267,14 @@ async function loadIterations() {
   try { iterations.value = await api.get(`/projects/${props.project.id}/iterations`) } catch { /* noop */ }
 }
 
+async function loadMembers() {
+  try { members.value = await api.get(`/projects/${props.project.id}/members`) } catch { /* noop */ }
+}
+
 function reload() { page.value = 1; fetchList() }
 
 function openCreate() {
-  Object.assign(form, { title: '', description: '', priority: 'P2', type: 'FEATURE', iteration_id: null, story_points: 0 })
+  Object.assign(form, { title: '', description: '', priority: 'P2', type: 'FEATURE', iteration_id: null, story_points: 0, owner_id: null, assignees_json: [], due_date: null, tags_json: [] })
   createVisible.value = true
 }
 
@@ -233,7 +291,8 @@ function submitCreate() {
 }
 
 async function openDrawer(row) {
-  current.value = { ...row }
+  current.value = cloneValue(row)
+  currentSnapshot.value = cloneValue(row)
   drawerVisible.value = true
   try {
     linkedCases.value = await api.get(`/requirements/${row.id}/cases`)
@@ -244,9 +303,25 @@ async function openDrawer(row) {
 async function changeStatus(status) {
   try {
     await api.put(`/requirements/${current.value.id}/status`, { status })
+    currentSnapshot.value.status = status
     ElMessage.success('状态已更新')
     fetchList()
-  } catch (error) { ElMessage.error(error.message); await openDrawer(current.value) }
+  } catch (error) {
+    current.value.status = currentSnapshot.value.status
+    ElMessage.error(error.message)
+  }
+}
+
+async function updateField(field, value) {
+  try {
+    await api.put(`/requirements/${current.value.id}`, { [field]: value })
+    currentSnapshot.value[field] = cloneValue(value)
+    ElMessage.success('已更新')
+    fetchList()
+  } catch (error) {
+    current.value[field] = cloneValue(currentSnapshot.value[field])
+    ElMessage.error(error.message)
+  }
 }
 
 async function handleMove({ card, toStatus, orderIndex }) {
@@ -280,7 +355,7 @@ async function addComment() {
   } catch (error) { ElMessage.error(error.message) }
 }
 
-onMounted(() => { loadIterations(); fetchList() })
+onMounted(() => { loadIterations(); loadMembers(); fetchList() })
 </script>
 
 <style scoped>
@@ -294,6 +369,8 @@ onMounted(() => { loadIterations(); fetchList() })
 }
 .wb-toolbar__left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .form-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.form-row2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.ds-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .kc-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
 .kc-meta { display: flex; align-items: center; gap: 6px; }
 .kc-pts { font-size: 12px; color: #64748b; }

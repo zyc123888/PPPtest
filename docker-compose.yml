@@ -124,6 +124,8 @@ services:
       BACKEND_PUBLIC_URL: http://127.0.0.1:8000
       FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
       APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
+      MIDSCENE_NODE_BIN: /usr/local/bin/node
+      MIDSCENE_RUNNER_PATH: /app/midscene/midscene_runner.js
       CASE_GENERATION_RULES_DIR: claw_5skill_final
       CASE_GENERATION_UNIFIED_RULES_DIR: claw_5skill_unified
       CASE_GEN_MAX_CONCURRENCY: "4"

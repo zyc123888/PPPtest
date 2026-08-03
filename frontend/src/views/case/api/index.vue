@@ -8,6 +8,9 @@
         <el-tooltip content="导入接口用例" placement="bottom">
           <el-button :icon="Upload" aria-label="导入接口用例" @click="openImportDialog" />
         </el-tooltip>
+        <el-tooltip v-if="canTest" content="导入 OpenAPI / Postman" placement="bottom">
+          <el-button :icon="Connection" aria-label="导入 OpenAPI / Postman" @click="openSpecImportDialog" />
+        </el-tooltip>
         <el-tooltip content="导出当前结果" placement="bottom">
           <el-button :icon="Download" aria-label="导出当前结果" @click="exportCurrentCases" />
         </el-tooltip>
@@ -545,7 +548,40 @@
                   <el-empty v-else-if="methodSupportsBody" description="none：不发送请求体" :image-size="72" />
                 </el-tab-pane>
                 <el-tab-pane label="Assertions" name="assertions">
-                  <el-form-item label="断言 JSON" prop="assertions_text">
+                  <div class="request-editor-toolbar">
+                    <el-radio-group :model-value="temp.assertions_mode" size="small" @update:model-value="handleAssertionsModeChange">
+                      <el-radio-button label="form">结构化</el-radio-button>
+                      <el-radio-button label="json">JSON 高级</el-radio-button>
+                    </el-radio-group>
+                    <el-button v-if="temp.assertions_mode === 'form'" size="small" @click="addAssertionRow">添加断言</el-button>
+                  </div>
+                  <template v-if="temp.assertions_mode === 'form'">
+                    <el-alert
+                      v-if="!temp.assertion_rows.length"
+                      title="未配置断言时，执行仅校验期望状态码"
+                      type="info"
+                      :closable="false"
+                      class="section-gap"
+                    />
+                    <div v-for="(row, index) in temp.assertion_rows" :key="index" class="assertion-row">
+                      <el-select v-model="row.type" class="assertion-type" @change="onAssertionTypeChange(row)">
+                        <el-option v-for="opt in assertionTypeOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+                      </el-select>
+                      <el-input
+                        v-if="assertionNeedsExpression(row.type)"
+                        v-model="row.expression"
+                        class="assertion-expression"
+                        :placeholder="row.type === 'json_path' ? '$.data.id' : 'content-type'"
+                      />
+                      <el-select v-if="assertionNeedsOperator(row.type)" v-model="row.operator" class="assertion-operator">
+                        <el-option v-for="opt in operatorOptionsFor(row.type)" :key="opt.value" :label="opt.label" :value="opt.value" />
+                      </el-select>
+                      <el-input v-if="assertionNeedsExpected(row)" v-model="row.expected" class="assertion-expected" placeholder="期望值" />
+                      <el-checkbox v-if="row.type === 'body_contains'" v-model="row.negate">取反</el-checkbox>
+                      <el-button size="small" type="danger" text @click="temp.assertion_rows.splice(index, 1)">移除</el-button>
+                    </div>
+                  </template>
+                  <el-form-item v-else label="断言 JSON" prop="assertions_text">
                     <el-input
                       v-model="temp.assertions_text"
                       type="textarea"
@@ -553,6 +589,144 @@
                       placeholder='[{"type": "status_code", "expected": 200}]'
                     />
                   </el-form-item>
+                </el-tab-pane>
+                <el-tab-pane label="提取变量" name="extractors">
+                  <el-alert
+                    title="从响应中提取变量：执行结果与调试面板会展示提取值；场景步骤中提取的变量可被后续步骤以 {{变量名}} 引用。"
+                    type="info"
+                    :closable="false"
+                    class="section-gap"
+                  />
+                  <div class="request-editor-toolbar">
+                    <span>响应 → 变量</span>
+                    <el-button size="small" @click="addExtractorRow">添加提取器</el-button>
+                  </div>
+                  <el-table :data="temp.extractor_rows" border size="small">
+                    <el-table-column label="变量名" min-width="130">
+                      <template #default="scope">
+                        <el-input v-model="scope.row.name" placeholder="token" />
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="来源" width="140">
+                      <template #default="scope">
+                        <el-select v-model="scope.row.source">
+                          <el-option label="JSONPath" value="json_path" />
+                          <el-option label="响应头" value="header" />
+                          <el-option label="正则" value="regex" />
+                          <el-option label="状态码" value="status_code" />
+                        </el-select>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="表达式" min-width="200">
+                      <template #default="scope">
+                        <el-input
+                          v-model="scope.row.expression"
+                          :disabled="scope.row.source === 'status_code'"
+                          :placeholder="extractorPlaceholder(scope.row.source)"
+                        />
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="操作" width="90" align="center">
+                      <template #default="scope">
+                        <el-button size="small" type="danger" @click="temp.extractor_rows.splice(scope.$index, 1)">移除</el-button>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </el-tab-pane>
+                <el-tab-pane :label="scenarioTabLabel" name="scenario">
+                  <el-alert
+                    title="配置场景步骤后，执行时按步骤顺序依次发送请求（失败即停），忽略上方单请求的 Params/Body/Assertions 配置；步骤提取的变量可在后续步骤通过 {{变量名}} 引用。"
+                    type="warning"
+                    :closable="false"
+                    class="section-gap"
+                  />
+                  <div class="request-editor-toolbar">
+                    <span>共 {{ temp.scenario_steps.length }} 个步骤</span>
+                    <el-button size="small" @click="addScenarioStep">添加步骤</el-button>
+                  </div>
+                  <el-empty v-if="!temp.scenario_steps.length" description="未配置步骤：按单请求模式执行" :image-size="72" />
+                  <div v-for="(step, index) in temp.scenario_steps" :key="index" class="scenario-step-card">
+                    <div class="scenario-step-header">
+                      <el-tag size="small" effect="plain">步骤 {{ index + 1 }}</el-tag>
+                      <el-input v-model="step.name" size="small" placeholder="步骤名称，如：登录取 token" class="scenario-step-name" />
+                      <div class="scenario-step-actions">
+                        <el-button size="small" text :disabled="index === 0" @click="moveScenarioStep(index, -1)">上移</el-button>
+                        <el-button size="small" text :disabled="index === temp.scenario_steps.length - 1" @click="moveScenarioStep(index, 1)">下移</el-button>
+                        <el-button size="small" type="danger" text @click="temp.scenario_steps.splice(index, 1)">删除</el-button>
+                      </div>
+                    </div>
+                    <div class="scenario-step-line">
+                      <el-select v-model="step.method" size="small" class="scenario-step-method">
+                        <el-option v-for="m in methodOptions" :key="m" :label="m" :value="m" />
+                      </el-select>
+                      <el-input v-model="step.path" size="small" placeholder="/api/v1/login，可引用 {{变量名}}" />
+                      <el-input-number v-model="step.expected_status" size="small" :min="100" :max="599" controls-position="right" class="scenario-step-status" />
+                    </div>
+                    <el-collapse class="scenario-step-advanced">
+                      <el-collapse-item :name="'adv-' + index" title="Headers / Body / 断言 / 提取（JSON）">
+                        <el-form-item label="Headers JSON">
+                          <el-input v-model="step.headers_text" type="textarea" :rows="2" placeholder='{"accept": "application/json"}' />
+                        </el-form-item>
+                        <el-form-item label="Body JSON">
+                          <el-input v-model="step.body_text" type="textarea" :rows="3" placeholder='{"username": "{{username}}"}' />
+                        </el-form-item>
+                        <el-form-item label="断言 JSON 数组">
+                          <el-input v-model="step.assertions_text" type="textarea" :rows="3" placeholder='[{"type": "json_path", "expression": "$.token", "operator": "exists"}]' />
+                        </el-form-item>
+                        <el-form-item label="提取器 JSON 数组">
+                          <el-input v-model="step.extractors_text" type="textarea" :rows="2" placeholder='[{"name": "token", "source": "json_path", "expression": "$.token"}]' />
+                        </el-form-item>
+                      </el-collapse-item>
+                    </el-collapse>
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane :label="dataDrivenTabLabel" name="datasets">
+                  <div class="request-editor-toolbar">
+                    <el-tooltip
+                      placement="top"
+                      content="数据驱动：填写多组变量后，执行时将按组循环发送同一用例，每组变量可在 Path/Headers/Body 中以 {{变量名}} 引用。任一组失败则用例整体失败。"
+                    >
+                      <span>多组数据参数化 <el-icon><QuestionFilled /></el-icon></span>
+                    </el-tooltip>
+                  </div>
+                  <el-form-item label="数据集 JSON">
+                    <el-input
+                      v-model="temp.datasets_text"
+                      type="textarea"
+                      :rows="8"
+                      placeholder='[
+  { "name": "普通用户", "data": { "username": "alice", "pwd": "123456" } },
+  { "name": "管理员", "data": { "username": "admin", "pwd": "admin123" } }
+]'
+                    />
+                  </el-form-item>
+                  <div class="editor-hint">留空则按普通单次执行；配置后将忽略上方单请求的场景步骤，按数据组逐次执行。</div>
+                </el-tab-pane>
+                <el-tab-pane label="Mock" name="mock">
+                  <div class="request-editor-toolbar">
+                    <el-tooltip
+                      placement="top"
+                      content="开启后，可通过 /api/v1/mock/{project_id}{path} 按本用例的 method+path 返回下方预设响应，无需登录。"
+                    >
+                      <span>轻量 Mock 响应 <el-icon><QuestionFilled /></el-icon></span>
+                    </el-tooltip>
+                    <el-switch v-model="temp.mock_enabled" active-text="启用 Mock" />
+                  </div>
+                  <template v-if="temp.mock_enabled">
+                    <el-form-item label="状态码">
+                      <el-input-number v-model="temp.mock_status_code" :min="100" :max="599" controls-position="right" />
+                      <span class="editor-hint" style="margin-left: 12px">延迟(ms)</span>
+                      <el-input-number v-model="temp.mock_delay_ms" :min="0" :max="10000" :step="100" controls-position="right" style="margin-left: 8px" />
+                    </el-form-item>
+                    <el-form-item label="响应头 JSON">
+                      <el-input v-model="temp.mock_headers_text" type="textarea" :rows="3" placeholder='{"Content-Type": "application/json"}' />
+                    </el-form-item>
+                    <el-form-item label="响应体">
+                      <el-input v-model="temp.mock_body_text" type="textarea" :rows="6" placeholder='{"code": 0, "data": {"id": 1}}' />
+                    </el-form-item>
+                    <div class="editor-hint">响应体为合法 JSON 时以 application/json 返回，否则作为纯文本返回。</div>
+                  </template>
+                  <el-empty v-else description="未启用 Mock" :image-size="72" />
                 </el-tab-pane>
               </el-tabs>
             </div>
@@ -577,6 +751,13 @@
                     <el-tag :type="debugResponse.response.status_code < 400 ? 'success' : 'danger'">
                       {{ debugResponse.response.status_code }}
                     </el-tag>
+                    <el-tag
+                      v-if="debugResponse.assertion_passed !== null && debugResponse.assertion_passed !== undefined"
+                      :type="debugResponse.assertion_passed ? 'success' : 'danger'"
+                      effect="plain"
+                    >
+                      {{ debugResponse.assertion_passed ? '断言通过' : '断言失败' }}
+                    </el-tag>
                     <span>{{ debugResponse.duration_ms }} ms</span>
                     <span>{{ debugResponse.response.size }} bytes</span>
                     <span>{{ debugResponse.request.method }} {{ debugResponse.request.url }}</span>
@@ -584,6 +765,25 @@
                   <el-tabs v-model="debugResponseTab">
                     <el-tab-pane label="Body" name="body">
                       <pre class="response-pre">{{ formatDebugBody(debugResponse.response.body) }}</pre>
+                    </el-tab-pane>
+                    <el-tab-pane
+                      v-if="debugResponse.assertion_results?.length || debugResponse.extractor_results?.length"
+                      label="断言/提取"
+                      name="assertions"
+                    >
+                      <div class="debug-assertion-list">
+                        <div v-for="(item, index) in debugResponse.assertion_results" :key="'a' + index" class="debug-assertion-item">
+                          <el-tag size="small" :type="item.ok ? 'success' : 'danger'">{{ item.ok ? 'PASS' : 'FAIL' }}</el-tag>
+                          <span>{{ item.message }}</span>
+                        </div>
+                        <template v-if="debugResponse.extractor_results?.length">
+                          <el-divider content-position="left">变量提取</el-divider>
+                          <div v-for="(item, index) in debugResponse.extractor_results" :key="'e' + index" class="debug-assertion-item">
+                            <el-tag size="small" :type="item.ok ? 'success' : 'danger'">{{ item.ok ? 'PASS' : 'FAIL' }}</el-tag>
+                            <span>{{ item.message }}</span>
+                          </div>
+                        </template>
+                      </div>
                     </el-tab-pane>
                     <el-tab-pane label="Headers" name="headers">
                       <pre class="response-pre">{{ JSON.stringify(debugResponse.response.headers, null, 2) }}</pre>
@@ -795,6 +995,61 @@
         <el-button type="primary" :disabled="!importPreview" :loading="importSubmitting" @click="submitImportCases">开始导入</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="specImportVisible" title="导入 OpenAPI / Postman" width="640px">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        class="section-gap"
+        title="支持 OpenAPI/Swagger (JSON/YAML) 与 Postman Collection v2 (JSON)，解析后批量生成接口用例。"
+      />
+      <el-form label-width="96px">
+        <el-form-item label="目标项目">
+          <el-select v-model="specImportForm.project_id" placeholder="选择项目" style="width: 100%">
+            <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="来源类型">
+          <el-radio-group v-model="specImportForm.source_type">
+            <el-radio-button label="openapi">OpenAPI / Swagger</el-radio-button>
+            <el-radio-button label="postman">Postman Collection</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="目录前缀">
+          <el-input v-model="specImportForm.folder_path" placeholder="可选，导入用例将放入该目录下" clearable />
+        </el-form-item>
+        <el-form-item label="文档内容">
+          <input ref="specImportInputRef" type="file" accept=".json,.yaml,.yml,application/json" style="display: none" @change="handleSpecFile" />
+          <div style="width: 100%">
+            <el-button :icon="Upload" size="small" @click="specImportInputRef?.click()">选择文件</el-button>
+            <span v-if="specImportFileName" class="import-file-name">{{ specImportFileName }}</span>
+            <el-input
+              v-model="specImportForm.content"
+              type="textarea"
+              :rows="8"
+              placeholder="粘贴 OpenAPI / Postman 文档，或上传文件"
+              style="margin-top: 8px"
+            />
+          </div>
+        </el-form-item>
+      </el-form>
+      <div v-if="specImportPreview" class="import-editor">
+        <p>解析出 <strong>{{ specImportPreview.detected_count }}</strong> 个接口<span v-if="specImportPreview.dry_run">（预览，未写入）</span><span v-else>，已创建 <strong>{{ specImportPreview.created_count }}</strong> 条</span>。</p>
+        <el-alert v-for="(w, i) in specImportPreview.warnings" :key="i" type="warning" :closable="false" :title="w" style="margin-bottom: 6px" />
+        <el-table v-if="specImportPreview.items?.length" :data="specImportPreview.items" border size="small" max-height="260">
+          <el-table-column prop="method" label="Method" width="90" />
+          <el-table-column prop="path" label="Path" min-width="200" show-overflow-tooltip />
+          <el-table-column prop="name" label="名称" min-width="160" show-overflow-tooltip />
+          <el-table-column prop="folder_path" label="目录" min-width="120" show-overflow-tooltip />
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="specImportVisible = false">取消</el-button>
+        <el-button :loading="specImportLoading" @click="previewSpecImport">解析预览</el-button>
+        <el-button type="primary" :loading="specImportSubmitting" @click="submitSpecImport">开始导入</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -804,7 +1059,7 @@ import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   CircleCheck, Delete, DocumentCopy, Download, Edit, EditPen, Files, Finished, Plus,
-  Refresh, Search, Tickets, TrendCharts, Upload, VideoPlay, View
+  QuestionFilled, Refresh, Search, Tickets, TrendCharts, Upload, VideoPlay, View, Connection
 } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import FolderTree from '../ui/components/FolderTree.vue'
@@ -868,6 +1123,18 @@ const importInputRef = ref(null)
 const importFileName = ref('')
 const importPreview = ref(null)
 const importSubmitting = ref(false)
+const specImportVisible = ref(false)
+const specImportInputRef = ref(null)
+const specImportFileName = ref('')
+const specImportPreview = ref(null)
+const specImportLoading = ref(false)
+const specImportSubmitting = ref(false)
+const specImportForm = reactive({
+  project_id: undefined,
+  source_type: 'openapi',
+  content: '',
+  folder_path: ''
+})
 const methodOptions = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 const bodyModes = new Set(['none', 'form-data', 'x-www-form-urlencoded', 'raw', 'binary', 'graphql'])
 const methodProfiles = {
@@ -922,6 +1189,16 @@ const temp = reactive({
   graphql_query: '',
   graphql_variables_text: '{}',
   assertions_text: '[\n  { "type": "status_code", "expected": 200 }\n]',
+  assertions_mode: 'form',
+  assertion_rows: [],
+  extractor_rows: [],
+  scenario_steps: [],
+  datasets_text: '',
+  mock_enabled: false,
+  mock_status_code: 200,
+  mock_headers_text: '{\n  "Content-Type": "application/json"\n}',
+  mock_body_text: '',
+  mock_delay_ms: 0,
   priority: 'P2',
   status: 'ACTIVE',
   expected_status: 200,
@@ -997,6 +1274,228 @@ const tagOptions = computed(() => {
 
 const runEnvironmentOptions = computed(() => environments.value.filter((item) => item.project_id === runForm.project_id))
 const debugEnvironmentOptions = computed(() => environments.value.filter((item) => item.project_id === temp.project_id))
+
+const assertionTypeOptions = [
+  { label: '状态码', value: 'status_code' },
+  { label: 'JSONPath', value: 'json_path' },
+  { label: '响应体包含', value: 'body_contains' },
+  { label: '响应体正则', value: 'body_regex' },
+  { label: '响应头', value: 'header' },
+  { label: '响应耗时(ms)', value: 'response_time_ms' }
+]
+
+const comparableOperators = [
+  { label: '等于', value: 'eq' },
+  { label: '不等于', value: 'ne' },
+  { label: '包含', value: 'contains' },
+  { label: '不包含', value: 'not_contains' },
+  { label: '匹配正则', value: 'regex' },
+  { label: '>', value: 'gt' },
+  { label: '>=', value: 'gte' },
+  { label: '<', value: 'lt' },
+  { label: '<=', value: 'lte' },
+  { label: '存在', value: 'exists' },
+  { label: '不存在', value: 'not_exists' },
+  { label: '长度等于', value: 'length_eq' },
+  { label: '长度大于', value: 'length_gt' },
+  { label: '长度小于', value: 'length_lt' }
+]
+
+const numericOperators = comparableOperators.filter((item) => ['eq', 'ne', 'gt', 'gte', 'lt', 'lte'].includes(item.value))
+
+const operatorOptionsFor = (type) => {
+  if (type === 'status_code' || type === 'response_time_ms') return numericOperators
+  if (type === 'header') return comparableOperators.filter((item) => !item.value.startsWith('length'))
+  return comparableOperators
+}
+
+const assertionNeedsExpression = (type) => type === 'json_path' || type === 'header'
+const assertionNeedsOperator = (type) => ['status_code', 'json_path', 'header', 'response_time_ms'].includes(type)
+const assertionNeedsExpected = (row) => !['exists', 'not_exists'].includes(row.operator || '')
+
+const defaultAssertionRow = () => ({ type: 'json_path', expression: '', operator: 'eq', expected: '', negate: false })
+
+const addAssertionRow = () => {
+  temp.assertion_rows.push(defaultAssertionRow())
+}
+
+const onAssertionTypeChange = (row) => {
+  if (row.type === 'response_time_ms') row.operator = 'lte'
+  else if (!operatorOptionsFor(row.type).some((item) => item.value === row.operator)) row.operator = 'eq'
+}
+
+const coerceExpectedValue = (value) => {
+  if (typeof value !== 'string') return value
+  const text = value.trim()
+  if (text !== '' && /^-?\d+(\.\d+)?$/.test(text)) return Number(text)
+  return value
+}
+
+const assertionRowsToJson = (rows) => rows
+  .filter((row) => row.type)
+  .map((row) => {
+    const entry = { type: row.type }
+    if (assertionNeedsExpression(row.type)) {
+      if (row.type === 'header') entry.name = row.expression
+      else entry.expression = row.expression
+    }
+    if (assertionNeedsOperator(row.type) && row.operator) entry.operator = row.operator
+    if (assertionNeedsExpected(row)) entry.expected = coerceExpectedValue(row.expected)
+    if (row.type === 'body_contains' && row.negate) entry.negate = true
+    return entry
+  })
+
+const assertionJsonToRows = (items) => {
+  if (!Array.isArray(items)) return null
+  const known = new Set(assertionTypeOptions.map((item) => item.value))
+  const rows = []
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || !known.has(item.type)) return null
+    rows.push({
+      type: item.type,
+      expression: item.type === 'header' ? (item.name || item.expression || '') : (item.expression || ''),
+      operator: item.operator || (item.type === 'response_time_ms' ? 'lte' : 'eq'),
+      expected: item.expected === undefined || item.expected === null ? '' : String(item.expected),
+      negate: Boolean(item.negate)
+    })
+  }
+  return rows
+}
+
+const handleAssertionsModeChange = (mode) => {
+  if (mode === temp.assertions_mode) return
+  if (mode === 'json') {
+    temp.assertions_text = JSON.stringify(assertionRowsToJson(temp.assertion_rows), null, 2)
+    temp.assertions_mode = 'json'
+    return
+  }
+  try {
+    const parsed = temp.assertions_text ? JSON.parse(temp.assertions_text) : []
+    const rows = assertionJsonToRows(parsed)
+    if (rows === null) {
+      ElMessage.warning('当前 JSON 包含结构化编辑器不支持的字段，请继续使用 JSON 高级模式')
+      return
+    }
+    temp.assertion_rows = rows
+    temp.assertions_mode = 'form'
+  } catch (e) {
+    ElMessage.warning('断言 JSON 格式错误，无法切换到结构化模式')
+  }
+}
+
+const hydrateAssertionEditors = (assertionsJson) => {
+  const rows = assertionJsonToRows(assertionsJson || [])
+  if (rows === null) {
+    temp.assertions_mode = 'json'
+    temp.assertion_rows = []
+    temp.assertions_text = JSON.stringify(assertionsJson, null, 2)
+  } else {
+    temp.assertions_mode = 'form'
+    temp.assertion_rows = rows
+    temp.assertions_text = assertionsJson ? JSON.stringify(assertionsJson, null, 2) : '[\n  { "type": "status_code", "expected": 200 }\n]'
+  }
+}
+
+const addExtractorRow = () => {
+  temp.extractor_rows.push({ name: '', source: 'json_path', expression: '' })
+}
+
+const extractorPlaceholder = (source) => {
+  if (source === 'json_path') return '$.data.token'
+  if (source === 'header') return 'x-trace-id'
+  if (source === 'regex') return 'order_no=(\\w+)'
+  return '无需表达式'
+}
+
+const hydrateExtractorRows = (extractorsJson) => {
+  temp.extractor_rows = (extractorsJson || []).map((item) => ({
+    name: item.name || '',
+    source: item.source || 'json_path',
+    expression: item.expression || ''
+  }))
+}
+
+const buildExtractorsJson = () => {
+  const rows = temp.extractor_rows
+    .filter((row) => row.name && row.name.trim())
+    .map((row) => ({
+      name: row.name.trim(),
+      source: row.source,
+      ...(row.source === 'status_code' ? {} : { expression: row.expression || '' })
+    }))
+  return rows.length ? rows : null
+}
+
+const scenarioTabLabel = computed(() => (temp.scenario_steps.length ? `场景步骤（${temp.scenario_steps.length}）` : '场景步骤'))
+
+const addScenarioStep = () => {
+  temp.scenario_steps.push({
+    name: '',
+    method: 'GET',
+    path: '',
+    expected_status: 200,
+    headers_text: '',
+    body_text: '',
+    assertions_text: '',
+    extractors_text: ''
+  })
+}
+
+const moveScenarioStep = (index, offset) => {
+  const target = index + offset
+  if (target < 0 || target >= temp.scenario_steps.length) return
+  const steps = temp.scenario_steps
+  ;[steps[index], steps[target]] = [steps[target], steps[index]]
+}
+
+const hydrateScenarioSteps = (stepsJson) => {
+  temp.scenario_steps = (stepsJson || []).map((step) => ({
+    name: step.name || '',
+    method: (step.method || 'GET').toUpperCase(),
+    path: step.path || '',
+    expected_status: step.expected_status || 200,
+    headers_text: step.headers_json ? JSON.stringify(step.headers_json, null, 2) : '',
+    body_text: step.body_json ? JSON.stringify(step.body_json, null, 2) : '',
+    assertions_text: step.assertions?.length ? JSON.stringify(step.assertions, null, 2) : '',
+    extractors_text: step.extractors?.length ? JSON.stringify(step.extractors, null, 2) : ''
+  }))
+}
+
+const parseStepJsonField = (text, label, stepNo, expectArray = false) => {
+  const trimmed = (text || '').trim()
+  if (!trimmed) return null
+  let parsed
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch (e) {
+    throw new Error(`步骤 ${stepNo} 的${label}不是合法 JSON`)
+  }
+  if (expectArray && !Array.isArray(parsed)) throw new Error(`步骤 ${stepNo} 的${label}必须是 JSON 数组`)
+  return parsed
+}
+
+const buildStepsJson = () => {
+  if (!temp.scenario_steps.length) return null
+  return temp.scenario_steps.map((step, index) => {
+    const stepNo = index + 1
+    if (!step.path || !step.path.trim()) throw new Error(`步骤 ${stepNo} 的请求路径不能为空`)
+    const entry = {
+      name: step.name || `步骤 ${stepNo}`,
+      method: step.method || 'GET',
+      path: step.path.trim(),
+      expected_status: step.expected_status || 200
+    }
+    const headers = parseStepJsonField(step.headers_text, 'Headers', stepNo)
+    const body = parseStepJsonField(step.body_text, 'Body', stepNo)
+    const assertions = parseStepJsonField(step.assertions_text, '断言', stepNo, true)
+    const extractors = parseStepJsonField(step.extractors_text, '提取器', stepNo, true)
+    if (headers) entry.headers_json = headers
+    if (body) entry.body_json = body
+    if (assertions) entry.assertions = assertions
+    if (extractors) entry.extractors = extractors
+    return entry
+  })
+}
 
 const currentMethodProfile = computed(() => methodProfiles[temp.method] || methodProfiles.GET)
 const methodSupportsBody = computed(() => currentMethodProfile.value.supportsBody)
@@ -1797,6 +2296,81 @@ const submitImportCases = async () => {
   }
 }
 
+const openSpecImportDialog = () => {
+  specImportForm.project_id = filters.projectId || (projects.value.length ? projects.value[0].id : undefined)
+  specImportForm.source_type = 'openapi'
+  specImportForm.content = ''
+  specImportForm.folder_path = ''
+  specImportFileName.value = ''
+  specImportPreview.value = null
+  specImportVisible.value = true
+}
+
+const handleSpecFile = (event) => {
+  const file = event.target.files?.[0]
+  if (!file) return
+  specImportFileName.value = file.name
+  if (/\.ya?ml$/i.test(file.name)) {
+    specImportForm.source_type = 'openapi'
+  }
+  const reader = new FileReader()
+  reader.onload = () => {
+    specImportForm.content = String(reader.result || '')
+  }
+  reader.readAsText(file)
+  event.target.value = ''
+}
+
+const runSpecImport = async (dryRun) => {
+  if (!specImportForm.project_id) {
+    ElMessage.warning('请选择目标项目')
+    return null
+  }
+  if (!specImportForm.content.trim()) {
+    ElMessage.warning('请粘贴或上传文档内容')
+    return null
+  }
+  return api.post('/api-cases/import-spec', {
+    project_id: specImportForm.project_id,
+    source_type: specImportForm.source_type,
+    content: specImportForm.content,
+    folder_path: specImportForm.folder_path || null,
+    dry_run: dryRun
+  })
+}
+
+const previewSpecImport = async () => {
+  specImportLoading.value = true
+  try {
+    const result = await runSpecImport(true)
+    if (result) {
+      specImportPreview.value = result
+      if (!result.detected_count) ElMessage.warning('未解析出任何接口')
+    }
+  } catch (error) {
+    ElMessage.error(error.message || '解析失败')
+  } finally {
+    specImportLoading.value = false
+  }
+}
+
+const submitSpecImport = async () => {
+  specImportSubmitting.value = true
+  try {
+    const result = await runSpecImport(false)
+    if (result) {
+      specImportPreview.value = result
+      ElMessage.success(`成功导入 ${result.created_count} 条接口用例`)
+      specImportVisible.value = false
+      await refreshAll()
+    }
+  } catch (error) {
+    ElMessage.error(error.message || '导入失败')
+  } finally {
+    specImportSubmitting.value = false
+  }
+}
+
 const handleCreate = () => {
   temp.project_id = projects.value.length > 0 ? projects.value[0].id : undefined
   temp.name = ''
@@ -1818,6 +2392,11 @@ const handleCreate = () => {
   temp.auth_api_key_in = 'header'
   resetBodyFields('none')
   temp.assertions_text = '[\n  { "type": "status_code", "expected": 200 }\n]'
+  temp.assertions_mode = 'form'
+  temp.assertion_rows = []
+  temp.extractor_rows = []
+  temp.scenario_steps = []
+  resetDataDrivenAndMock()
   temp.priority = 'P2'
   temp.status = 'ACTIVE'
   temp.expected_status = 200
@@ -1849,7 +2428,10 @@ const handleEdit = (row) => {
   hydrateAuthFromHeaders()
   hydrateBody(row.body_json)
   applyMethodBodyProfile()
-  temp.assertions_text = row.assertions_json ? JSON.stringify(row.assertions_json, null, 2) : '[\n  { "type": "status_code", "expected": 200 }\n]'
+  hydrateAssertionEditors(row.assertions_json)
+  hydrateExtractorRows(row.extractors_json)
+  hydrateScenarioSteps(row.steps_json)
+  hydrateDataDrivenAndMock(row)
   temp.priority = row.priority
   temp.status = row.status
   temp.expected_status = row.expected_status
@@ -1866,6 +2448,102 @@ const handleEdit = (row) => {
   })
 }
 
+const buildAssertionsJson = () => {
+  if (temp.assertions_mode === 'form') {
+    const items = assertionRowsToJson(temp.assertion_rows)
+    return items.length ? items : null
+  }
+  return temp.assertions_text ? JSON.parse(temp.assertions_text) : null
+}
+
+const dataDrivenTabLabel = computed(() => {
+  const parsed = parseDatasetsSafe(temp.datasets_text)
+  return parsed && parsed.length ? `数据驱动（${parsed.length}）` : '数据驱动'
+})
+
+function parseDatasetsSafe(text) {
+  const raw = (text || '').trim()
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+const resetDataDrivenAndMock = () => {
+  temp.datasets_text = ''
+  temp.mock_enabled = false
+  temp.mock_status_code = 200
+  temp.mock_headers_text = '{\n  "Content-Type": "application/json"\n}'
+  temp.mock_body_text = ''
+  temp.mock_delay_ms = 0
+}
+
+const hydrateDataDrivenAndMock = (row) => {
+  temp.datasets_text = Array.isArray(row.datasets_json) && row.datasets_json.length
+    ? JSON.stringify(row.datasets_json, null, 2)
+    : ''
+  temp.mock_enabled = !!row.mock_enabled
+  const config = row.mock_config_json || {}
+  temp.mock_status_code = Number(config.status_code) || 200
+  temp.mock_delay_ms = Number(config.delay_ms) || 0
+  temp.mock_headers_text = config.headers
+    ? JSON.stringify(config.headers, null, 2)
+    : '{\n  "Content-Type": "application/json"\n}'
+  if (config.body === undefined || config.body === null) {
+    temp.mock_body_text = ''
+  } else if (typeof config.body === 'string') {
+    temp.mock_body_text = config.body
+  } else {
+    temp.mock_body_text = JSON.stringify(config.body, null, 2)
+  }
+}
+
+const buildDatasetsJson = () => {
+  const raw = (temp.datasets_text || '').trim()
+  if (!raw) return null
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('数据集 JSON 格式错误，请检查后重试')
+  }
+  if (!Array.isArray(parsed)) throw new Error('数据集必须为 JSON 数组')
+  return parsed.length ? parsed : null
+}
+
+const buildMockConfigJson = () => {
+  if (!temp.mock_enabled) return null
+  let headers = null
+  const headersRaw = (temp.mock_headers_text || '').trim()
+  if (headersRaw) {
+    try {
+      headers = JSON.parse(headersRaw)
+    } catch {
+      throw new Error('Mock 响应头 JSON 格式错误')
+    }
+  }
+  let body = temp.mock_body_text
+  const bodyRaw = (temp.mock_body_text || '').trim()
+  if (bodyRaw) {
+    try {
+      body = JSON.parse(bodyRaw)
+    } catch {
+      body = temp.mock_body_text
+    }
+  } else {
+    body = null
+  }
+  return {
+    status_code: temp.mock_status_code,
+    headers: headers || {},
+    body,
+    delay_ms: temp.mock_delay_ms || 0
+  }
+}
+
 const buildCasePayload = () => ({
   project_id: temp.project_id,
   name: temp.name || `${temp.method} ${pathWithoutQuery(temp.path) || '/'}`,
@@ -1878,7 +2556,12 @@ const buildCasePayload = () => ({
   review_note: temp.review_note || null,
   headers_json: buildHeadersJson(),
   body_json: buildBodyJson(),
-  assertions_json: temp.assertions_text ? JSON.parse(temp.assertions_text) : null,
+  assertions_json: buildAssertionsJson(),
+  extractors_json: buildExtractorsJson(),
+  steps_json: buildStepsJson(),
+  datasets_json: buildDatasetsJson(),
+  mock_enabled: temp.mock_enabled,
+  mock_config_json: buildMockConfigJson(),
   priority: temp.priority,
   status: temp.status,
   expected_status: temp.expected_status
@@ -1899,7 +2582,7 @@ const sendDebugRequest = () => {
         environment_id: temp.debug_environment_id || null,
         timeout_seconds: temp.debug_timeout_seconds
       })
-      debugResponseTab.value = 'body'
+      debugResponseTab.value = debugResponse.value.assertion_passed === false ? 'assertions' : 'body'
       ElMessage.success('调试请求完成')
     } catch (error) {
       ElMessage.error(error.message)
@@ -2675,6 +3358,13 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+.editor-hint {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 4px;
+}
+
 .body-mode-bar {
   margin-bottom: 14px;
   overflow-x: auto;
@@ -2806,6 +3496,96 @@ onUnmounted(() => {
   flex-wrap: wrap;
   color: var(--color-text-secondary);
   font-size: 12px;
+}
+
+.debug-assertion-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.debug-assertion-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+
+.assertion-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.assertion-row .assertion-type {
+  width: 140px;
+  flex-shrink: 0;
+}
+
+.assertion-row .assertion-expression {
+  width: 180px;
+  flex-shrink: 0;
+}
+
+.assertion-row .assertion-operator {
+  width: 130px;
+  flex-shrink: 0;
+}
+
+.assertion-row .assertion-expected {
+  flex: 1;
+  min-width: 140px;
+}
+
+.scenario-step-card {
+  border: 1px solid var(--color-border, #e4e7ed);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.scenario-step-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.scenario-step-name {
+  width: 220px;
+}
+
+.scenario-step-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
+.scenario-step-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scenario-step-method {
+  width: 110px;
+  flex-shrink: 0;
+}
+
+.scenario-step-status {
+  width: 130px;
+  flex-shrink: 0;
+}
+
+.scenario-step-advanced {
+  margin-top: 8px;
+  border: none;
 }
 
 .response-pre {

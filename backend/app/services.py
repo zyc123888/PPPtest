@@ -25,6 +25,7 @@ from app.models import (
     ExecutionStep,
     PerformanceCase,
     Project,
+    ProjectMember,
     TestPlan,
     TestPlanCase,
     TestPlanRun,
@@ -156,6 +157,25 @@ def ensure_workspace_member(db: Session, workspace_id: int, user_id: int, role: 
     )
     if member is None:
         member = WorkspaceMember(workspace_id=workspace_id, user_id=user_id, role=role)
+        db.add(member)
+        db.commit()
+        db.refresh(member)
+    elif member.role != role:
+        member.role = role
+        db.commit()
+        db.refresh(member)
+    return member
+
+
+def ensure_project_member(db: Session, project_id: int, user_id: int, role: str = "member") -> ProjectMember:
+    member = db.scalar(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user_id,
+        )
+    )
+    if member is None:
+        member = ProjectMember(project_id=project_id, user_id=user_id, role=role)
         db.add(member)
         db.commit()
         db.refresh(member)
@@ -813,3 +833,36 @@ def convert_timestamp(payload: str) -> str:
         parsed = parsed.replace(tzinfo=timezone.utc)
     local_time = parsed.astimezone()
     return f"日期时间: {local_time.isoformat()}\n时间戳: {int(local_time.timestamp())}"
+
+
+_WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+
+def preview_cron(payload: str, count: int = 5) -> str:
+    """校验 5 段 cron 并返回未来 count 次触发时刻（北京时间，与计划调度口径一致）。"""
+    from croniter import croniter
+
+    text = (payload or "").strip()
+    if len(text.split()) != 5:
+        raise ValueError("cron 表达式需为 5 段（分 时 日 月 周）")
+    tz = ZoneInfo(SCHEDULE_TIMEZONE)
+    try:
+        iterator = croniter(text, datetime.now(tz))
+    except (ValueError, KeyError) as exc:
+        raise ValueError(f"cron 表达式无效: {exc}") from exc
+    lines = []
+    for _ in range(count):
+        next_local = iterator.get_next(datetime)
+        lines.append(f"{next_local.strftime('%Y-%m-%d %H:%M:%S')} {_WEEKDAY_CN[next_local.weekday()]}")
+    return "\n".join(lines)
+
+
+def digest_text(payload: str) -> str:
+    data = payload.encode("utf-8")
+    return "\n".join(
+        [
+            f"MD5:    {hashlib.md5(data).hexdigest()}",
+            f"SHA1:   {hashlib.sha1(data).hexdigest()}",
+            f"SHA256: {hashlib.sha256(data).hexdigest()}",
+        ]
+    )

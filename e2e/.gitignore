@@ -1,0 +1,9 @@
+# Midscene AI 执行报告与中间产物
+midscene_run/
+
+# Playwright 产物
+test-results/
+playwright-report/
+
+# 本地环境变量（含密钥）
+.env

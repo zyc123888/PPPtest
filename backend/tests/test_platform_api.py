@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 
 def test_system_health(client) -> None:
@@ -3879,7 +3879,10 @@ def test_role_based_access_boundaries(client) -> None:
     project_id = next(project["id"] for project in projects if project["name"] == "平台自检项目")
 
     with login_as(viewer_username) as viewer_client:
-        assert viewer_client.get("/projects").status_code == 200
+        viewer_projects = viewer_client.get("/projects")
+        assert viewer_projects.status_code == 200
+        assert all("variables_json" not in project for project in viewer_projects.json())
+        assert viewer_client.get(f"/projects/{project_id}/variables").status_code == 403
         assert viewer_client.post(
             "/projects",
             json={"name": f"viewer_project_{time.time_ns()}", "base_url": "http://example.com"},
@@ -4004,6 +4007,21 @@ def test_tools_endpoints(client) -> None:
     json_response = client.post("/tools/json/format", json={"payload": '{"name":"平台","type":"测试"}'})
     assert json_response.status_code == 200
     assert '"name": "平台"' in json_response.json()["result"]
+
+    cron_response = client.post("/tools/cron/preview", json={"payload": "0 2 * * *"})
+    assert cron_response.status_code == 200
+    cron_lines = cron_response.json()["result"].splitlines()
+    assert len(cron_lines) == 5
+    assert all("02:00:00" in line for line in cron_lines)
+
+    bad_cron_response = client.post("/tools/cron/preview", json={"payload": "not a cron"})
+    assert bad_cron_response.status_code == 400
+
+    hash_response = client.post("/tools/hash/digest", json={"payload": "hello"})
+    assert hash_response.status_code == 200
+    hash_result = hash_response.json()["result"]
+    assert "MD5:    5d41402abc4b2a76b9719d911017c592" in hash_result
+    assert "SHA256: 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" in hash_result
 
 
 def test_environment_update_and_variables_api(client) -> None:
@@ -4146,6 +4164,14 @@ def test_environment_variables_and_auth_config_api(client) -> None:
     assert put_response.status_code == 200
     assert put_response.json()["auth_config_json"]["token"] == "{{token}}"
 
+    from app.core.database import SessionLocal
+    from app.models import Environment
+    with SessionLocal() as db:
+        stored_environment = db.get(Environment, environment_id)
+        assert stored_environment._legacy_variables_json is None
+        assert stored_environment.variables_encrypted
+        assert "demo-token" not in stored_environment.variables_encrypted
+
 
 def test_api_case_run(client) -> None:
     api_cases = client.get("/api-cases").json()
@@ -4228,6 +4254,239 @@ def test_api_case_debug_request_returns_response_preview(client) -> None:
     assert payload["request"]["method"] == "GET"
     assert payload["response"]["status_code"] == 200
     assert payload["duration_ms"] >= 0
+
+
+def test_api_case_debug_returns_assertion_and_extractor_results(client) -> None:
+    api_case = next(case for case in client.get("/api-cases").json() if case["name"] == "示例健康检查接口")
+    response = client.post(
+        "/api-cases/debug",
+        json={
+            "project_id": api_case["project_id"],
+            "name": "调试断言引擎",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "headers_json": {"accept": "application/json"},
+            "assertions_json": [
+                {"type": "json_path", "expression": "$.app_status", "operator": "regex", "expected": "healthy|degraded"},
+                {"type": "body_contains", "expected": "database"},
+                {"type": "header", "name": "content-type", "operator": "contains", "expected": "json"},
+            ],
+            "extractors_json": [
+                {"name": "health_status", "source": "json_path", "expression": "$.app_status"},
+                {"name": "http_code", "source": "status_code"},
+            ],
+            "expected_status": 200,
+            "timeout_seconds": 5,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["assertion_passed"] is True, payload["assertion_results"]
+    assert len(payload["assertion_results"]) >= 3
+    assert all(item["ok"] for item in payload["assertion_results"])
+    assert payload["extracted_variables"]["health_status"] in {"healthy", "degraded"}
+    assert payload["extracted_variables"]["http_code"] == "200"
+    assert all(item["ok"] for item in payload["extractor_results"])
+
+
+def test_api_case_debug_reports_assertion_failure(client) -> None:
+    api_case = next(case for case in client.get("/api-cases").json() if case["name"] == "示例健康检查接口")
+    response = client.post(
+        "/api-cases/debug",
+        json={
+            "project_id": api_case["project_id"],
+            "name": "调试断言失败",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "assertions_json": [
+                {"type": "json_path", "expression": "$.app_status", "expected": "__绝不可能的值__"},
+            ],
+            "expected_status": 200,
+            "timeout_seconds": 5,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["assertion_passed"] is False
+    failed = [item for item in payload["assertion_results"] if not item["ok"]]
+    assert failed and failed[0]["type"] == "json_path"
+
+
+def _wait_for_run(client, run_id: int) -> dict:
+    final_payload = None
+    for _ in range(40):
+        final_payload = client.get(f"/executions/runs/{run_id}").json()
+        if final_payload["status"] in {"SUCCESS", "FAILED"}:
+            break
+        time.sleep(2)
+    assert final_payload is not None
+    return final_payload
+
+
+def test_api_case_run_fails_on_assertion(client) -> None:
+    api_case = next(case for case in client.get("/api-cases").json() if case["name"] == "示例健康检查接口")
+    created = client.post(
+        "/api-cases",
+        json={
+            "project_id": api_case["project_id"],
+            "name": "断言失败演示用例",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "assertions_json": [
+                {"type": "json_path", "expression": "$.app_status", "expected": "__绝不可能的值__"},
+            ],
+            "expected_status": 200,
+        },
+    )
+    assert created.status_code == 201
+    case_id = created.json()["id"]
+
+    trigger = client.post(f"/executions/api/{case_id}/run", json={"timeout_seconds": 7})
+    assert trigger.status_code == 200
+    final_payload = _wait_for_run(client, trigger.json()["id"])
+
+    assert final_payload["status"] == "FAILED", final_payload
+    assert final_payload["error_type"] == "ASSERTION"
+    assertion_results = (final_payload["response_payload"] or {}).get("assertion_results") or []
+    assert any(not item["ok"] and item["type"] == "json_path" for item in assertion_results)
+    assert "[FAIL]" in (final_payload["stdout_text"] or "")
+
+    client.delete(f"/api-cases/{case_id}")
+
+
+def test_api_case_run_passes_with_rich_assertions(client) -> None:
+    api_case = next(case for case in client.get("/api-cases").json() if case["name"] == "示例健康检查接口")
+    created = client.post(
+        "/api-cases",
+        json={
+            "project_id": api_case["project_id"],
+            "name": "多类型断言演示用例",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "assertions_json": [
+                {"type": "status_code", "expected": 200},
+                {"type": "json_path", "expression": "$.app_status", "operator": "regex", "expected": "healthy|degraded"},
+                {"type": "body_contains", "expected": "redis"},
+                {"type": "header", "name": "content-type", "operator": "contains", "expected": "json"},
+                {"type": "response_time_ms", "operator": "lte", "expected": 60000},
+            ],
+            "extractors_json": [
+                {"name": "health_status", "source": "json_path", "expression": "$.app_status"},
+            ],
+            "expected_status": 200,
+        },
+    )
+    assert created.status_code == 201
+    case_id = created.json()["id"]
+
+    trigger = client.post(f"/executions/api/{case_id}/run", json={"timeout_seconds": 15})
+    assert trigger.status_code == 200
+    final_payload = _wait_for_run(client, trigger.json()["id"])
+
+    assert final_payload["status"] == "SUCCESS", final_payload
+    response_payload = final_payload["response_payload"] or {}
+    assert all(item["ok"] for item in response_payload.get("assertion_results") or [])
+    assert response_payload.get("extracted_variables", {}).get("health_status") in {"healthy", "degraded"}
+
+    client.delete(f"/api-cases/{case_id}")
+
+
+def test_api_scenario_run_with_variable_extraction(client) -> None:
+    api_case = next(case for case in client.get("/api-cases").json() if case["name"] == "示例健康检查接口")
+    created = client.post(
+        "/api-cases",
+        json={
+            "project_id": api_case["project_id"],
+            "name": "多步骤场景演示用例",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "expected_status": 200,
+            "steps_json": [
+                {
+                    "name": "查询系统健康",
+                    "method": "GET",
+                    "path": "/api/v1/system/health",
+                    "expected_status": 200,
+                    "assertions": [
+                        {"type": "json_path", "expression": "$.app_status", "operator": "regex", "expected": "healthy|degraded"},
+                    ],
+                    "extractors": [
+                        {"name": "health_status", "source": "json_path", "expression": "$.app_status"},
+                    ],
+                },
+                {
+                    "name": "引用提取变量再次校验",
+                    "method": "GET",
+                    "path": "/api/v1/system/health",
+                    "headers_json": {"x-prev-status": "{{health_status}}"},
+                    "expected_status": 200,
+                    "assertions": [
+                        {"type": "body_contains", "expected": "database"},
+                    ],
+                },
+            ],
+        },
+    )
+    assert created.status_code == 201
+    case_id = created.json()["id"]
+
+    trigger = client.post(f"/executions/api/{case_id}/run", json={"timeout_seconds": 20})
+    assert trigger.status_code == 200
+    final_payload = _wait_for_run(client, trigger.json()["id"])
+
+    assert final_payload["status"] == "SUCCESS", final_payload
+    steps = final_payload["step_results_json"] or []
+    assert len(steps) == 2
+    assert all(step["status"] == "SUCCESS" for step in steps)
+    extracted = (final_payload["response_payload"] or {}).get("extracted_variables") or {}
+    assert extracted.get("health_status") in {"healthy", "degraded"}
+    artifacts = final_payload["artifacts_json"] or []
+    assert any("step_01_" in str(item) for item in artifacts)
+
+    client.delete(f"/api-cases/{case_id}")
+
+
+def test_api_scenario_run_stops_and_skips_after_failed_step(client) -> None:
+    api_case = next(case for case in client.get("/api-cases").json() if case["name"] == "示例健康检查接口")
+    created = client.post(
+        "/api-cases",
+        json={
+            "project_id": api_case["project_id"],
+            "name": "场景失败中断演示用例",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "expected_status": 200,
+            "steps_json": [
+                {
+                    "name": "必然失败的步骤",
+                    "method": "GET",
+                    "path": "/api/v1/system/health",
+                    "expected_status": 200,
+                    "assertions": [{"type": "body_contains", "expected": "__绝不可能的内容__"}],
+                },
+                {
+                    "name": "应被跳过的步骤",
+                    "method": "GET",
+                    "path": "/api/v1/system/health",
+                    "expected_status": 200,
+                },
+            ],
+        },
+    )
+    assert created.status_code == 201
+    case_id = created.json()["id"]
+
+    trigger = client.post(f"/executions/api/{case_id}/run", json={"timeout_seconds": 20})
+    assert trigger.status_code == 200
+    final_payload = _wait_for_run(client, trigger.json()["id"])
+
+    assert final_payload["status"] == "FAILED", final_payload
+    steps = final_payload["step_results_json"] or []
+    assert len(steps) == 2
+    assert steps[0]["status"] == "FAILED"
+    assert steps[1]["status"] == "SKIPPED"
+
+    client.delete(f"/api-cases/{case_id}")
 
 
 def test_api_case_debug_request_returns_400_when_environment_variables_missing(client) -> None:
@@ -5098,6 +5357,14 @@ def test_api_case_pytest_timeout_honors_run_timeout(client, monkeypatch) -> None
 
     def fake_subprocess_run(*args, **kwargs):
         observed["timeout"] = kwargs.get("timeout")
+        # 新版 pytest 引擎约定：脚本把响应事实写入 RESULT_PATH，断言由父进程求值
+        result_path = (kwargs.get("env") or {}).get("RESULT_PATH")
+        if result_path:
+            with open(result_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {"status_code": 200, "headers": {}, "duration_ms": 5, "body_text": "{}"},
+                    handle,
+                )
         return DummyResult()
 
     monkeypatch.setattr(executions.subprocess, "run", fake_subprocess_run)
@@ -5466,6 +5733,7 @@ def test_case_folder_tree_lists_nested_paths(client) -> None:
 
 def test_case_export_and_import_json(client) -> None:
     project_id = client.get("/projects").json()[0]["id"]
+    imported_ui_name = f"导入UI_{time.time_ns()}"
     exported = client.get(f"/cases/export?project_id={project_id}&case_type=API")
     assert exported.status_code == 200
     payload = exported.json()
@@ -5489,10 +5757,11 @@ def test_case_export_and_import_json(client) -> None:
                 {
                     "case_type": "UI",
                     "project_id": project_id,
-                    "name": f"导入UI_{time.time_ns()}",
+                    "name": imported_ui_name,
                     "target_url": "http://frontend:3000/login",
                     "steps_json": [{"action": "goto", "value": "http://frontend:3000/login"}],
                     "expect_text": "登录",
+                    "engine": "midscene",
                     "priority": "P2",
                     "status": "ACTIVE",
                     "review_status": "DRAFT",
@@ -5502,6 +5771,11 @@ def test_case_export_and_import_json(client) -> None:
     )
     assert imported.status_code == 200
     assert imported.json()["affected_count"] == 2
+    imported_ui = next(
+        item for item in client.get("/ui-cases", params={"project_id": project_id}).json()
+        if item["name"] == imported_ui_name
+    )
+    assert imported_ui["engine"] == "midscene"
 
 
 def test_case_batch_move_folder_records_history(client) -> None:
@@ -7705,3 +7979,270 @@ def test_list_runs_server_side_filter_and_pagination(client) -> None:
                 db.delete(obj)
         db.commit()
 
+
+
+def _create_project_for_feature(client, label: str) -> tuple[int, int]:
+    """创建独立空间与项目，返回 (workspace_id, project_id)。"""
+    workspace = client.post(
+        "/workspaces",
+        json={"name": f"{label}空间_{time.time_ns()}", "description": label},
+    )
+    assert workspace.status_code == 201
+    workspace_id = workspace.json()["id"]
+    project = client.post(
+        "/projects",
+        json={
+            "workspace_id": workspace_id,
+            "name": f"{label}项目_{time.time_ns()}",
+            "base_url": "http://example.com",
+        },
+    )
+    assert project.status_code == 201
+    return workspace_id, project.json()["id"]
+
+
+def test_project_variable_pool_crud(client) -> None:
+    _, project_id = _create_project_for_feature(client, "变量池")
+
+    empty = client.get(f"/projects/{project_id}/variables")
+    assert empty.status_code == 200
+    assert empty.json()["variables_json"] == {}
+
+    updated = client.put(
+        f"/projects/{project_id}/variables",
+        json={"variables_json": {"base_url": "https://api.demo", "token": "abc"}},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["variables_json"]["base_url"] == "https://api.demo"
+
+    from app.core.database import SessionLocal
+    from app.models import Project
+    with SessionLocal() as db:
+        stored_project = db.get(Project, project_id)
+        assert stored_project._legacy_variables_json is None
+        assert stored_project.variables_encrypted
+        assert "https://api.demo" not in stored_project.variables_encrypted
+
+    refetch = client.get(f"/projects/{project_id}/variables")
+    assert refetch.status_code == 200
+    assert refetch.json()["variables_json"] == {"base_url": "https://api.demo", "token": "abc"}
+
+    cleared = client.put(f"/projects/{project_id}/variables", json={"variables_json": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["variables_json"] == {}
+
+
+def test_legacy_variable_pools_are_migrated_to_encrypted_storage(client) -> None:
+    _, project_id = _create_project_for_feature(client, "变量迁移")
+    from app.core.database import SessionLocal, engine, ensure_schema
+    from app.models import Project
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE projects SET variables_json = :variables, variables_encrypted = NULL "
+                "WHERE id = :project_id"
+            ),
+            {"variables": json.dumps({"token": "legacy-secret"}), "project_id": project_id},
+        )
+
+    changes = ensure_schema(engine)
+    assert any(change.startswith("projects.variables_encrypted:migrated(") for change in changes)
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        assert project.variables_json == {"token": "legacy-secret"}
+        assert project._legacy_variables_json is None
+        assert "legacy-secret" not in project.variables_encrypted
+
+
+def test_project_member_management_and_isolation(client) -> None:
+    _, project_id = _create_project_for_feature(client, "项目成员")
+
+    username = f"proj_member_{time.time_ns()}"
+    user_response = client.post(
+        "/users",
+        json={"username": username, "password": "role123", "display_name": username, "role": "tester"},
+    )
+    assert user_response.status_code == 201
+    user_id = user_response.json()["id"]
+
+    member_client = TestClient(client.app, base_url="http://testserver/api/v1")
+    login_response = member_client.post("/auth/login", json={"username": username, "password": "role123"})
+    assert login_response.status_code == 200
+    member_client.headers.update({"Authorization": f"Bearer {login_response.json()['token']}"})
+
+    # 尚未加入的用户既非项目成员也非空间成员，被隔离
+    assert member_client.get(f"/projects/{project_id}/variables").status_code == 403
+
+    add_member = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": user_id, "role": "member"},
+    )
+    assert add_member.status_code == 201
+    member_id = add_member.json()["id"]
+
+    members = client.get(f"/projects/{project_id}/members")
+    assert members.status_code == 200
+    assert any(m["user_id"] == user_id for m in members.json())
+
+    update_member = client.put(
+        f"/projects/{project_id}/members/{member_id}",
+        json={"role": "manager"},
+    )
+    assert update_member.status_code == 200
+    assert update_member.json()["role"] == "manager"
+
+    # 成为成员后可以访问项目变量
+    assert member_client.get(f"/projects/{project_id}/variables").status_code == 200
+
+    delete_member = client.delete(f"/projects/{project_id}/members/{member_id}")
+    assert delete_member.status_code == 204
+
+    # 移除后再次被隔离
+    assert member_client.get(f"/projects/{project_id}/variables").status_code == 403
+
+
+def test_api_spec_import_openapi_dry_run_and_persist(client) -> None:
+    _, project_id = _create_project_for_feature(client, "OpenAPI导入")
+
+    openapi_doc = json.dumps(
+        {
+            "openapi": "3.0.0",
+            "info": {"title": "Demo", "version": "1.0.0"},
+            "paths": {
+                "/pets": {
+                    "get": {"summary": "列出宠物", "operationId": "listPets"},
+                    "post": {"summary": "创建宠物", "operationId": "createPet"},
+                },
+                "/pets/{petId}": {
+                    "get": {"summary": "获取宠物", "operationId": "getPet"},
+                },
+            },
+        }
+    )
+
+    dry_run = client.post(
+        "/api-cases/import-spec",
+        json={
+            "project_id": project_id,
+            "source_type": "openapi",
+            "content": openapi_doc,
+            "folder_path": "导入/宠物",
+            "dry_run": True,
+        },
+    )
+    assert dry_run.status_code == 200
+    dry_payload = dry_run.json()
+    assert dry_payload["detected_count"] == 3
+    assert dry_payload["created_count"] == 0
+    assert all(item["folder_path"].startswith("导入/宠物") for item in dry_payload["items"])
+
+    persisted = client.post(
+        "/api-cases/import-spec",
+        json={
+            "project_id": project_id,
+            "source_type": "openapi",
+            "content": openapi_doc,
+            "folder_path": "导入/宠物",
+            "dry_run": False,
+        },
+    )
+    assert persisted.status_code == 200
+    assert persisted.json()["created_count"] == 3
+
+    cases = client.get(f"/api-cases?project_id={project_id}")
+    assert cases.status_code == 200
+    case_items = cases.json()
+    items = case_items["items"] if isinstance(case_items, dict) else case_items
+    assert len(items) >= 3
+
+
+def test_api_spec_import_rejects_invalid_content(client) -> None:
+    _, project_id = _create_project_for_feature(client, "非法导入")
+    response = client.post(
+        "/api-cases/import-spec",
+        json={
+            "project_id": project_id,
+            "source_type": "openapi",
+            "content": "not-a-valid-spec",
+            "dry_run": True,
+        },
+    )
+    assert response.status_code == 400
+
+
+def test_data_driven_and_mock_config_roundtrip(client) -> None:
+    _, project_id = _create_project_for_feature(client, "数据驱动Mock")
+
+    created = client.post(
+        "/api-cases",
+        json={
+            "project_id": project_id,
+            "name": f"mock_case_{time.time_ns()}",
+            "method": "GET",
+            "path": "/mock-demo",
+            "expected_status": 200,
+            "datasets_json": [{"name": "alice"}, {"name": "bob"}],
+            "mock_enabled": True,
+            "mock_config_json": {
+                "status_code": 201,
+                "headers": {"X-Mock": "1"},
+                "body": {"ok": True},
+                "delay_ms": 0,
+            },
+        },
+    )
+    assert created.status_code == 201
+    case_id = created.json()["id"]
+    assert created.json()["datasets_json"] == [{"name": "alice"}, {"name": "bob"}]
+    assert created.json()["mock_enabled"] is True
+
+    anon_client = TestClient(client.app, base_url="http://testserver/api/v1")
+    mock_response = anon_client.get(f"/mock/{project_id}/mock-demo")
+    assert mock_response.status_code == 201
+    assert mock_response.headers.get("X-Mock") == "1"
+    assert mock_response.json() == {"ok": True}
+
+    missing = anon_client.get(f"/mock/{project_id}/not-configured")
+    assert missing.status_code == 404
+
+    client.delete(f"/api-cases/{case_id}")
+
+
+def test_report_share_link_public_access(client) -> None:
+    plans = client.get("/test-plans").json()
+    plan_id = next(plan["id"] for plan in plans if plan["name"] == "演示回归计划")
+    trigger = client.post(f"/test-plans/{plan_id}/run", json={"timeout_seconds": 9})
+    assert trigger.status_code == 200
+    plan_run_id = trigger.json()["id"]
+
+    enable = client.post(f"/reports/{plan_run_id}/share")
+    assert enable.status_code == 200
+    share_payload = enable.json()
+    assert share_payload["enabled"] is True
+    token = share_payload["share_token"]
+    assert token
+    assert share_payload["share_url"].endswith(token)
+
+    anon_client = TestClient(client.app, base_url="http://testserver/api/v1")
+    public_report = anon_client.get(f"/public/reports/{token}")
+    assert public_report.status_code == 200
+    public_payload = public_report.json()
+    assert public_payload["plan_run"]["id"] == plan_run_id
+    assert "share_token" not in public_payload["plan_run"]
+    assert "report_json_path" not in public_payload["plan_run"]
+    assert "report_junit_path" not in public_payload["plan_run"]
+    assert "defects" not in public_payload
+    for run in public_payload["test_runs"]:
+        assert "stdout_text" not in run
+        assert "stderr_text" not in run
+        assert "request_payload" not in run
+        assert "response_payload" not in run
+        assert "artifacts_json" not in run
+        assert "step_results_json" not in run
+
+    disable = client.delete(f"/reports/{plan_run_id}/share")
+    assert disable.status_code == 200
+    assert disable.json()["enabled"] is False
+
+    assert anon_client.get(f"/public/reports/{token}").status_code == 404

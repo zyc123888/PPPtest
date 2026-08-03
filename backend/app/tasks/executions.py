@@ -4,6 +4,8 @@ import base64
 import json
 import os
 import re
+import signal
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -11,7 +13,9 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from threading import Thread
 from types import SimpleNamespace
+from typing import NoReturn
 from urllib.parse import urljoin, urlparse
 from xml.sax.saxutils import escape
 
@@ -43,10 +47,12 @@ from app.execution_runtime import (
     MissingTemplateVariableError,
     build_request_kwargs,
     build_runtime_headers,
+    build_variable_context,
     prepare_http_request,
     render_data,
     render_template,
 )
+from app.assertion_engine import ResponseFacts, evaluate_assertions, run_extractors
 from app.services import compute_next_run_at, create_plan_run_with_cases, finalize_run, mark_run_started
 from app.timeutil import utc_now_naive
 from app.ui_case_runtime import (
@@ -456,11 +462,100 @@ def _execute_ui_step(page, step: dict, timeout_ms: int, resolved_locator=None) -
     return resolution or {"method": "not_applicable", "used_ai": False}
 
 
+def _send_prepared_request(prepared, timeout_seconds: float) -> tuple[httpx.Response, int]:
+    """发送预构建请求并返回 (响应, 耗时ms)，testserver 域名走进程内 TestClient"""
+    parsed_url = urlparse(prepared.url)
+    started = time.perf_counter()
+    if parsed_url.hostname == "testserver":
+        from app.main import app
+
+        with TestClient(app, base_url="http://testserver") as client:
+            response = client.request(
+                prepared.method,
+                parsed_url.path,
+                headers=prepared.headers,
+                **prepared.kwargs(),
+            )
+    else:
+        with httpx.Client(timeout=timeout_seconds) as client:
+            response = client.request(
+                prepared.method,
+                prepared.url,
+                headers=prepared.headers,
+                **prepared.kwargs(),
+            )
+    return response, int((time.perf_counter() - started) * 1000)
+
+
+def _response_facts(response: httpx.Response, duration_ms: int) -> ResponseFacts:
+    try:
+        body_json = response.json()
+    except Exception:
+        body_json = None
+    return ResponseFacts(
+        status_code=response.status_code,
+        headers=dict(response.headers),
+        body_text=response.text or "",
+        body_json=body_json,
+        duration_ms=duration_ms,
+    )
+
+
+def _api_case_result(
+    run: TestRun,
+    *,
+    request_payload: dict,
+    response_payload: dict,
+    outcome,
+    extracted: dict,
+    extractor_results: list[dict],
+    stdout_text: str,
+    artifact_prefix: str = "",
+) -> dict:
+    """单请求模式的统一结果组装（httpx / pytest 引擎共用）"""
+    extract_failed = [item for item in extractor_results if not item.get("ok")]
+    status = "SUCCESS" if outcome.passed and not extract_failed else "FAILED"
+    summary = outcome.summary_text()
+    if outcome.passed and extract_failed:
+        summary = f"断言通过，但变量提取失败：{extract_failed[0].get('message', '')}"
+    response_payload = {
+        **response_payload,
+        "assertion_results": outcome.results,
+        "extracted_variables": extracted,
+        "extractor_results": extractor_results,
+    }
+    artifacts = [
+        _write_run_artifact(run.id, f"{artifact_prefix}request.json", request_payload),
+        _write_run_artifact(run.id, f"{artifact_prefix}response.json", response_payload),
+    ]
+    assertion_lines = [
+        f"[{'PASS' if item.get('ok') else 'FAIL'}] {item.get('message', '')}" for item in outcome.results
+    ]
+    extractor_lines = [
+        f"[{'PASS' if item.get('ok') else 'FAIL'}] 提取 {item.get('name', '')}: {item.get('message', '')}"
+        for item in extractor_results
+    ]
+    step_results = [{"name": "send_request", "status": status, "detail": summary}]
+    return {
+        "status": status,
+        "summary": summary,
+        "error_type": None if status == "SUCCESS" else "ASSERTION",
+        "exit_code": 0 if status == "SUCCESS" else 1,
+        "stdout_text": "\n".join([stdout_text, *assertion_lines, *extractor_lines]),
+        "stderr_text": "" if status == "SUCCESS" else summary,
+        "artifacts_json": artifacts,
+        "request_payload": request_payload,
+        "response_payload": response_payload,
+        "step_results_json": step_results,
+    }
+
+
 def _execute_api_case_httpx(
-    db: Session, run: TestRun, case: APICase, project: Project, deadline: float | None = None
+    db: Session, run: TestRun, case: APICase, project: Project, deadline: float | None = None,
+    extra_variables: dict | None = None,
 ) -> dict:
     environment = _resolve_environment(db, project, run.environment_id)
-    variables = environment.variables_json if environment and environment.variables_json else None
+    variables = build_variable_context(project, environment, extra_variables)
     prepared = prepare_http_request(
         method=case.method,
         project=project,
@@ -478,56 +573,34 @@ def _execute_api_case_httpx(
         "body": prepared.body,
     }
 
-    parsed_url = urlparse(prepared.url)
-    if parsed_url.hostname == "testserver":
-        from app.main import app
+    timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
+    response, duration_ms = _send_prepared_request(prepared, timeout_seconds)
 
-        with TestClient(app, base_url="http://testserver") as client:
-            response = client.request(
-                prepared.method,
-                parsed_url.path,
-                headers=prepared.headers,
-                **prepared.kwargs(),
-            )
-    else:
-        timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
-        with httpx.Client(timeout=timeout_seconds) as client:
-            response = client.request(
-                prepared.method,
-                prepared.url,
-                headers=prepared.headers,
-                **prepared.kwargs(),
-            )
+    facts = _response_facts(response, duration_ms)
+    outcome = evaluate_assertions(case.assertions_json, facts, expected_status=case.expected_status)
+    extracted, extractor_results = run_extractors(case.extractors_json, facts)
 
-    status = "SUCCESS" if response.status_code == case.expected_status else "FAILED"
-    summary = f"接口返回 {response.status_code}，预期 {case.expected_status}"
     response_payload = {
         "status_code": response.status_code,
+        "duration_ms": duration_ms,
         "body": _safe_json_or_text(response),
     }
-    artifacts = [
-        _write_run_artifact(run.id, "request.json", request_payload),
-        _write_run_artifact(run.id, "response.json", response_payload),
-    ]
-    return {
-        "status": status,
-        "summary": summary,
-        "error_type": None if status == "SUCCESS" else "ASSERTION",
-        "exit_code": 0 if status == "SUCCESS" else 1,
-        "stdout_text": f"HTTP {prepared.method} {prepared.url}\nstatus={response.status_code}",
-        "stderr_text": "" if status == "SUCCESS" else summary,
-        "artifacts_json": artifacts,
-        "request_payload": request_payload,
-        "response_payload": response_payload,
-        "step_results_json": [{"name": "send_request", "status": status, "detail": summary}],
-    }
+    return _api_case_result(
+        run,
+        request_payload=request_payload,
+        response_payload=response_payload,
+        outcome=outcome,
+        extracted=extracted,
+        extractor_results=extractor_results,
+        stdout_text=f"HTTP {prepared.method} {prepared.url}\nstatus={response.status_code} duration={duration_ms}ms",
+    )
 
 
 def _execute_api_case_pytest(
     db: Session, run: TestRun, case: APICase, project: Project, deadline: float | None = None
 ) -> dict:
     environment = _resolve_environment(db, project, run.environment_id)
-    variables = environment.variables_json if environment and environment.variables_json else None
+    variables = build_variable_context(project, environment)
     prepared = prepare_http_request(
         method=case.method,
         project=project,
@@ -596,20 +669,22 @@ def _execute_api_case_pytest(
             headers = json.loads(os.environ.get("HEADERS", "{}"))
             body_raw = os.environ.get("BODY")
             body = json.loads(body_raw) if body_raw else None
-            expected = int(os.environ.get("EXPECTED_STATUS", "200"))
             timeout = float(os.environ.get("TIMEOUT", "30"))
 
+            import time as time_module
+            started = time_module.perf_counter()
             response = httpx.request(method, url, headers=headers, timeout=timeout, **request_body_kwargs(body))
+            duration_ms = int((time_module.perf_counter() - started) * 1000)
             result = {
                 "status_code": response.status_code,
-                "body_text": response.text[:2000],
+                "headers": dict(response.headers),
+                "duration_ms": duration_ms,
+                "body_text": response.text[:512000],
             }
             result_path = os.environ.get("RESULT_PATH")
             if result_path:
                 with open(result_path, "w", encoding="utf-8") as handle:
                     json.dump(result, handle, ensure_ascii=False)
-
-            assert response.status_code == expected
         """
     ).strip()
 
@@ -650,36 +725,282 @@ def _execute_api_case_pytest(
             except Exception:
                 response_payload = {}
 
-        status = "SUCCESS" if result.returncode == 0 else "FAILED"
-        summary = "pytest 执行成功" if status == "SUCCESS" else "pytest 执行失败"
-        if status == "FAILED" and result.stderr:
-            summary = f"{summary}: {result.stderr.strip()[-200:]}"
-
-        artifacts = [
-            _write_run_artifact(run.id, "request.json", request_payload),
+        artifacts_extra = [
             _write_run_artifact(run.id, "pytest.stdout.log", result.stdout or ""),
             _write_run_artifact(run.id, "pytest.stderr.log", result.stderr or ""),
         ]
-        if response_payload:
-            artifacts.append(_write_run_artifact(run.id, "response.json", response_payload))
 
-        return {
-            "status": status,
-            "summary": summary,
-            "error_type": None if status == "SUCCESS" else "ASSERTION",
-            "exit_code": result.returncode,
-            "stdout_text": result.stdout,
-            "stderr_text": result.stderr,
-            "artifacts_json": artifacts,
-            "request_payload": request_payload,
-            "response_payload": response_payload,
-            "step_results_json": [{"name": "pytest_execution", "status": status, "detail": summary}],
+        if result.returncode != 0 or not response_payload:
+            summary = "pytest 执行失败：请求未完成"
+            if result.stderr:
+                summary = f"{summary}: {result.stderr.strip()[-200:]}"
+            artifacts = [_write_run_artifact(run.id, "request.json", request_payload), *artifacts_extra]
+            return {
+                "status": "FAILED",
+                "summary": summary,
+                "error_type": "RUNTIME",
+                "exit_code": result.returncode or 1,
+                "stdout_text": result.stdout,
+                "stderr_text": result.stderr,
+                "artifacts_json": artifacts,
+                "request_payload": request_payload,
+                "response_payload": response_payload,
+                "step_results_json": [{"name": "pytest_execution", "status": "FAILED", "detail": summary}],
+            }
+
+        body_text = response_payload.get("body_text") or ""
+        try:
+            body_json = json.loads(body_text)
+        except Exception:
+            body_json = None
+        facts = ResponseFacts(
+            status_code=int(response_payload.get("status_code") or 0),
+            headers=response_payload.get("headers") or {},
+            body_text=body_text,
+            body_json=body_json,
+            duration_ms=response_payload.get("duration_ms"),
+        )
+        outcome = evaluate_assertions(case.assertions_json, facts, expected_status=case.expected_status)
+        extracted, extractor_results = run_extractors(case.extractors_json, facts)
+
+        case_result = _api_case_result(
+            run,
+            request_payload=request_payload,
+            response_payload={
+                "status_code": facts.status_code,
+                "duration_ms": facts.duration_ms,
+                "body": body_json if body_json is not None else {"text": body_text[:2000]},
+            },
+            outcome=outcome,
+            extracted=extracted,
+            extractor_results=extractor_results,
+            stdout_text=result.stdout or "",
+        )
+        case_result["artifacts_json"] = [*case_result["artifacts_json"], *artifacts_extra]
+        case_result["step_results_json"] = [
+            {"name": "pytest_execution", "status": case_result["status"], "detail": case_result["summary"]}
+        ]
+        return case_result
+
+
+def _execute_api_scenario(
+    db: Session, run: TestRun, case: APICase, project: Project, deadline: float | None = None
+) -> dict:
+    """多步骤场景执行：步骤间共享变量上下文，提取结果供后续步骤模板引用"""
+    environment = _resolve_environment(db, project, run.environment_id)
+    variables: dict = build_variable_context(project, environment)
+
+    steps = [step for step in (case.steps_json or []) if isinstance(step, dict)]
+    step_results: list[dict] = []
+    artifacts: list[dict] = []
+    stdout_lines: list[str] = []
+    extracted_all: dict = {}
+    failed_at: int | None = None
+    failure_detail = ""
+
+    for index, step in enumerate(steps):
+        step_no = index + 1
+        step_name = str(step.get("name") or f"步骤 {step_no}")
+        prefix = f"step_{step_no:02d}_"
+        if failed_at is not None:
+            step_results.append({"name": step_name, "status": "SKIPPED", "detail": "前置步骤失败，已跳过"})
+            continue
+        try:
+            prepared = prepare_http_request(
+                method=str(step.get("method") or "GET"),
+                project=project,
+                environment=environment,
+                case_path=str(step.get("path") or "/"),
+                case_headers=step.get("headers_json"),
+                case_body=step.get("body_json"),
+                variables=variables,
+            )
+        except MissingTemplateVariableError as exc:
+            failed_at = index
+            failure_detail = str(exc)
+            step_results.append({"name": step_name, "status": "FAILED", "detail": failure_detail})
+            continue
+
+        request_payload = {
+            "method": prepared.method,
+            "url": prepared.url,
+            "headers": prepared.headers,
+            "body": prepared.body,
         }
+        artifacts.append(_write_run_artifact(run.id, f"{prefix}request.json", request_payload))
+
+        timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
+        try:
+            response, duration_ms = _send_prepared_request(prepared, timeout_seconds)
+        except Exception as exc:
+            failed_at = index
+            failure_detail = f"请求发送失败：{exc}"
+            step_results.append({"name": step_name, "status": "FAILED", "detail": failure_detail})
+            continue
+
+        facts = _response_facts(response, duration_ms)
+        expected_status = step.get("expected_status")
+        outcome = evaluate_assertions(
+            step.get("assertions"),
+            facts,
+            expected_status=int(expected_status) if expected_status else 200,
+        )
+        extracted, extractor_results = run_extractors(step.get("extractors"), facts)
+        variables.update(extracted)
+        extracted_all.update(extracted)
+
+        artifacts.append(
+            _write_run_artifact(
+                run.id,
+                f"{prefix}response.json",
+                {
+                    "status_code": facts.status_code,
+                    "duration_ms": duration_ms,
+                    "body": _safe_json_or_text(response),
+                    "assertion_results": outcome.results,
+                    "extractor_results": extractor_results,
+                },
+            )
+        )
+        stdout_lines.append(
+            f"[step {step_no}] {prepared.method} {prepared.url} status={facts.status_code} duration={duration_ms}ms"
+        )
+        stdout_lines.extend(
+            f"  [{'PASS' if item.get('ok') else 'FAIL'}] {item.get('message', '')}" for item in outcome.results
+        )
+        stdout_lines.extend(
+            f"  [{'PASS' if item.get('ok') else 'FAIL'}] 提取 {item.get('name', '')}: {item.get('message', '')}"
+            for item in extractor_results
+        )
+
+        extract_failed = [item for item in extractor_results if not item.get("ok")]
+        if outcome.passed and not extract_failed:
+            step_results.append(
+                {
+                    "name": step_name,
+                    "status": "SUCCESS",
+                    "detail": outcome.summary_text(),
+                    "duration_ms": duration_ms,
+                    "assertion_results": outcome.results,
+                    "extracted_variables": extracted,
+                }
+            )
+        else:
+            failed_at = index
+            failure_detail = (
+                outcome.summary_text()
+                if not outcome.passed
+                else f"变量提取失败：{extract_failed[0].get('message', '')}"
+            )
+            step_results.append(
+                {
+                    "name": step_name,
+                    "status": "FAILED",
+                    "detail": failure_detail,
+                    "duration_ms": duration_ms,
+                    "assertion_results": outcome.results,
+                    "extracted_variables": extracted,
+                }
+            )
+
+    success = failed_at is None and bool(steps)
+    if not steps:
+        failure_detail = "场景未配置任何步骤"
+    summary = (
+        f"场景执行成功（{len(steps)} 个步骤全部通过）"
+        if success
+        else f"场景执行失败（第 {failed_at + 1} 步）：{failure_detail}"
+        if failed_at is not None
+        else failure_detail
+    )
+    return {
+        "status": "SUCCESS" if success else "FAILED",
+        "summary": summary,
+        "error_type": None if success else "ASSERTION",
+        "exit_code": 0 if success else 1,
+        "stdout_text": "\n".join(stdout_lines),
+        "stderr_text": "" if success else summary,
+        "artifacts_json": artifacts,
+        "request_payload": {"scenario_steps": len(steps)},
+        "response_payload": {"extracted_variables": extracted_all},
+        "step_results_json": step_results,
+    }
+
+
+def _normalize_datasets(datasets_json) -> list[dict]:
+    """规范化数据驱动数据集：仅保留 dict 行（每行为一组变量覆盖）。"""
+    if not isinstance(datasets_json, list):
+        return []
+    rows: list[dict] = []
+    for item in datasets_json:
+        if isinstance(item, dict):
+            # 支持 {name, data:{...}} 与直接的变量字典两种形式
+            if "data" in item and isinstance(item.get("data"), dict):
+                rows.append({"__name__": item.get("name"), **item["data"]})
+            else:
+                rows.append(dict(item))
+    return rows
+
+
+def _execute_api_case_data_driven(
+    db: Session, run: TestRun, case: APICase, project: Project, datasets: list[dict], deadline: float | None = None
+) -> dict:
+    """数据驱动：对同一用例逐行数据循环执行，汇总为单个运行结果。
+
+    任一数据行失败则整体判为 FAILED；每行的请求/响应产物以 iter_XX_ 前缀区分。
+    """
+    iteration_results: list[dict] = []
+    artifacts: list[dict] = []
+    stdout_lines: list[str] = []
+    pass_count = 0
+    first_request_payload: dict | None = None
+    last_response_payload: dict | None = None
+    for index, row in enumerate(datasets):
+        iter_no = index + 1
+        row_name = str(row.get("__name__") or f"数据组 {iter_no}")
+        extra = {key: value for key, value in row.items() if key != "__name__"}
+        try:
+            result = _execute_api_case_httpx(db, run, case, project, deadline=deadline, extra_variables=extra)
+        except MissingTemplateVariableError as exc:
+            iteration_results.append({"name": row_name, "status": "FAILED", "detail": str(exc)})
+            stdout_lines.append(f"[iter {iter_no}] {row_name}: 变量缺失 {exc}")
+            continue
+        status = result.get("status", "FAILED")
+        if status == "SUCCESS":
+            pass_count += 1
+        iteration_results.append({"name": row_name, "status": status, "detail": result.get("summary", "")})
+        stdout_lines.append(f"[iter {iter_no}] {row_name}: {status} - {result.get('summary', '')}")
+        if first_request_payload is None:
+            first_request_payload = result.get("request_payload")
+        last_response_payload = result.get("response_payload")
+        for artifact in result.get("artifacts_json") or []:
+            artifacts.append(artifact)
+
+    total = len(datasets)
+    overall = "SUCCESS" if pass_count == total and total > 0 else "FAILED"
+    summary = f"数据驱动：{pass_count}/{total} 组通过"
+    return {
+        "status": overall,
+        "summary": summary,
+        "error_type": None if overall == "SUCCESS" else "ASSERTION",
+        "exit_code": 0 if overall == "SUCCESS" else 1,
+        "stdout_text": "\n".join(stdout_lines),
+        "stderr_text": "" if overall == "SUCCESS" else summary,
+        "artifacts_json": artifacts,
+        "request_payload": first_request_payload,
+        "response_payload": last_response_payload,
+        "step_results_json": iteration_results,
+    }
 
 
 def _execute_api_case(
     db: Session, run: TestRun, case: APICase, project: Project, deadline: float | None = None
 ) -> dict:
+    if case.steps_json:
+        return _execute_api_scenario(db, run, case, project, deadline=deadline)
+    datasets = _normalize_datasets(getattr(case, "datasets_json", None))
+    if datasets:
+        return _execute_api_case_data_driven(db, run, case, project, datasets, deadline=deadline)
     engine = (settings.execution_engine or "httpx").lower()
     if engine == "pytest":
         return _execute_api_case_pytest(db, run, case, project, deadline=deadline)
@@ -698,7 +1019,7 @@ def _execute_performance_case(
     db: Session, run: TestRun, case: PerformanceCase, project: Project, deadline: float | None = None
 ) -> dict:
     environment = _resolve_environment(db, project, run.environment_id)
-    variables = environment.variables_json if environment and environment.variables_json else None
+    variables = build_variable_context(project, environment)
     prepared = prepare_http_request(
         method=case.method,
         project=project,
@@ -851,7 +1172,7 @@ def _execute_ui_case(
     db: Session, run: TestRun, case: UICase, project: Project, deadline: float | None = None
 ) -> dict:
     environment = _resolve_environment(db, project, run.environment_id)
-    variables = environment.variables_json if environment and environment.variables_json else None
+    variables = build_variable_context(project, environment)
 
     target_url = _render_template(case.target_url, variables, "case.target_url")
     steps = _render_data(case.steps_json or [], variables, "case.steps_json")
@@ -1328,6 +1649,326 @@ def _execute_ui_case(
             browser.close()
 
 
+_MIDSCENE_LOG_MAX_BYTES = 1024 * 1024
+_MIDSCENE_SAFE_PARENT_ENV_KEYS = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "NODE_EXTRA_CA_CERTS",
+    "PATH",
+    "PLAYWRIGHT_BROWSERS_PATH",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "XDG_CACHE_HOME",
+)
+
+
+def _midscene_runner_path() -> str:
+    """Resolve the bundled runner in Docker and the repository checkout."""
+    configured = (os.environ.get("MIDSCENE_RUNNER_PATH") or "").strip()
+    if configured:
+        return os.path.abspath(configured)
+    here = os.path.dirname(os.path.abspath(__file__))
+    backend_root = os.path.abspath(os.path.join(here, "..", ".."))
+    repo_root = os.path.abspath(os.path.join(here, "..", "..", ".."))
+    candidates = (
+        os.path.join(backend_root, "midscene", "midscene_runner.js"),
+        os.path.join(repo_root, "e2e", "midscene_runner.js"),
+    )
+    return next((path for path in candidates if os.path.isfile(path)), candidates[0])
+
+
+def _resolve_node_binary() -> str | None:
+    candidate = (os.environ.get("MIDSCENE_NODE_BIN") or "").strip()
+    if candidate:
+        return candidate if (os.path.isabs(candidate) and os.path.exists(candidate)) else shutil.which(candidate)
+    return shutil.which("node")
+
+
+def _midscene_node_path(runner_path: str) -> str | None:
+    local_modules = os.path.join(os.path.dirname(runner_path), "node_modules")
+    if os.path.isdir(local_modules):
+        return local_modules
+    repo_e2e_modules = os.path.abspath(
+        os.path.join(os.path.dirname(runner_path), "..", "..", "e2e", "node_modules")
+    )
+    return repo_e2e_modules if os.path.isdir(repo_e2e_modules) else None
+
+
+def _build_midscene_child_env(
+    *, runner_path: str, model_base_url: str, model_api_key: str, model_name: str, run_dir: str
+) -> dict[str, str]:
+    """Build an allowlisted child environment without backend credentials."""
+    child_env = {
+        key: value
+        for key in _MIDSCENE_SAFE_PARENT_ENV_KEYS
+        if (value := os.environ.get(key)) is not None
+    }
+    child_env["PATH"] = child_env.get("PATH") or os.defpath
+    child_env["HOME"] = child_env.get("HOME") or os.path.expanduser("~")
+    node_path = _midscene_node_path(runner_path)
+    if node_path:
+        child_env["NODE_PATH"] = node_path
+    child_env.update(
+        {
+            "MIDSCENE_MODEL_BASE_URL": model_base_url,
+            "MIDSCENE_MODEL_API_KEY": model_api_key,
+            "MIDSCENE_MODEL_NAME": model_name,
+            "MIDSCENE_RUN_DIR": run_dir,
+        }
+    )
+    return child_env
+
+
+def _run_process_with_limited_output(
+    args: list[str], *, cwd: str, env: dict[str, str], timeout: int, max_bytes: int = _MIDSCENE_LOG_MAX_BYTES
+) -> subprocess.CompletedProcess[str]:
+    """Drain child output continuously while retaining only a bounded prefix."""
+    process = subprocess.Popen(
+        args,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=os.name == "posix",
+    )
+    streams: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    truncated = {"stdout": False, "stderr": False}
+
+    def drain(name: str, stream) -> None:
+        try:
+            while chunk := stream.read(65536):
+                remaining = max(0, max_bytes - len(streams[name]))
+                if remaining:
+                    streams[name].extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    truncated[name] = True
+        finally:
+            stream.close()
+
+    threads = [
+        Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+        Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+
+    timed_out = False
+    try:
+        return_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            process.kill()
+        return_code = process.wait()
+    finally:
+        for thread in threads:
+            thread.join(timeout=5)
+
+    marker = "\n[OmniTest: output truncated]\n"
+
+    def decode(name: str) -> str:
+        value = streams[name].decode("utf-8", "replace")
+        return value + marker if truncated[name] else value
+
+    stdout_text = decode("stdout")
+    stderr_text = decode("stderr")
+    if timed_out:
+        raise subprocess.TimeoutExpired(args, timeout, output=stdout_text, stderr=stderr_text)
+    return subprocess.CompletedProcess(args, return_code, stdout_text, stderr_text)
+
+
+def _execute_ui_case_midscene(
+    db: Session, run: TestRun, case: UICase, project: Project, deadline: float | None = None
+) -> dict:
+    """Run a UI case through the Midscene.js (Node + Playwright) engine as a second engine.
+
+    Reuses the same TestRun/report/model-config plumbing as the native engine and returns
+    the identical result dict consumed by ``finalize_run``.
+    """
+    environment = _resolve_environment(db, project, run.environment_id)
+    variables = build_variable_context(project, environment)
+
+    target_url = _render_template(case.target_url, variables, "case.target_url")
+    steps = _render_data(case.steps_json or [], variables, "case.steps_json")
+    expect_text = _render_template(case.expect_text, variables, "case.expect_text")
+    execution_mode = normalize_execution_mode(getattr(case, "execution_mode", None))
+    allowed_origins = build_allowed_origins(
+        target_url,
+        project.base_url,
+        getattr(case, "allowed_origins_json", None),
+    )
+    ensure_allowed_url(target_url, allowed_origins)
+
+    run_dir = _ensure_run_dir(run.id)
+    artifacts: list[dict] = []
+
+    def _fail(status: str, error_type: str, message: str, steps_out: list | None = None) -> NoReturn:
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "error": message,
+                    "error_class": "MidsceneError",
+                    "status": status,
+                    "error_type": error_type,
+                    "artifacts": artifacts,
+                    "steps": steps_out or [],
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    # Midscene is always AI-driven -> a workspace model config is mandatory.
+    model_row = db.scalar(
+        select(AIModelConfig)
+        .where(AIModelConfig.workspace_id == project.workspace_id, AIModelConfig.is_active == 1)
+        .order_by(AIModelConfig.id.desc())
+    )
+    if model_row is None or not model_row.api_key:
+        _fail("FAILED", "CONFIG", "Midscene 引擎需要 AI，请先在工作空间配置可用模型")
+    model_name = (model_row.model or settings.case_gen_default_model or "").strip()
+    model_base_url = _normalize_model_base_url(model_row.model, model_row.base_url, model_row.api_key)
+
+    node_bin = _resolve_node_binary()
+    runner_path = _midscene_runner_path()
+    if not node_bin:
+        _fail("FAILED", "CONFIG", "当前 worker 未安装 Node.js，无法运行 Midscene 引擎")
+    if not os.path.exists(runner_path):
+        _fail("FAILED", "CONFIG", f"未找到 Midscene runner 脚本: {runner_path}")
+
+    if deadline is not None:
+        timeout_seconds = max(30, int(deadline - time.perf_counter()))
+    else:
+        timeout_seconds = 180
+
+    job = {
+        "targetUrl": target_url,
+        "expectText": expect_text,
+        "steps": steps,
+        "assertions_json": getattr(case, "assertions_json", None),
+        "prohibited_actions_json": getattr(case, "prohibited_actions_json", None),
+        "executionMode": execution_mode,
+        "allowedOrigins": sorted(allowed_origins),
+        "runDir": run_dir,
+        "reportFileName": f"midscene-run-{run.id}",
+        "timeoutMs": timeout_seconds * 1000,
+    }
+    job_artifact = _write_run_artifact(run.id, "ui-midscene-job.json", job)
+    artifacts.append(job_artifact)
+    job_path = job_artifact["path"]
+
+    child_env = _build_midscene_child_env(
+        runner_path=runner_path,
+        model_base_url=model_base_url or "",
+        model_api_key=model_row.api_key,
+        model_name=model_name,
+        run_dir=run_dir,
+    )
+
+    try:
+        completed = _run_process_with_limited_output(
+            [node_bin, runner_path, job_path],
+            cwd=os.path.dirname(runner_path),
+            env=child_env,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout_text = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", "ignore")
+        stderr_text = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "ignore")
+        artifacts.append(_write_run_artifact(run.id, "ui-midscene-stdout.txt", stdout_text or ""))
+        if stderr_text.strip():
+            artifacts.append(_write_run_artifact(run.id, "ui-midscene-stderr.txt", stderr_text))
+        _fail("TIMEOUT", "TIMEOUT", f"Midscene 执行超时（{timeout_seconds}s）")
+
+    stdout_text = completed.stdout or ""
+    stderr_text = completed.stderr or ""
+    artifacts.append(_write_run_artifact(run.id, "ui-midscene-stdout.txt", stdout_text))
+    if stderr_text.strip():
+        artifacts.append(_write_run_artifact(run.id, "ui-midscene-stderr.txt", stderr_text))
+
+    result_path = os.path.join(run_dir, "midscene-result.json")
+    result: dict = {}
+    if os.path.exists(result_path):
+        try:
+            with open(result_path, "r", encoding="utf-8") as handle:
+                result = json.load(handle)
+        except Exception:
+            result = {}
+        artifacts.append({"name": "midscene-result.json", "path": result_path, "type": "json"})
+
+    # Attach the Midscene HTML report if the runner produced one.
+    report_path = result.get("reportPath") if isinstance(result, dict) else None
+    if report_path and os.path.exists(report_path):
+        artifacts.append({"name": os.path.basename(report_path), "path": report_path, "type": "html"})
+
+    raw_steps = result.get("steps") if isinstance(result, dict) else None
+    step_results = []
+    for item in raw_steps or []:
+        step_results.append(
+            {
+                "name": item.get("name") or item.get("action") or "step",
+                "status": str(item.get("status") or "SUCCESS").upper(),
+                "duration_ms": item.get("durationMs"),
+                "detail": item.get("detail") or item.get("error") or "",
+            }
+        )
+
+    status = str(result.get("status") or "").upper() if isinstance(result, dict) else ""
+    if completed.returncode != 0 or status not in {"SUCCESS", "FAILED", "TIMEOUT", "ERROR"}:
+        message = (result.get("error") if isinstance(result, dict) else None) or (
+            stderr_text.strip().splitlines()[-1] if stderr_text.strip() else "Midscene 执行失败"
+        )
+        _fail("ERROR" if completed.returncode != 0 and not status else (status or "ERROR"), "SYSTEM", message, step_results)
+
+    if status != "SUCCESS":
+        message = (result.get("error") if isinstance(result, dict) else None) or "Midscene 断言未通过"
+        error_type = "ASSERTION" if status == "FAILED" else ("TIMEOUT" if status == "TIMEOUT" else "SYSTEM")
+        _fail(status, error_type, message, step_results)
+
+    final_url = result.get("finalUrl") if isinstance(result, dict) else None
+    return {
+        "status": "SUCCESS",
+        "summary": result.get("summary") or f"Midscene 执行成功，共 {len(step_results)} 个步骤",
+        "error_type": None,
+        "exit_code": completed.returncode,
+        "stdout_text": stdout_text,
+        "stderr_text": stderr_text,
+        "artifacts_json": artifacts,
+        "request_payload": {
+            "target_url": target_url,
+            "steps": steps,
+            "execution_mode": execution_mode,
+            "engine": "midscene",
+        },
+        "response_payload": {
+            "expect_text": expect_text,
+            "final_url": final_url,
+            "checkpoint_count": len(step_results),
+            "engine": "midscene",
+            "model": model_name,
+            "release_gate_eligible": True,
+        },
+        "step_results_json": step_results,
+    }
+
+
+def _execute_ui_case_by_engine(
+    db: Session, run: TestRun, case: UICase, project: Project, deadline: float | None = None
+) -> dict:
+    """Dispatch every UI execution entry point using the case's selected engine."""
+    engine = (getattr(case, "engine", "native") or "native").lower()
+    executor = _execute_ui_case_midscene if engine == "midscene" else _execute_ui_case
+    return executor(db, run, case, project, deadline=deadline)
+
+
 def _to_iso(dt: datetime | None) -> str | None:
     if dt is None:
         return None
@@ -1501,7 +2142,7 @@ def run_ui_case(run_id: int) -> dict:
             return {"status": "FAILED", "summary": "关联项目不存在"}
 
         result = _execute_case_with_retries(
-            db, run, lambda deadline: _execute_ui_case(db, run, case, project, deadline=deadline)
+            db, run, lambda deadline: _execute_ui_case_by_engine(db, run, case, project, deadline=deadline)
         )
         summary = result["summary"]
         finalize_run(
@@ -1652,7 +2293,7 @@ def run_test_plan(plan_run_id: int) -> dict:
                         fail_count += 1
                         continue
                     result = _execute_case_with_retries(
-                        db, run, lambda deadline: _execute_ui_case(db, run, case, project, deadline=deadline)
+                        db, run, lambda deadline: _execute_ui_case_by_engine(db, run, case, project, deadline=deadline)
                     )
                 else:
                     finalize_run(db, run, status="FAILED", summary="未知用例类型", error_type="SYSTEM")
@@ -1852,7 +2493,7 @@ def run_ui_batch(batch_run_id: int) -> dict:
                     )
                 else:
                     result = _execute_case_with_retries(
-                        db, run, lambda deadline: _execute_ui_case(db, run, case, project, deadline=deadline)
+                        db, run, lambda deadline: _execute_ui_case_by_engine(db, run, case, project, deadline=deadline)
                     )
 
                 finalize_run(

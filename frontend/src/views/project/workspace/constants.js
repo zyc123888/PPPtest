@@ -105,6 +105,34 @@ export const REQUIREMENT_TYPE_OPTIONS = [
   { value: 'TECH_DEBT', label: '技术债' }
 ]
 
+export const DEFECT_TYPE_OPTIONS = [
+  { value: 'FUNCTION', label: '功能缺陷' },
+  { value: 'PERFORMANCE', label: '性能缺陷' },
+  { value: 'UI', label: '界面/交互' },
+  { value: 'COMPATIBILITY', label: '兼容性' },
+  { value: 'USABILITY', label: '易用性' },
+  { value: 'SECURITY', label: '安全' },
+  { value: 'DATA', label: '数据' },
+  { value: 'OTHER', label: '其他' }
+]
+
+export const DEFECT_TYPE_LABELS = DEFECT_TYPE_OPTIONS.reduce((acc, item) => {
+  acc[item.value] = item.label
+  return acc
+}, {})
+
+export const REPRODUCIBILITY_OPTIONS = [
+  { value: 'ALWAYS', label: '必现' },
+  { value: 'SOMETIMES', label: '偶现' },
+  { value: 'RARELY', label: '极少复现' },
+  { value: 'UNABLE', label: '无法复现' }
+]
+
+export const REPRODUCIBILITY_LABELS = REPRODUCIBILITY_OPTIONS.reduce((acc, item) => {
+  acc[item.value] = item.label
+  return acc
+}, {})
+
 export const PROJECT_ROLE_LABELS = {
   owner: '所有者',
   manager: '管理者',

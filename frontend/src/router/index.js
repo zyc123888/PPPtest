@@ -24,6 +24,7 @@ const Plan = () => import('@/views/plan/index.vue')
 const Environment = () => import('@/views/environment/index.vue')
 const Execution = () => import('@/views/execution/index.vue')
 const Report = () => import('@/views/report/index.vue')
+const SharedReport = () => import('@/views/report/shared.vue')
 const Tools = () => import('@/views/tools/index.vue')
 const User = () => import('@/views/user/index.vue')
 
@@ -33,6 +34,12 @@ export const constantRoutes = [
     component: Login,
     name: 'Login',
     meta: { public: true, title: '登录' }
+  },
+  {
+    path: '/shared-report/:token',
+    component: SharedReport,
+    name: 'SharedReport',
+    meta: { public: true, title: '报告分享' }
   },
   {
     path: '/',

@@ -43,6 +43,42 @@
     </el-card>
 
     <el-card class="page-card" shadow="never">
+      <template #header>
+        <div class="card-head">
+          <span>项目变量池</span>
+          <div v-if="canManage">
+            <el-button size="small" @click="addVariableRow">添加变量</el-button>
+            <el-button size="small" type="primary" :loading="varSaving" @click="saveVariables">保存</el-button>
+          </div>
+        </div>
+      </template>
+      <el-table :data="variableRows" border size="small">
+        <el-table-column label="变量名" min-width="200">
+          <template #default="{ row }">
+            <el-input v-if="canManage" v-model="row.key" placeholder="例如 base_url" />
+            <span v-else>{{ row.key }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="值" min-width="280">
+          <template #default="{ row }">
+            <el-input v-if="canManage" v-model="row.value" placeholder="变量值" />
+            <span v-else>{{ row.value }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="canManage" label="操作" width="80" align="center">
+          <template #default="{ $index }">
+            <el-button size="small" text type="danger" @click="variableRows.splice($index, 1)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-empty v-if="!variableRows.length" description="暂无项目变量" :image-size="70" />
+      <div class="notify-hint">
+        用例中通过 <code v-pre>{{变量名}}</code> 引用项目变量；执行时优先级为 环境变量 &gt; 项目变量。
+        内置动态变量：<code v-pre>{{timestamp}}</code>、<code v-pre>{{uuid}}</code>、<code v-pre>{{random_int}}</code>、<code v-pre>{{random_string}}</code>。
+      </div>
+    </el-card>
+
+    <el-card class="page-card" shadow="never">
       <template #header><span>项目信息</span></template>
       <el-descriptions :column="2" border>
         <el-descriptions-item label="项目名称">{{ project.name }}</el-descriptions-item>
@@ -134,6 +170,9 @@ const notifyForm = reactive({ enabled: false, channel_type: 'FEISHU', webhook_ur
 const notifySaving = ref(false)
 const notifyTesting = ref(false)
 
+const variableRows = ref([])
+const varSaving = ref(false)
+
 const candidateUsers = computed(() => {
   const joined = new Set(members.value.map((m) => m.user_id))
   return allUsers.value.filter((u) => !joined.has(u.id))
@@ -224,7 +263,34 @@ async function sendTestMessage() {
   } catch (error) { ElMessage.error(error.message) } finally { notifyTesting.value = false }
 }
 
-onMounted(() => { fetchMembers(); loadUsers(); fetchNotifySetting() })
+async function fetchVariables() {
+  try {
+    const data = await api.get(`/projects/${props.project.id}/variables`)
+    const vars = data.variables_json || {}
+    variableRows.value = Object.keys(vars).map((key) => ({ key, value: String(vars[key] ?? '') }))
+  } catch { variableRows.value = [] }
+}
+
+function addVariableRow() {
+  variableRows.value.push({ key: '', value: '' })
+}
+
+async function saveVariables() {
+  const payload = {}
+  for (const row of variableRows.value) {
+    const key = String(row.key || '').trim()
+    if (!key) continue
+    payload[key] = row.value
+  }
+  varSaving.value = true
+  try {
+    await api.put(`/projects/${props.project.id}/variables`, { variables_json: payload })
+    ElMessage.success('变量池已保存')
+    fetchVariables()
+  } catch (error) { ElMessage.error(error.message) } finally { varSaving.value = false }
+}
+
+onMounted(() => { fetchMembers(); loadUsers(); fetchNotifySetting(); fetchVariables() })
 </script>
 
 <style scoped>

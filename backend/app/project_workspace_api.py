@@ -962,13 +962,17 @@ def create_defect(
 ) -> Defect:
     _require_project_role(db, current_user, project_id, "member")
     max_order = db.scalar(select(func.max(Defect.order_index)).where(Defect.project_id == project_id)) or 0.0
+    data = payload.model_dump()
+    assignees = data.get("assignees_json")
+    if assignees and not data.get("assignee_id"):
+        data["assignee_id"] = assignees[0]
     defect = Defect(
         project_id=project_id,
         reporter_id=current_user.id,
         created_by=current_user.id,
         updated_by=current_user.id,
         order_index=max_order + 1000.0,
-        **payload.model_dump(),
+        **data,
     )
     db.add(defect)
     db.commit()
@@ -1065,7 +1069,11 @@ def update_defect(
     if defect is None:
         raise HTTPException(status_code=404, detail="缺陷不存在")
     _require_project_role(db, current_user, defect.project_id, "member")
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    if "assignees_json" in data:
+        assignees = data.get("assignees_json") or []
+        data["assignee_id"] = assignees[0] if assignees else None
+    for key, value in data.items():
         setattr(defect, key, value)
     defect.updated_by = current_user.id
     db.commit()

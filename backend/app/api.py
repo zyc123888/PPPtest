@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import secrets
 import shutil
 import time
 from datetime import datetime
@@ -9,8 +10,8 @@ from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree as ET
 
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import String, cast, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app import schemas, services
 from app import notifications
+from app import spec_import
 from app.core.config import settings
 from app.core.celery_app import celery_app
 from app.core.database import get_db
@@ -62,8 +64,10 @@ from app.models import (
 )
 from app.execution_runtime import (
     MissingTemplateVariableError,
+    build_variable_context,
     prepare_http_request,
 )
+from app.assertion_engine import ResponseFacts, evaluate_assertions, run_extractors
 from app.model_registry import case_generation_model_options
 from app.tasks.case_generation import (
     _normalize_model_base_url,
@@ -144,20 +148,65 @@ def _require_workspace_access(db: Session, user: User, workspace_id: int) -> Non
         raise HTTPException(status_code=403, detail="无权访问该工作空间")
 
 
+def _project_has_members(db: Session, project_id: int) -> bool:
+    """项目是否配置了显式成员（一旦配置即进入项目级隔离模式）。"""
+    return db.scalar(
+        select(ProjectMember.id).where(ProjectMember.project_id == project_id).limit(1)
+    ) is not None
+
+
+def _is_project_member(db: Session, user: User, project_id: int) -> bool:
+    return db.scalar(
+        select(ProjectMember.id).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user.id,
+        )
+    ) is not None
+
+
+def _can_access_project(db: Session, user: User, project: Project) -> bool:
+    """项目级数据隔离判定。
+
+    - admin 拥有全部权限；
+    - 显式项目成员始终可访问；
+    - 项目一旦配置显式成员则仅成员可访问（隔离模式）；
+    - 未配置成员时回退到工作空间级可见性（向后兼容旧行为）。
+    """
+    if user.role == "admin":
+        return True
+    if _is_project_member(db, user, project.id):
+        return True
+    if _project_has_members(db, project.id):
+        return False
+    return _can_access_workspace(db, user, project.workspace_id)
+
+
 def _require_project_access(db: Session, user: User, project: Project | None) -> Project:
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
-    _require_workspace_access(db, user, project.workspace_id)
+    if not _can_access_project(db, user, project):
+        raise HTTPException(status_code=403, detail="无权访问该项目")
     return project
 
 
 def _accessible_project_ids(db: Session, user: User) -> list[int]:
     if user.role == "admin":
         return list(db.scalars(select(Project.id)).all())
+    # 用户显式加入的项目（隔离授权）
+    member_project_ids = set(
+        db.scalars(select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)).all()
+    )
+    # 所有配置了显式成员的项目（处于隔离模式，非成员不可见）
+    restricted_project_ids = set(db.scalars(select(ProjectMember.project_id).distinct()).all())
+    # 用户所在工作空间下的项目
     workspace_ids = _workspace_ids_for_user(db, user)
-    if not workspace_ids:
-        return []
-    return list(db.scalars(select(Project.id).where(Project.workspace_id.in_(workspace_ids))).all())
+    workspace_project_ids: set[int] = set()
+    if workspace_ids:
+        workspace_project_ids = set(
+            db.scalars(select(Project.id).where(Project.workspace_id.in_(workspace_ids))).all()
+        )
+    accessible = member_project_ids | (workspace_project_ids - restricted_project_ids)
+    return list(accessible)
 
 
 def _workspace_names_for_user(db: Session, user_id: int) -> list[str]:
@@ -510,6 +559,24 @@ def _build_report_insights(
 def _validation_issues_for_api_case(case: APICase, variables: dict | None) -> list[schemas.EnvironmentValidationIssue]:
     case_scope = f"api_case:{case.name}"
     issues: list[schemas.EnvironmentValidationIssue] = []
+    if case.steps_json:
+        # 场景模式：前序步骤提取的变量在执行时才产生，预检时视为已知变量
+        known = dict(variables or {})
+        for index, step in enumerate(case.steps_json):
+            if not isinstance(step, dict):
+                continue
+            step_scope = f"{case_scope}#step{index + 1}"
+            issues.extend(_collect_missing_template_issues(step.get("path"), known, scope=step_scope, field="path"))
+            issues.extend(
+                _collect_missing_template_issues(step.get("headers_json"), known, scope=step_scope, field="headers_json")
+            )
+            issues.extend(
+                _collect_missing_template_issues(step.get("body_json"), known, scope=step_scope, field="body_json")
+            )
+            for extractor in step.get("extractors") or []:
+                if isinstance(extractor, dict) and str(extractor.get("name") or "").strip():
+                    known[str(extractor["name"]).strip()] = "__extracted__"
+        return issues
     issues.extend(_collect_missing_template_issues(case.path, variables, scope=case_scope, field="path"))
     issues.extend(_collect_missing_template_issues(case.headers_json, variables, scope=case_scope, field="headers_json"))
     issues.extend(_collect_missing_template_issues(case.body_json, variables, scope=case_scope, field="body_json"))
@@ -784,6 +851,7 @@ def _serialize_unified_case(case_type: str, case) -> schemas.UnifiedCaseRead:
         "assertions_json": getattr(case, "assertions_json", None),
         "generation_mode": getattr(case, "generation_mode", None),
         "execution_mode": getattr(case, "execution_mode", None),
+        "engine": getattr(case, "engine", "native") or "native",
         "self_heal_enabled": bool(getattr(case, "self_heal_enabled", False)),
         "max_agent_steps": getattr(case, "max_agent_steps", None),
         "allowed_origins_json": getattr(case, "allowed_origins_json", None),
@@ -843,6 +911,7 @@ def _case_snapshot(case) -> dict:
         "review_note",
         "generation_mode",
         "execution_mode",
+        "engine",
         "self_heal_enabled",
         "max_agent_steps",
         "allowed_origins_json",
@@ -865,6 +934,8 @@ def _ensure_case_defaults(case) -> None:
         case.generation_mode = "manual"
     if hasattr(case, "execution_mode") and not getattr(case, "execution_mode", None):
         case.execution_mode = "stable"
+    if hasattr(case, "engine") and not getattr(case, "engine", None):
+        case.engine = "native"
     if hasattr(case, "max_agent_steps") and not getattr(case, "max_agent_steps", None):
         case.max_agent_steps = 10
 
@@ -926,6 +997,54 @@ def _ensure_workspace_owner_guard(
 
 public_router = APIRouter()
 protected_router = APIRouter(dependencies=[Depends(get_current_user)])
+
+
+def _normalize_mock_path(value: str | None) -> str:
+    """去除查询串并规范化为以 / 开头的路径。"""
+    raw = (value or "").split("?", 1)[0]
+    raw = raw.strip()
+    if not raw:
+        return "/"
+    return "/" + raw.strip("/")
+
+
+@public_router.api_route(
+    "/mock/{project_id}/{mock_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+)
+def mock_service(
+    project_id: int,
+    mock_path: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    """轻量 Mock 服务：按 method+path 匹配已启用 Mock 的接口用例，返回其预设响应。
+
+    mock_config_json 结构：{status_code, headers, body, delay_ms}。无匹配时返回 404。
+    """
+    method = request.method.upper()
+    target = _normalize_mock_path(mock_path)
+    candidates = db.scalars(
+        select(APICase).where(
+            APICase.project_id == project_id,
+            APICase.mock_enabled.is_(True),
+            func.upper(APICase.method) == method,
+        )
+    ).all()
+    matched = next((c for c in candidates if _normalize_mock_path(c.path) == target), None)
+    if matched is None:
+        raise HTTPException(status_code=404, detail="未找到匹配的 Mock 用例")
+
+    config = matched.mock_config_json or {}
+    status_code = int(config.get("status_code") or 200)
+    headers = {str(k): str(v) for k, v in (config.get("headers") or {}).items()}
+    delay_ms = int(config.get("delay_ms") or 0)
+    if delay_ms > 0:
+        time.sleep(min(delay_ms, 10000) / 1000)
+    body = config.get("body")
+    if isinstance(body, (dict, list)):
+        return JSONResponse(content=body, status_code=status_code, headers=headers)
+    return Response(content="" if body is None else str(body), status_code=status_code, headers=headers)
 
 
 def _dispatch_task_or_run_inline(
@@ -1150,6 +1269,100 @@ def update_workspace_member(
     )
 
 
+def _project_member_to_read(db: Session, member: ProjectMember) -> schemas.ProjectMemberRead:
+    user = db.get(User, member.user_id)
+    return schemas.ProjectMemberRead(
+        id=member.id,
+        project_id=member.project_id,
+        user_id=member.user_id,
+        username=user.username if user else None,
+        display_name=user.display_name if user else None,
+        role=member.role,
+        created_at=member.created_at,
+    )
+
+
+@protected_router.get(
+    "/projects/{project_id}/members",
+    response_model=list[schemas.ProjectMemberRead],
+)
+def list_project_members(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[schemas.ProjectMemberRead]:
+    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    members = list(
+        db.scalars(
+            select(ProjectMember)
+            .where(ProjectMember.project_id == project.id)
+            .order_by(ProjectMember.id.asc())
+        ).all()
+    )
+    return [_project_member_to_read(db, member) for member in members]
+
+
+@protected_router.post(
+    "/projects/{project_id}/members",
+    response_model=schemas.ProjectMemberRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
+def add_project_member(
+    project_id: int,
+    payload: schemas.ProjectMemberCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ProjectMemberRead:
+    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    user = db.get(User, payload.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    member = services.ensure_project_member(db, project.id, payload.user_id, payload.role)
+    return _project_member_to_read(db, member)
+
+
+@protected_router.put(
+    "/projects/{project_id}/members/{member_id}",
+    response_model=schemas.ProjectMemberRead,
+    dependencies=[Depends(require_tester)],
+)
+def update_project_member(
+    project_id: int,
+    member_id: int,
+    payload: schemas.ProjectMemberUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ProjectMemberRead:
+    _require_project_access(db, current_user, db.get(Project, project_id))
+    member = db.get(ProjectMember, member_id)
+    if member is None or member.project_id != project_id:
+        raise HTTPException(status_code=404, detail="成员不存在")
+    member.role = payload.role
+    db.commit()
+    db.refresh(member)
+    return _project_member_to_read(db, member)
+
+
+@protected_router.delete(
+    "/projects/{project_id}/members/{member_id}",
+    status_code=204,
+    dependencies=[Depends(require_tester)],
+)
+def delete_project_member(
+    project_id: int,
+    member_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    _require_project_access(db, current_user, db.get(Project, project_id))
+    member = db.get(ProjectMember, member_id)
+    if member is None or member.project_id != project_id:
+        raise HTTPException(status_code=404, detail="成员不存在")
+    db.delete(member)
+    db.commit()
+
+
 @protected_router.get("/projects", response_model=list[schemas.ProjectRead])
 def list_projects(
     workspace_id: int | None = None,
@@ -1219,6 +1432,38 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> None:
     db.execute(delete(Environment).where(Environment.project_id == project_id))
     db.execute(delete(Project).where(Project.id == project_id))
     db.commit()
+
+
+@protected_router.get(
+    "/projects/{project_id}/variables",
+    dependencies=[Depends(require_tester)],
+)
+def get_project_variables(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """获取项目级全局变量池。"""
+    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    return {"project_id": project.id, "variables_json": project.variables_json or {}}
+
+
+@protected_router.put(
+    "/projects/{project_id}/variables",
+    dependencies=[Depends(require_tester)],
+)
+def update_project_variables(
+    project_id: int,
+    payload: schemas.ProjectVariablesUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """更新项目级全局变量池。"""
+    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    project.variables_json = payload.variables_json or {}
+    project.updated_by = current_user.id
+    db.commit()
+    return {"project_id": project.id, "variables_json": project.variables_json or {}}
 
 
 @protected_router.get("/api-cases", response_model=schemas.APICasePage | list[schemas.APICaseRead])
@@ -1538,6 +1783,8 @@ def import_cases(
                 headers_json=item.headers_json,
                 body_json=item.body_json,
                 assertions_json=item.assertions_json,
+                extractors_json=item.extractors_json,
+                steps_json=item.steps_json,
                 expected_status=item.expected_status or 200,
                 created_by=current_user.id,
                 updated_by=current_user.id,
@@ -1562,6 +1809,7 @@ def import_cases(
                 expect_text=item.expect_text or "ok",
                 generation_mode=item.generation_mode,
                 execution_mode=item.execution_mode,
+                engine=item.engine,
                 self_heal_enabled=item.self_heal_enabled,
                 max_agent_steps=item.max_agent_steps,
                 allowed_origins_json=item.allowed_origins_json,
@@ -1610,6 +1858,80 @@ def import_cases(
 
     db.commit()
     return schemas.BatchActionResult(success=True, affected_count=affected_count, message=f"已导入 {affected_count} 条用例")
+
+
+@protected_router.post(
+    "/api-cases/import-spec",
+    response_model=schemas.ApiSpecImportResult,
+    dependencies=[Depends(require_tester)],
+)
+def import_api_spec(
+    payload: schemas.ApiSpecImportPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ApiSpecImportResult:
+    """从 OpenAPI/Swagger 或 Postman Collection 导入接口用例。
+
+    dry_run=True 时仅解析预览、不落库；否则逐条创建 APICase 并记录导入历史。
+    """
+    project = _require_project_access(db, current_user, db.get(Project, payload.project_id))
+    try:
+        drafts, warnings = spec_import.parse_spec(payload.source_type, payload.content)
+    except spec_import.SpecParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    base_folder = (payload.folder_path or "").strip().strip("/") or None
+    preview_items: list[schemas.ApiSpecImportPreviewItem] = []
+    created_count = 0
+    for draft in drafts:
+        folder = draft.get("folder_path")
+        if base_folder:
+            folder = f"{base_folder}/{folder}" if folder else base_folder
+        folder = folder[:255] if folder else None
+        preview_items.append(
+            schemas.ApiSpecImportPreviewItem(
+                name=draft["name"],
+                method=draft["method"],
+                path=draft["path"],
+                folder_path=folder,
+            )
+        )
+        if payload.dry_run:
+            continue
+        case = APICase(
+            project_id=project.id,
+            name=draft["name"],
+            folder_path=folder,
+            method=draft["method"],
+            path=draft["path"] or "/",
+            headers_json=draft.get("headers_json"),
+            body_json=draft.get("body_json"),
+            expected_status=200,
+            created_by=current_user.id,
+            updated_by=current_user.id,
+        )
+        db.add(case)
+        db.flush()
+        _record_case_history(
+            db,
+            case_type="API",
+            case=case,
+            action="IMPORT",
+            changed_by=current_user.id,
+            summary=f"从 {payload.source_type} 导入接口用例",
+        )
+        created_count += 1
+
+    if not payload.dry_run and created_count:
+        db.commit()
+    return schemas.ApiSpecImportResult(
+        source_type=payload.source_type,
+        detected_count=len(drafts),
+        created_count=created_count,
+        dry_run=payload.dry_run,
+        items=preview_items,
+        warnings=warnings,
+    )
 
 
 @protected_router.get("/cases/folders", response_model=list[schemas.CaseFolderNode])
@@ -2842,7 +3164,7 @@ def debug_api_case(
         environment = db.get(Environment, payload.environment_id)
         if environment is None or environment.project_id != project.id:
             raise HTTPException(status_code=404, detail="执行环境不存在")
-    variables = environment.variables_json if environment and environment.variables_json else None
+    variables = build_variable_context(project, environment)
     try:
         prepared = prepare_http_request(
             method=payload.method,
@@ -2885,6 +3207,16 @@ def debug_api_case(
         response_body = response_text[:5000]
         body_type = "text"
 
+    facts = ResponseFacts(
+        status_code=response.status_code,
+        headers=response_headers,
+        body_text=response_text or "",
+        body_json=response_body if body_type == "json" else None,
+        duration_ms=duration_ms,
+    )
+    outcome = evaluate_assertions(payload.assertions_json, facts, expected_status=payload.expected_status)
+    extracted, extractor_results = run_extractors(payload.extractors_json, facts)
+
     return schemas.APICaseDebugResponse(
         request={
             "method": prepared.method,
@@ -2900,6 +3232,10 @@ def debug_api_case(
             "size": len(response.content),
         },
         duration_ms=duration_ms,
+        assertion_passed=outcome.passed,
+        assertion_results=outcome.results,
+        extracted_variables={key: str(value) for key, value in extracted.items()},
+        extractor_results=extractor_results,
     )
 
 
@@ -3148,6 +3484,8 @@ def update_api_case(
         api_case.headers_json,
         api_case.body_json,
         api_case.assertions_json,
+        api_case.extractors_json,
+        api_case.steps_json,
     )
     data = payload.model_dump(exclude={"review_status", "review_note"})
     data["method"] = data["method"].upper()
@@ -3165,6 +3503,8 @@ def update_api_case(
         api_case.headers_json,
         api_case.body_json,
         api_case.assertions_json,
+        api_case.extractors_json,
+        api_case.steps_json,
     )
     if new_signature != original_signature:
         api_case.version_no = _bump_version(api_case.version_no)
@@ -3604,6 +3944,7 @@ def update_ui_case(
         ui_case.assertions_json,
         ui_case.generation_mode,
         ui_case.execution_mode,
+        ui_case.engine,
         ui_case.self_heal_enabled,
         ui_case.max_agent_steps,
         ui_case.allowed_origins_json,
@@ -3627,6 +3968,7 @@ def update_ui_case(
         ui_case.assertions_json,
         ui_case.generation_mode,
         ui_case.execution_mode,
+        ui_case.engine,
         ui_case.self_heal_enabled,
         ui_case.max_agent_steps,
         ui_case.allowed_origins_json,
@@ -4312,7 +4654,7 @@ def precheck_api_case_execution(
         environment = db.get(Environment, environment_id)
         if environment is None or environment.project_id != api_case.project_id:
             raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
-    variables = environment.variables_json if environment and environment.variables_json else {}
+    variables = build_variable_context(project, environment)
     issues = _validation_issues_for_environment_runtime(environment, project)
     issues.extend(_validation_issues_for_api_case(api_case, variables))
     return _build_execution_precheck_result(
@@ -4340,7 +4682,7 @@ def precheck_ui_case_execution(
         environment = db.get(Environment, environment_id)
         if environment is None or environment.project_id != ui_case.project_id:
             raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
-    variables = environment.variables_json if environment and environment.variables_json else {}
+    variables = build_variable_context(project, environment)
     issues = _validation_issues_for_environment_runtime(environment, project)
     issues.extend(_validation_issues_for_ui_case(ui_case, variables))
     return _build_execution_precheck_result(
@@ -4368,7 +4710,7 @@ def precheck_performance_case_execution(
         environment = db.get(Environment, environment_id)
         if environment is None or environment.project_id != perf_case.project_id:
             raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
-    variables = environment.variables_json if environment and environment.variables_json else {}
+    variables = build_variable_context(project, environment)
     issues = _validation_issues_for_environment_runtime(environment, project)
     issues.extend(_validation_issues_for_performance_case(perf_case, variables))
     return _build_execution_precheck_result(
@@ -4396,7 +4738,7 @@ def precheck_plan_execution(
         environment = db.get(Environment, environment_id)
         if environment is None or environment.project_id != plan.project_id:
             raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
-    variables = environment.variables_json if environment and environment.variables_json else {}
+    variables = build_variable_context(project, environment)
     issues = _validation_issues_for_environment_runtime(environment, project)
     cases = list(
         db.scalars(
@@ -5807,6 +6149,19 @@ def timestamp_convert(payload: schemas.TimestampPayload) -> schemas.ToolResult:
     return schemas.ToolResult(result=services.convert_timestamp(payload.payload))
 
 
+@protected_router.post("/tools/cron/preview", response_model=schemas.ToolResult)
+def cron_preview(payload: schemas.TextPayload) -> schemas.ToolResult:
+    try:
+        return schemas.ToolResult(result=services.preview_cron(payload.payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@protected_router.post("/tools/hash/digest", response_model=schemas.ToolResult)
+def hash_digest(payload: schemas.TextPayload) -> schemas.ToolResult:
+    return schemas.ToolResult(result=services.digest_text(payload.payload))
+
+
 @protected_router.get("/reports", response_model=list[schemas.TestPlanRunView])
 def list_reports(
     db: Session = Depends(get_db),
@@ -5964,7 +6319,11 @@ def get_report(
     if plan_run is None:
         raise HTTPException(status_code=404, detail="报告不存在")
     _require_project_access(db, current_user, db.get(Project, plan_run.project_id))
+    return _assemble_report_detail(db, plan_run)
 
+
+def _assemble_report_detail(db: Session, plan_run: TestPlanRun) -> schemas.ReportDetail:
+    plan_run_id = plan_run.id
     test_runs = list(
         db.scalars(select(TestRun).where(TestRun.plan_run_id == plan_run_id).order_by(TestRun.id.asc())).all()
     )
@@ -6094,6 +6453,87 @@ def download_report_file(
     media_type = "application/json" if format == "json" else "application/xml"
     filename = f"plan_run_{plan_run.id}.{format if format == 'json' else 'xml'}"
     return FileResponse(path=file_path, media_type=media_type, filename=filename)
+
+
+def _report_share_url(share_token: str | None) -> str:
+    if not share_token:
+        return ""
+    return f"/shared-report/{share_token}"
+
+
+@protected_router.post(
+    "/reports/{plan_run_id}/share",
+    response_model=schemas.ReportShareResult,
+    dependencies=[Depends(require_tester)],
+)
+def enable_report_share(
+    plan_run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ReportShareResult:
+    """为报告生成（或复用）公开分享链接 token，无需登录即可访问。"""
+    plan_run = db.get(TestPlanRun, plan_run_id)
+    if plan_run is None:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    _require_project_access(db, current_user, db.get(Project, plan_run.project_id))
+    if not plan_run.share_token:
+        plan_run.share_token = secrets.token_urlsafe(24)
+        db.commit()
+        db.refresh(plan_run)
+    return schemas.ReportShareResult(
+        plan_run_id=plan_run.id,
+        share_token=plan_run.share_token,
+        share_url=_report_share_url(plan_run.share_token),
+        enabled=True,
+    )
+
+
+@protected_router.delete(
+    "/reports/{plan_run_id}/share",
+    response_model=schemas.ReportShareResult,
+    dependencies=[Depends(require_tester)],
+)
+def disable_report_share(
+    plan_run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.ReportShareResult:
+    """关闭报告分享，使已发出的链接失效。"""
+    plan_run = db.get(TestPlanRun, plan_run_id)
+    if plan_run is None:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    _require_project_access(db, current_user, db.get(Project, plan_run.project_id))
+    plan_run.share_token = None
+    db.commit()
+    db.refresh(plan_run)
+    return schemas.ReportShareResult(
+        plan_run_id=plan_run.id,
+        share_token=None,
+        share_url="",
+        enabled=False,
+    )
+
+
+@public_router.get("/public/reports/{share_token}", response_model=schemas.PublicReportDetail)
+def get_shared_report(
+    share_token: str,
+    db: Session = Depends(get_db),
+) -> schemas.PublicReportDetail:
+    """通过分享 token 匿名访问报告详情（无需登录）。"""
+    plan_run = db.scalar(select(TestPlanRun).where(TestPlanRun.share_token == share_token))
+    if plan_run is None:
+        raise HTTPException(status_code=404, detail="分享链接无效或已失效")
+    detail = _assemble_report_detail(db, plan_run)
+    return schemas.PublicReportDetail(
+        plan_run=schemas.PublicTestPlanRunRead.model_validate(
+            detail.plan_run.model_dump()
+        ),
+        test_runs=[
+            schemas.PublicTestRunRead.model_validate(run.model_dump())
+            for run in detail.test_runs
+        ],
+        recent_history=detail.recent_history,
+    )
 
 
 _VALID_USER_ROLES = {"admin", "tester", "viewer"}

@@ -1,10 +1,12 @@
+import json
+
 from datetime import datetime
 
 from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.core.secrets import decrypt_secret, encrypt_secret
+from app.core.secrets import decrypt_secret, encrypt_secret, is_encryption_available
 
 
 class Workspace(Base):
@@ -76,6 +78,8 @@ class Project(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     base_url: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
+    _legacy_variables_json: Mapped[dict | None] = mapped_column("variables_json", JSON, nullable=True)
+    variables_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     code: Mapped[str | None] = mapped_column(String(40), nullable=True, unique=True)
     start_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     end_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
@@ -100,6 +104,31 @@ class Project(Base):
     case_generation_jobs = relationship("CaseGenerationJob", back_populates="project", cascade="all, delete-orphan")
     case_generation_v2_jobs = relationship("CaseGenerationV2Job", back_populates="project", cascade="all, delete-orphan")
 
+    @property
+    def variables_json(self) -> dict | None:
+        if self.variables_encrypted:
+            decrypted = decrypt_secret(self.variables_encrypted)
+            if decrypted:
+                try:
+                    parsed = json.loads(decrypted)
+                    return parsed if isinstance(parsed, dict) else None
+                except (TypeError, ValueError):
+                    return None
+        return self._legacy_variables_json
+
+    @variables_json.setter
+    def variables_json(self, value: dict | None) -> None:
+        if value and isinstance(value, dict):
+            if is_encryption_available():
+                self.variables_encrypted = encrypt_secret(json.dumps(value, ensure_ascii=False))
+                self._legacy_variables_json = None
+            else:
+                self.variables_encrypted = None
+                self._legacy_variables_json = value
+        else:
+            self.variables_encrypted = None
+            self._legacy_variables_json = None
+
 
 class APICase(Base):
     __tablename__ = "api_cases"
@@ -120,9 +149,14 @@ class APICase(Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     tags_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     assertions_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    extractors_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    steps_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    datasets_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     headers_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     body_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     expected_status: Mapped[int] = mapped_column(Integer, nullable=False, default=200)
+    mock_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    mock_config_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
@@ -155,6 +189,7 @@ class UICase(Base):
     expect_text: Mapped[str] = mapped_column(String(255), nullable=False)
     generation_mode: Mapped[str] = mapped_column(String(30), nullable=False, default="manual")
     execution_mode: Mapped[str] = mapped_column(String(30), nullable=False, default="stable")
+    engine: Mapped[str] = mapped_column(String(20), nullable=False, default="native")
     self_heal_enabled: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_agent_steps: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     allowed_origins_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
@@ -237,8 +272,10 @@ class Environment(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     base_url: Mapped[str] = mapped_column(String(255), nullable=False)
     headers_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    variables_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    auth_config_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    _legacy_variables_json: Mapped[dict | None] = mapped_column("variables_json", JSON, nullable=True)
+    variables_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    _legacy_auth_config_json: Mapped[dict | None] = mapped_column("auth_config_json", JSON, nullable=True)
+    auth_config_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
@@ -249,6 +286,59 @@ class Environment(Base):
     project = relationship("Project", back_populates="environments")
     test_runs = relationship("TestRun", back_populates="environment")
     plan_runs = relationship("TestPlanRun", back_populates="environment")
+
+    @property
+    def variables_json(self) -> dict | None:
+        if self.variables_encrypted:
+            decrypted = decrypt_secret(self.variables_encrypted)
+            if decrypted:
+                try:
+                    parsed = json.loads(decrypted)
+                    return parsed if isinstance(parsed, dict) else None
+                except (TypeError, ValueError):
+                    return None
+        return self._legacy_variables_json
+
+    @variables_json.setter
+    def variables_json(self, value: dict | None) -> None:
+        if value and isinstance(value, dict):
+            if is_encryption_available():
+                self.variables_encrypted = encrypt_secret(json.dumps(value, ensure_ascii=False))
+                self._legacy_variables_json = None
+            else:
+                self.variables_encrypted = None
+                self._legacy_variables_json = value
+        else:
+            self.variables_encrypted = None
+            self._legacy_variables_json = None
+
+    @property
+    def auth_config_json(self) -> dict | None:
+        """认证配置透明加解密：密文列优先，兼容历史明文 JSON 列"""
+        if self.auth_config_encrypted:
+            decrypted = decrypt_secret(self.auth_config_encrypted)
+            if decrypted:
+                try:
+                    parsed = json.loads(decrypted)
+                    return parsed if isinstance(parsed, dict) else None
+                except (TypeError, ValueError):
+                    return None
+        return self._legacy_auth_config_json
+
+    @auth_config_json.setter
+    def auth_config_json(self, value: dict | None) -> None:
+        if value and isinstance(value, dict):
+            if is_encryption_available():
+                # 已配置密钥：加密存储，清除历史明文
+                self.auth_config_encrypted = encrypt_secret(json.dumps(value, ensure_ascii=False))
+                self._legacy_auth_config_json = None
+            else:
+                # 未配置密钥：降级为明文存储，保持向后兼容
+                self.auth_config_encrypted = None
+                self._legacy_auth_config_json = value
+        else:
+            self.auth_config_encrypted = None
+            self._legacy_auth_config_json = None
 
 
 class TestPlan(Base):
@@ -320,6 +410,7 @@ class TestPlanRun(Base):
     report_json_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     report_junit_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     report_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    share_token: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
@@ -739,6 +830,7 @@ class Requirement(Base):
     story_points: Mapped[float | None] = mapped_column(Float, nullable=True)
     folder_path: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     tags_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    assignees_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     order_index: Mapped[float] = mapped_column(Float, nullable=False, default=1000.0)
     due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
@@ -766,6 +858,7 @@ class ProjectTask(Base):
     reporter_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     estimate_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
     spent_hours: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    assignees_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     order_index: Mapped[float] = mapped_column(Float, nullable=False, default=1000.0)
     due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
@@ -791,9 +884,19 @@ class Defect(Base):
     severity: Mapped[str] = mapped_column(String(20), nullable=False, default="MAJOR", index=True)
     priority: Mapped[str] = mapped_column(String(10), nullable=False, default="P2", index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="NEW", index=True)
+    defect_type: Mapped[str] = mapped_column(String(20), nullable=False, default="FUNCTION", index=True)
+    reproducibility: Mapped[str] = mapped_column(String(20), nullable=False, default="ALWAYS")
+    found_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    fixed_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    module: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
     assignee_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    assignees_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    cc_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    tags_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     reporter_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     order_index: Mapped[float] = mapped_column(Float, nullable=False, default=1000.0)
+    due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)

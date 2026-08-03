@@ -41,6 +41,10 @@ class ProjectRead(ORMBaseModel):
     updated_at: datetime | None = None
 
 
+class ProjectVariablesUpdate(BaseModel):
+    variables_json: dict | None = None
+
+
 class APICaseCreate(BaseModel):
     project_id: int
     name: str = Field(..., min_length=2, max_length=120)
@@ -54,9 +58,14 @@ class APICaseCreate(BaseModel):
     review_note: str | None = None
     tags_json: list[str] | None = None
     assertions_json: list[dict] | None = None
+    extractors_json: list[dict] | None = None
+    steps_json: list[dict] | None = None
+    datasets_json: list[dict] | None = None
     headers_json: dict | None = None
     body_json: dict | None = None
     expected_status: int = 200
+    mock_enabled: bool = False
+    mock_config_json: dict | None = None
 
 
 class APICaseUpdate(APICaseCreate):
@@ -77,9 +86,14 @@ class APICaseRead(ORMBaseModel):
     review_note: str | None = None
     tags_json: list[str] | None = None
     assertions_json: list[dict] | None = None
+    extractors_json: list[dict] | None = None
+    steps_json: list[dict] | None = None
+    datasets_json: list[dict] | None = None
     headers_json: dict | None = None
     body_json: dict | None = None
     expected_status: int
+    mock_enabled: bool = False
+    mock_config_json: dict | None = None
     submitted_review_at: datetime | None = None
     reviewed_by: int | None = None
     reviewed_at: datetime | None = None
@@ -154,6 +168,10 @@ class APICaseDebugResponse(BaseModel):
     request: dict
     response: dict
     duration_ms: int
+    assertion_passed: bool | None = None
+    assertion_results: list[dict] = Field(default_factory=list)
+    extracted_variables: dict = Field(default_factory=dict)
+    extractor_results: list[dict] = Field(default_factory=list)
 
 
 UI_STEP_ACTIONS = {
@@ -289,6 +307,7 @@ class UICaseCreate(BaseModel):
     expect_text: str = Field(..., min_length=1, max_length=255)
     generation_mode: str = Field(default="manual", pattern="^(manual|ai_skill)$")
     execution_mode: str = Field(default="stable", pattern="^(stable|adaptive|explore|visual)$")
+    engine: str = Field(default="native", pattern="^(native|midscene)$")
     self_heal_enabled: bool = False
     max_agent_steps: int = Field(default=10, ge=1, le=30)
     allowed_origins_json: list[str] | None = None
@@ -326,6 +345,7 @@ class UICaseRead(ORMBaseModel):
     expect_text: str
     generation_mode: str = "manual"
     execution_mode: str = "stable"
+    engine: str = "native"
     self_heal_enabled: bool = False
     max_agent_steps: int = 10
     allowed_origins_json: list[str] | None = None
@@ -820,6 +840,7 @@ class UnifiedCaseRead(BaseModel):
     assertions_json: list[dict] | None = None
     generation_mode: str | None = None
     execution_mode: str | None = None
+    engine: str | None = None
     self_heal_enabled: bool | None = None
     max_agent_steps: int | None = None
     allowed_origins_json: list[str] | None = None
@@ -920,8 +941,10 @@ class CaseImportItem(BaseModel):
     headers_json: dict | None = None
     body_json: dict | None = None
     assertions_json: list[dict] | None = None
+    extractors_json: list[dict] | None = None
     generation_mode: str = Field(default="manual", pattern="^(manual|ai_skill)$")
     execution_mode: str = Field(default="stable", pattern="^(stable|adaptive|explore|visual)$")
+    engine: str = Field(default="native", pattern="^(native|midscene)$")
     self_heal_enabled: bool = False
     max_agent_steps: int = Field(default=10, ge=1, le=30)
     allowed_origins_json: list[str] | None = None
@@ -939,6 +962,30 @@ class CaseImportItem(BaseModel):
 
 class CaseImportPayload(BaseModel):
     items: list[CaseImportItem] = Field(default_factory=list)
+
+
+class ApiSpecImportPayload(BaseModel):
+    project_id: int
+    source_type: str = Field(..., pattern="^(openapi|postman)$")
+    content: str = Field(..., min_length=2)
+    folder_path: str | None = Field(default=None, max_length=255)
+    dry_run: bool = False
+
+
+class ApiSpecImportPreviewItem(BaseModel):
+    name: str
+    method: str
+    path: str
+    folder_path: str | None = None
+
+
+class ApiSpecImportResult(BaseModel):
+    source_type: str
+    detected_count: int = 0
+    created_count: int = 0
+    dry_run: bool = False
+    items: list[ApiSpecImportPreviewItem] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class CaseBatchPlanPayload(BaseModel):
@@ -1211,6 +1258,7 @@ class TestPlanRunRead(ORMBaseModel):
     report_json_path: str | None = None
     report_junit_path: str | None = None
     report_generated_at: datetime | None = None
+    share_token: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -1286,6 +1334,41 @@ class ReportDetail(BaseModel):
     test_runs: list[TestRunRead]
     recent_history: list[ReportHistoryItem] = []
     defects: list["DefectRecordRead"] = []
+
+
+class PublicTestPlanRunRead(BaseModel):
+    id: int
+    status: str
+    summary: str | None = None
+    error_type: str | None = None
+    total_count: int
+    pass_count: int
+    fail_count: int
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_ms: int | None = None
+
+
+class PublicTestRunRead(BaseModel):
+    case_type: str
+    case_name: str
+    status: str
+    summary: str | None = None
+    error_type: str | None = None
+    duration_ms: int | None = None
+
+
+class PublicReportDetail(BaseModel):
+    plan_run: PublicTestPlanRunRead
+    test_runs: list[PublicTestRunRead]
+    recent_history: list[ReportHistoryItem] = []
+
+
+class ReportShareResult(BaseModel):
+    plan_run_id: int
+    share_token: str | None = None
+    share_url: str
+    enabled: bool
 
 
 class DefectRecordCreate(BaseModel):
@@ -1523,6 +1606,7 @@ class RequirementCreate(BaseModel):
     story_points: float | None = None
     folder_path: str | None = Field(default=None, max_length=255)
     tags_json: list | None = None
+    assignees_json: list | None = None
     due_date: datetime | None = None
 
 
@@ -1537,6 +1621,7 @@ class RequirementUpdate(BaseModel):
     story_points: float | None = None
     folder_path: str | None = Field(default=None, max_length=255)
     tags_json: list | None = None
+    assignees_json: list | None = None
     due_date: datetime | None = None
 
 
@@ -1555,6 +1640,7 @@ class RequirementRead(ORMBaseModel):
     story_points: float | None = None
     folder_path: str | None = None
     tags_json: list | None = None
+    assignees_json: list | None = None
     order_index: float | None = None
     due_date: datetime | None = None
     created_by: int | None = None
@@ -1577,6 +1663,7 @@ class TaskCreate(BaseModel):
     iteration_id: int | None = None
     requirement_id: int | None = None
     assignee_id: int | None = None
+    assignees_json: list | None = None
     estimate_hours: float | None = None
     due_date: datetime | None = None
 
@@ -1588,6 +1675,7 @@ class TaskUpdate(BaseModel):
     iteration_id: int | None = None
     requirement_id: int | None = None
     assignee_id: int | None = None
+    assignees_json: list | None = None
     estimate_hours: float | None = None
     spent_hours: float | None = None
     due_date: datetime | None = None
@@ -1603,6 +1691,7 @@ class TaskRead(ORMBaseModel):
     status: str
     priority: str
     assignee_id: int | None = None
+    assignees_json: list | None = None
     reporter_id: int | None = None
     estimate_hours: float | None = None
     spent_hours: float | None = None
@@ -1627,9 +1716,19 @@ class DefectCreate(BaseModel):
     severity: str = Field(default="MAJOR", max_length=20)
     priority: str = Field(default="P2", max_length=10)
     status: str = Field(default="NEW", max_length=20)
+    defect_type: str = Field(default="FUNCTION", max_length=20)
+    reproducibility: str = Field(default="ALWAYS", max_length=20)
+    found_version: str | None = Field(default=None, max_length=80)
+    fixed_version: str | None = Field(default=None, max_length=80)
+    module: str | None = Field(default=None, max_length=120)
+    resolution: str | None = None
     iteration_id: int | None = None
     requirement_id: int | None = None
     assignee_id: int | None = None
+    assignees_json: list | None = None
+    cc_json: list | None = None
+    tags_json: list | None = None
+    due_date: datetime | None = None
 
 
 class DefectUpdate(BaseModel):
@@ -1638,9 +1737,19 @@ class DefectUpdate(BaseModel):
     reproduce_steps: str | None = None
     severity: str | None = Field(default=None, max_length=20)
     priority: str | None = Field(default=None, max_length=10)
+    defect_type: str | None = Field(default=None, max_length=20)
+    reproducibility: str | None = Field(default=None, max_length=20)
+    found_version: str | None = Field(default=None, max_length=80)
+    fixed_version: str | None = Field(default=None, max_length=80)
+    module: str | None = Field(default=None, max_length=120)
+    resolution: str | None = None
     iteration_id: int | None = None
     requirement_id: int | None = None
     assignee_id: int | None = None
+    assignees_json: list | None = None
+    cc_json: list | None = None
+    tags_json: list | None = None
+    due_date: datetime | None = None
 
 
 class DefectRead(ORMBaseModel):
@@ -1654,9 +1763,19 @@ class DefectRead(ORMBaseModel):
     severity: str
     priority: str
     status: str
+    defect_type: str | None = None
+    reproducibility: str | None = None
+    found_version: str | None = None
+    fixed_version: str | None = None
+    module: str | None = None
+    resolution: str | None = None
     assignee_id: int | None = None
+    assignees_json: list | None = None
+    cc_json: list | None = None
+    tags_json: list | None = None
     reporter_id: int | None = None
     order_index: float | None = None
+    due_date: datetime | None = None
     resolved_at: datetime | None = None
     closed_at: datetime | None = None
     created_by: int | None = None

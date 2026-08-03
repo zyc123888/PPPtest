@@ -179,6 +179,7 @@
     <AICaseComposer
       v-model="aiDialogVisible"
       :form="aiForm"
+      @update:form="Object.assign(aiForm, $event)"
       :projects="projects"
       :draft-ready="aiDraftReady"
       :draft="temp"
@@ -246,9 +247,13 @@
               </el-form-item>
               <div class="runtime-config form-grid__wide">
                 <div class="runtime-config__head">
-                  <div><strong>AI 运行策略</strong><span>{{ executionModeDescription(temp.execution_mode) }}</span></div>
-                  <el-tag effect="plain">{{ executionModeText(temp.execution_mode) }}</el-tag>
+                  <div><strong>AI 运行策略</strong><span>{{ engineDescription(temp.engine) }}</span></div>
+                  <el-tag effect="plain" :type="temp.engine === 'midscene' ? 'warning' : 'info'">{{ engineText(temp.engine) }}</el-tag>
                 </div>
+                <el-form-item label="执行引擎">
+                  <el-segmented v-model="temp.engine" :options="engineOptions" block />
+                </el-form-item>
+                <template v-if="temp.engine !== 'midscene'">
                 <el-form-item label="执行模式">
                   <el-segmented v-model="temp.execution_mode" :options="executionModeOptions" block />
                 </el-form-item>
@@ -266,6 +271,12 @@
                 <el-form-item v-if="temp.execution_mode === 'explore'" label="禁止操作">
                   <el-select v-model="temp.prohibited_actions_json" multiple allow-create filterable default-first-option style="width: 100%" placeholder="删除、支付、发布等">
                     <el-option v-for="item in defaultProhibitedActions" :key="item" :label="item" :value="item" />
+                  </el-select>
+                </el-form-item>
+                </template>
+                <el-form-item v-else label="允许域名">
+                  <el-select v-model="temp.allowed_origins_json" multiple allow-create filterable default-first-option style="width: 100%" placeholder="默认仅目标地址和项目地址">
+                    <el-option v-for="item in temp.allowed_origins_json" :key="item" :label="item" :value="item" />
                   </el-select>
                 </el-form-item>
               </div>
@@ -373,7 +384,8 @@
             <el-descriptions-item label="项目">{{ projectMap[currentCase.project_id] || currentCase.project_id }}</el-descriptions-item><el-descriptions-item label="优先级">{{ currentCase.priority }}</el-descriptions-item>
             <el-descriptions-item label="分组">{{ currentCase.folder_path || '-' }}</el-descriptions-item><el-descriptions-item label="评审">{{ reviewText(currentCase.review_status) }}</el-descriptions-item>
             <el-descriptions-item label="生成方式">{{ currentCase.generation_mode === 'ai_skill' ? 'AI Skill' : '手工' }}</el-descriptions-item><el-descriptions-item label="Skill">{{ currentCase.skill_name ? `${currentCase.skill_name} · v${currentCase.skill_version}` : '-' }}</el-descriptions-item>
-            <el-descriptions-item label="执行模式">{{ executionModeText(currentCase.execution_mode) }}</el-descriptions-item><el-descriptions-item label="AI 自愈">{{ currentCase.self_heal_enabled ? '允许一次' : '关闭' }}</el-descriptions-item>
+            <el-descriptions-item label="执行引擎">{{ engineText(currentCase.engine) }}</el-descriptions-item><el-descriptions-item label="执行模式">{{ currentCase.engine === 'midscene' ? '—' : executionModeText(currentCase.execution_mode) }}</el-descriptions-item>
+            <el-descriptions-item label="AI 自愈">{{ currentCase.engine === 'midscene' ? '—' : (currentCase.self_heal_enabled ? '允许一次' : '关闭') }}</el-descriptions-item>
             <el-descriptions-item label="目标地址" :span="2">{{ currentCase.target_url }}</el-descriptions-item><el-descriptions-item label="最终文本" :span="2">{{ currentCase.expect_text }}</el-descriptions-item>
             <el-descriptions-item v-if="currentCase.ai_goal" label="测试目标" :span="2">{{ currentCase.ai_goal }}</el-descriptions-item>
           </el-descriptions>
@@ -394,9 +406,11 @@
                 <pre>{{ selectedRun.stderr_text }}</pre>
               </el-collapse-item>
             </el-collapse>
-            <div v-if="selectedRun.response_payload?.execution_mode" class="runtime-evidence">
-              <span>模式 <strong>{{ executionModeText(selectedRun.response_payload.execution_mode) }}</strong></span>
-              <span>AI 自愈 <strong>{{ selectedRun.response_payload.healing_count || 0 }} 次</strong></span>
+            <div v-if="selectedRun.response_payload?.engine || selectedRun.response_payload?.execution_mode" class="runtime-evidence">
+              <span>引擎 <strong>{{ engineText(selectedRun.response_payload.engine || 'native') }}</strong></span>
+              <span v-if="selectedRun.response_payload.execution_mode">模式 <strong>{{ executionModeText(selectedRun.response_payload.execution_mode) }}</strong></span>
+              <span v-if="selectedRun.response_payload.engine === 'midscene' && selectedRun.response_payload.model">模型 <strong>{{ selectedRun.response_payload.model }}</strong></span>
+              <span v-if="selectedRun.response_payload.healing_count !== undefined">AI 自愈 <strong>{{ selectedRun.response_payload.healing_count || 0 }} 次</strong></span>
               <span v-if="selectedRun.response_payload.visual_reviews?.length">视觉检查 <strong>{{ selectedRun.response_payload.visual_reviews.length }} 项</strong></span>
               <span v-if="selectedRun.response_payload.release_gate_eligible === false">探索结果 <strong>不作为发布门禁</strong></span>
             </div>
@@ -501,7 +515,7 @@ const pageSize = ref(20)
 const temp = reactive({
   project_id: undefined, name: '', folder_path: '', target_url: '', priority: 'P1', status: 'ACTIVE',
   review_status: 'DRAFT', version_no: '1.0.0', review_note: '', expect_text: '', tags_json: [], steps: [], assertions: [],
-  generation_mode: 'manual', execution_mode: 'stable', self_heal_enabled: false, max_agent_steps: 10,
+  generation_mode: 'manual', execution_mode: 'stable', engine: 'native', self_heal_enabled: false, max_agent_steps: 10,
   allowed_origins_json: [], prohibited_actions_json: [], ai_goal: '', skill_name: '', skill_version: '', generation_meta_json: null
 })
 const aiForm = reactive({ project_id: undefined, target_url: '', goal: '', context: '', max_steps: 12, execution_mode: 'adaptive' })
@@ -511,6 +525,10 @@ const executionModeOptions = [
   { label: '适应执行', value: 'adaptive' },
   { label: '自主探索', value: 'explore' },
   { label: '视觉测试', value: 'visual' }
+]
+const engineOptions = [
+  { label: '平台引擎', value: 'native' },
+  { label: 'Midscene AI', value: 'midscene' }
 ]
 const defaultProhibitedActions = ['删除', '支付', '购买', '发布', '发送', '授权']
 const rules = {
@@ -712,7 +730,7 @@ const resetTemp = () => {
     project_id: project?.id, name: '', folder_path: '', target_url: project?.base_url || 'http://frontend:3000',
     priority: 'P1', status: 'ACTIVE', review_status: 'DRAFT', version_no: '1.0.0', review_note: '',
     expect_text: '', tags_json: [], steps: [], assertions: [], generation_mode: 'manual', ai_goal: '',
-    execution_mode: 'stable', self_heal_enabled: false, max_agent_steps: 10, allowed_origins_json: [],
+    execution_mode: 'stable', engine: 'native', self_heal_enabled: false, max_agent_steps: 10, allowed_origins_json: [],
     prohibited_actions_json: [], skill_name: '', skill_version: '', generation_meta_json: null
   })
 }
@@ -757,6 +775,7 @@ const generateAIDraft = async () => {
       assertions: (draft.assertions_json || []).map((assertion) => withKey(normalizeUiAssertion(assertion))),
       generation_mode: draft.generation_mode || 'ai_skill', ai_goal: draft.ai_goal || aiForm.goal.trim(),
       execution_mode: draft.execution_mode || aiForm.execution_mode, self_heal_enabled: Boolean(draft.self_heal_enabled),
+      engine: draft.engine || 'native',
       max_agent_steps: draft.max_agent_steps || aiForm.max_steps, allowed_origins_json: [...(draft.allowed_origins_json || [])],
       prohibited_actions_json: [...(draft.prohibited_actions_json || [])],
       skill_name: draft.skill_name || result.skill_name, skill_version: draft.skill_version || result.skill_version,
@@ -805,6 +824,7 @@ const handleEdit = (row) => {
     assertions: (row.assertions_json || []).map((assertion) => withKey(normalizeUiAssertion(assertion))),
     generation_mode: row.generation_mode || 'manual', ai_goal: row.ai_goal || '', skill_name: row.skill_name || '',
     execution_mode: row.execution_mode || 'stable', self_heal_enabled: Boolean(row.self_heal_enabled),
+    engine: row.engine || 'native',
     max_agent_steps: row.max_agent_steps || 10, allowed_origins_json: [...(row.allowed_origins_json || [])],
     prohibited_actions_json: [...(row.prohibited_actions_json || [])],
     skill_version: row.skill_version || '', generation_meta_json: row.generation_meta_json || null
@@ -847,6 +867,7 @@ const buildTempPayload = () => ({
   generation_mode: temp.generation_mode || 'manual',
   ai_goal: temp.ai_goal.trim() || null,
   execution_mode: temp.execution_mode || 'stable',
+  engine: temp.engine || 'native',
   self_heal_enabled: Boolean(temp.self_heal_enabled),
   max_agent_steps: temp.max_agent_steps || 10,
   allowed_origins_json: temp.allowed_origins_json.length ? temp.allowed_origins_json : null,
@@ -1064,19 +1085,17 @@ const submitImportCases = async () => {
   } catch (error) { ElMessage.error(error.message) }
 }
 
-const priorityTag = (priority) => ({ P0: 'danger', P1: 'warning', P2: '', P3: 'info' }[priority] || 'info')
 const caseStatusText = (status) => ({ ACTIVE: '启用', INACTIVE: '停用' }[status] || status)
 const reviewText = (status) => ({ DRAFT: '草稿', IN_REVIEW: '评审中', APPROVED: '已通过', REJECTED: '已拒绝' }[status] || status)
 const reviewTag = (status) => ({ APPROVED: 'success', IN_REVIEW: 'warning', REJECTED: 'danger', DRAFT: 'info' }[status] || 'info')
 const stepLabel = (action) => UI_STEP_OPTIONS.find((item) => item.value === action)?.label || action
 const assertionLabel = (type) => UI_ASSERTION_OPTIONS.find((item) => item.value === type)?.label || (type === 'text_present' ? '文本可见' : type)
 const executionModeText = (mode) => ({ stable: '稳定回归', adaptive: '适应执行', explore: '自主探索', visual: '视觉测试' }[mode] || '稳定回归')
-const executionModeDescription = (mode) => ({
-  stable: '本地语义定位优先，适合日常回归和发布门禁。',
-  adaptive: '页面变化时允许一次受控 AI 定位恢复，断言仍按保存规则执行。',
-  explore: 'AI 在安全边界内按目标探索并记录发现，不作为发布门禁。',
-  visual: '在确定性步骤之外使用多模态模型检查布局和视觉期望。'
-}[mode] || '')
+const engineText = (engine) => ({ native: '平台引擎', midscene: 'Midscene AI' }[engine] || '平台引擎')
+const engineDescription = (engine) => ({
+  native: '平台内置 Playwright 引擎，支持四种执行模式，适合日常回归与发布门禁。',
+  midscene: 'Midscene AI 引擎（Node + Playwright），将自然语言步骤交由多模态模型自主定位执行，需工作空间已配置模型。'
+}[engine] || '')
 const formatShortTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-'
 const formatDuration = (value) => value === null || value === undefined ? '-' : value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(1)}s`
 const formatStepDetail = (detail) => {

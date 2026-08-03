@@ -36,15 +36,15 @@
       </div>
     </div>
 
-    <el-form v-if="!draftReady" ref="formRef" :model="form" :rules="rules" label-position="top" class="composer-form">
+    <el-form v-if="!draftReady" ref="formRef" :model="localForm" :rules="rules" label-position="top" class="composer-form">
       <div class="composer-form__row">
         <el-form-item label="所属项目" prop="project_id">
-          <el-select v-model="form.project_id" style="width: 100%" @change="emit('project-change', $event)">
+          <el-select v-model="localForm.project_id" style="width: 100%" @change="emit('project-change', $event)">
             <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="目标地址" prop="target_url">
-          <el-input v-model="form.target_url" placeholder="https://example.com" clearable>
+          <el-input v-model="localForm.target_url" placeholder="https://example.com" clearable>
             <template #prefix><el-icon><Link /></el-icon></template>
           </el-input>
         </el-form-item>
@@ -52,7 +52,7 @@
 
       <el-form-item label="测试目标" prop="goal" class="goal-field">
         <el-input
-          v-model="form.goal"
+          v-model="localForm.goal"
           type="textarea"
           :rows="6"
           maxlength="4000"
@@ -70,22 +70,22 @@
 
       <button type="button" class="advanced-trigger" :aria-expanded="advancedVisible" @click="toggleAdvanced">
         <span><el-icon><Setting /></el-icon>高级设置</span>
-        <span>{{ modeText(form.execution_mode) }} · 最多 {{ form.max_steps }} 步 <el-icon><ArrowDown :class="{ 'is-open': advancedVisible }" /></el-icon></span>
+        <span>{{ modeText(localForm.execution_mode) }} · 最多 {{ localForm.max_steps }} 步 <el-icon><ArrowDown :class="{ 'is-open': advancedVisible }" /></el-icon></span>
       </button>
       <el-collapse-transition>
         <div v-show="advancedVisible" ref="advancedPanelRef" class="advanced-panel">
           <el-form-item label="运行模式">
-            <el-radio-group v-model="form.execution_mode" class="mode-selector">
+            <el-radio-group v-model="localForm.execution_mode" class="mode-selector">
               <el-radio-button v-for="item in executionModeOptions" :key="item.value" :value="item.value">{{ item.label }}</el-radio-button>
             </el-radio-group>
-            <div class="field-help">{{ modeDescription(form.execution_mode) }}</div>
+            <div class="field-help">{{ modeDescription(localForm.execution_mode) }}</div>
           </el-form-item>
           <div class="composer-form__row composer-form__row--advanced">
             <el-form-item label="补充上下文">
-              <el-input v-model="form.context" type="textarea" :rows="3" maxlength="8000" resize="none" placeholder="测试数据、登录前置条件或已知约束" />
+              <el-input v-model="localForm.context" type="textarea" :rows="3" maxlength="8000" resize="none" placeholder="测试数据、登录前置条件或已知约束" />
             </el-form-item>
             <el-form-item label="最多步骤">
-              <el-input-number v-model="form.max_steps" :min="1" :max="30" controls-position="right" />
+              <el-input-number v-model="localForm.max_steps" :min="1" :max="30" controls-position="right" />
             </el-form-item>
           </div>
         </div>
@@ -158,7 +158,7 @@
 </template>
 
 <script setup>
-import { nextTick, ref } from 'vue'
+import { nextTick, reactive, ref, watch } from 'vue'
 import {
   ArrowDown, ArrowLeft, CircleCheck, DocumentCopy, EditPen, Link, List, MagicStick,
   Mouse, Position, Promotion, Search, Setting, VideoPlay, WarningFilled
@@ -176,10 +176,29 @@ const props = defineProps({
   running: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['update:modelValue', 'project-change', 'generate', 'reset', 'advanced-edit', 'save', 'save-run'])
+const emit = defineEmits(['update:modelValue', 'update:form', 'project-change', 'generate', 'reset', 'advanced-edit', 'save', 'save-run'])
 const formRef = ref(null)
 const advancedPanelRef = ref(null)
 const advancedVisible = ref(false)
+const localForm = reactive({})
+let syncingFromParent = false
+
+watch(
+  () => props.form,
+  (value) => {
+    syncingFromParent = true
+    Object.assign(localForm, value || {})
+    syncingFromParent = false
+  },
+  { deep: true, immediate: true }
+)
+watch(
+  localForm,
+  (value) => {
+    if (!syncingFromParent) emit('update:form', { ...value })
+  },
+  { deep: true }
+)
 
 const rules = {
   project_id: [{ required: true, message: '请选择项目', trigger: 'change' }],
@@ -225,7 +244,7 @@ const stepDescription = (step) => {
 const assertionText = (assertion) => assertion.value || assertion.expected || assertion.target || assertion.type
 
 const applyExample = () => {
-  props.form.goal = '打开目标地址，在搜索框输入 zyc123，点击查询，验证查询结果包含 zyc123'
+  localForm.goal = '打开目标地址，在搜索框输入 zyc123，点击查询，验证查询结果包含 zyc123'
 }
 const toggleAdvanced = async () => {
   advancedVisible.value = !advancedVisible.value

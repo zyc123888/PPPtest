@@ -1,3 +1,12 @@
+FROM node:22-bookworm-slim AS midscene-runtime
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+WORKDIR /app/midscene
+COPY midscene/package*.json ./
+RUN npm ci --omit=dev \
+    && npx playwright install --only-shell chromium
+COPY midscene/midscene_runner.js ./midscene_runner.js
+
 FROM python:3.11-slim-bookworm AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -44,8 +53,10 @@ CMD ["sh", "-c", "umask 0002 && exec uvicorn app.main:app --host 0.0.0.0 --port 
 FROM base AS execution
 
 USER root
-RUN python -m playwright install --with-deps chromium \
-    && chown -R app:app /ms-playwright \
+COPY --from=midscene-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --chown=app:app --from=midscene-runtime /app/midscene /app/midscene
+COPY --chown=app:app --from=midscene-runtime /ms-playwright /ms-playwright
+RUN python -m playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 USER app
 
