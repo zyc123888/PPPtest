@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test')
+const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || ''
 
 test('生产级完整流程可运行', async ({ page }) => {
   const now = Date.now()
@@ -8,7 +9,7 @@ test('生产级完整流程可运行', async ({ page }) => {
   const planName = `ProdPlan_${now}`
 
   await page.goto('/login')
-  await page.getByPlaceholder('请输入密码').fill('admin123')
+  await page.getByPlaceholder('请输入密码').fill(ADMIN_PASSWORD)
   await page.getByRole('button', { name: '登录' }).click()
   await expect(page).toHaveURL(/\/dashboard/)
 

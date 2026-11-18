@@ -2,12 +2,13 @@
 // 运行前：在 e2e/.env 里填好模型配置（见 .env.example），并确保前端已在 E2E_BASE_URL 运行。
 // 运行：npm run test:ai
 const { test, expect } = require('../fixture')
+const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || ''
 
 // 登录用确定性选择器（已知可用、不消耗大模型 token）
 async function login(page) {
   await page.goto('/login')
   await page.getByPlaceholder('请输入用户名').fill('admin')
-  await page.getByPlaceholder('请输入密码').fill('admin123')
+  await page.getByPlaceholder('请输入密码').fill(ADMIN_PASSWORD)
   await page.getByRole('button', { name: '登录' }).click()
   await page.waitForURL(/\/dashboard/, { timeout: 10000 })
 }

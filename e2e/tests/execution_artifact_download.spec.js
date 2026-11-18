@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test')
 
 const ADMIN_USER = process.env.E2E_ADMIN_USER || 'admin'
-const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || 'admin123'
+const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || ''
 
 async function login(page) {
   await page.goto('/login')

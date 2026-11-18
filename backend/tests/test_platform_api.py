@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
@@ -17,6 +18,70 @@ def test_system_health(client) -> None:
     assert payload["app_status"] in {"healthy", "degraded"}
     assert payload["database"] == "healthy"
     assert payload["redis"] in {"healthy", "unhealthy"}
+
+
+def test_trace_coverage_requires_every_linked_case_to_finish_successfully() -> None:
+    from app.project_workspace_api import _summarize_trace_runs
+
+    partial = _summarize_trace_runs(["SUCCESS", None])
+    assert partial == {
+        "linked_case_count": 2,
+        "executed_case_count": 1,
+        "passed_case_count": 1,
+        "last_run_status": "SUCCESS",
+        "coverage": "PARTIAL",
+    }
+    assert _summarize_trace_runs(["SUCCESS", "RUNNING"])["coverage"] == "PARTIAL"
+    assert _summarize_trace_runs(["SUCCESS", "FAILED"])["coverage"] == "AT_RISK"
+    assert _summarize_trace_runs(["SUCCESS", "SUCCESS"])["coverage"] == "COVERED"
+    assert _summarize_trace_runs(["SUCCESS"], open_defect_count=1)["coverage"] == "AT_RISK"
+
+
+def test_v2_job_snapshots_selected_model_per_attempt(client, monkeypatch) -> None:
+    from app import api
+    from app.core.database import SessionLocal
+    from app.models import AIModelConfig, CaseGenerationV2Attempt, CaseGenerationV2Job
+
+    project = client.get("/projects").json()[0]
+    with SessionLocal() as db:
+        db.query(CaseGenerationV2Job).filter(
+            CaseGenerationV2Job.status.in_(["PENDING", "RUNNING"])
+        ).update({"status": "CANCELLED"}, synchronize_session=False)
+        config = AIModelConfig(
+            workspace_id=project["workspace_id"], provider="OPENAI", name="snapshot-test",
+            base_url="https://initial.example/v1", model="model-a", api_key="sk-test-key",
+            is_active=1,
+        )
+        db.add(config)
+        db.commit()
+        config_id = config.id
+
+    monkeypatch.setattr(api, "_dispatch_task_or_run_inline", lambda *args, **kwargs: ("queued-task", False))
+    created = client.post("/case-generation-v2/jobs", json={
+        "project_id": project["id"], "name": f"模型快照_{time.time_ns()}",
+        "markdown_text": "# 登录\n需要覆盖登录页面和错误提示行为。",
+        "openai_model": "model-b", "openai_base_url": "https://selected.example/v1",
+        "model_provider": "OPENAI",
+    })
+    assert created.status_code == 201, created.text
+    job_id = created.json()["id"]
+    with SessionLocal() as db:
+        job = db.get(CaseGenerationV2Job, job_id)
+        attempt = db.query(CaseGenerationV2Attempt).filter_by(job_id=job_id).one()
+        assert job.input_payload_json["model_config_id"] == config_id
+        assert job.input_payload_json["openai_model"] == "model-b"
+        assert job.input_payload_json["openai_base_url"] == "https://selected.example/v1"
+        assert attempt.input_payload_json["openai_model"] == "model-b"
+        assert "sk-test-key" not in json.dumps(attempt.input_payload_json)
+        config = db.get(AIModelConfig, config_id)
+        config.model = "model-c"
+        config.base_url = "https://changed.example/v1"
+        db.commit()
+        db.refresh(attempt)
+        assert attempt.input_payload_json["openai_model"] == "model-b"
+        assert attempt.input_payload_json["openai_base_url"] == "https://selected.example/v1"
+        job.status = "CANCELLED"
+        db.commit()
 
 
 def test_system_info_and_bootstrap(client) -> None:
@@ -40,6 +105,107 @@ def test_protected_system_endpoints_require_login(client) -> None:
     with TestClient(client.app, base_url="http://testserver/api/v1") as anonymous_client:
         assert anonymous_client.get("/system/info").status_code == 401
         assert anonymous_client.post("/system/bootstrap", json={"seed_demo_data": False}).status_code == 401
+
+
+def test_uploaded_image_requires_authentication(client) -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    image_bytes = BytesIO()
+    Image.new("RGB", (2, 2), color="white").save(image_bytes, format="PNG")
+    upload = client.post(
+        "/uploads/image",
+        files={"file": ("evidence.png", image_bytes.getvalue(), "image/png")},
+    )
+    assert upload.status_code == 200
+    image_url = upload.json()["url"].removeprefix("/api/v1")
+
+    with TestClient(client.app, base_url="http://testserver/api/v1") as anonymous_client:
+        assert anonymous_client.get(image_url).status_code == 401
+
+    image = client.get(image_url)
+    assert image.status_code == 200
+    assert image.content == image_bytes.getvalue()
+
+    browser_session = client.cookies.get("tp_browser_session")
+    assert browser_session
+    with TestClient(client.app, base_url="http://testserver/api/v1") as cookie_client:
+        cookie_client.cookies.set("tp_browser_session", browser_session, path="/api/v1")
+        assert cookie_client.get(image_url).status_code == 200
+        assert cookie_client.post(
+            "/uploads/image",
+            files={"file": ("evidence.png", image_bytes.getvalue(), "image/png")},
+        ).status_code == 401
+
+
+def test_uploaded_image_rejects_spoofed_content(client) -> None:
+    response = client.post(
+        "/uploads/image",
+        files={"file": ("fake.png", b"not-an-image", "image/png")},
+    )
+    assert response.status_code == 422
+    assert "有效图片" in response.json()["detail"]
+
+
+def test_rich_text_sanitizer_removes_executable_markup() -> None:
+    from app.rich_text_security import sanitize_rich_text
+    from app.schemas import DefectRead
+
+    cleaned = sanitize_rich_text(
+        '<p onclick="alert(1)">说明<script>alert(2)</script>'
+        '<img src="/api/v1/uploads/example.png" onerror="alert(3)">'
+        '<a href="javascript:alert(4)">链接</a></p>'
+    )
+
+    assert cleaned is not None
+    assert "说明" in cleaned
+    assert '/api/v1/uploads/example.png' in cleaned
+    assert "<script" not in cleaned
+    assert "onclick" not in cleaned
+    assert "onerror" not in cleaned
+    assert "javascript:" not in cleaned
+
+    historical = DefectRead.model_validate(
+        {
+            "id": 1,
+            "project_id": 1,
+            "title": "历史缺陷",
+            "description": '<p>旧数据<script>alert(1)</script></p>',
+            "severity": "MAJOR",
+            "priority": "P2",
+            "status": "OPEN",
+        }
+    )
+    assert historical.description == "<p>旧数据</p>"
+
+
+def test_defect_api_sanitizes_rich_text_fields(client) -> None:
+    projects = client.get("/projects")
+    assert projects.status_code == 200
+    project_id = projects.json()[0]["id"]
+    response = client.post(
+        f"/projects/{project_id}/defects",
+        json={
+            "title": "富文本安全回归",
+            "description": '<p onclick="alert(1)">现象<script>alert(2)</script></p>',
+            "reproduce_steps": '<img src="/api/v1/uploads/evidence.png" onerror="alert(3)">',
+            "resolution": '<a href="javascript:alert(4)">处理</a>',
+        },
+    )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    rendered = "".join(
+        str(payload.get(field) or "")
+        for field in ("description", "reproduce_steps", "resolution")
+    )
+    assert "现象" in rendered
+    assert "/api/v1/uploads/evidence.png" in rendered
+    assert "<script" not in rendered
+    assert "onclick" not in rendered
+    assert "onerror" not in rendered
+    assert "javascript:" not in rendered
+    assert client.delete(f"/project-defects/{payload['id']}").status_code == 204
 
 
 def test_api_case_body_modes_build_request_kwargs() -> None:
@@ -167,7 +333,7 @@ def test_case_generation_v2_pipeline_mode_normalization_and_dispatch(monkeypatch
 
     attempt = SimpleNamespace(id=91, run_id="run-test", task_id=None)
 
-    monkeypatch.setattr(v2, "_run_clone_pipeline", lambda job_id: calls.append(f"lite:{job_id}"))
+    monkeypatch.setattr(v2, "_run_lite_pipeline", lambda job_id: calls.append(f"lite:{job_id}"))
     monkeypatch.setattr(v2, "_run_trusted_v2_pipeline", lambda job_id: calls.append(f"trusted:{job_id}"))
     monkeypatch.setattr(v2, "_resume_trusted_v2_from_testcase_gate", lambda job_id: calls.append(f"resume:{job_id}"))
     monkeypatch.setattr(v2, "ensure_attempt", lambda *args, **kwargs: attempt)
@@ -4961,6 +5127,38 @@ def test_ui_case_ai_gate_fills_missing_text_values_from_expect_text() -> None:
     schemas.UICaseCreate(**gated)
 
 
+def test_ui_case_ai_gate_normalizes_navigation_wait_strategy() -> None:
+    from app import schemas
+    from app.ui_case_ai import _gate_generated_payload
+
+    request = schemas.UICaseAIGenerateRequest(
+        project_id=1,
+        target_url="https://example.com",
+        goal="打开页面并验证欢迎文案",
+    )
+    payload = {
+        "name": "导航等待策略",
+        "folder_path": "AI生成",
+        "target_url": "https://example.com",
+        "priority": "P2",
+        "expect_text": "欢迎",
+        "tags_json": [],
+        "steps_json": [{"action": "goto", "value": "https://example.com", "wait_until": "load"}],
+        "assertions_json": [{"type": "text_visible", "value": "欢迎"}],
+        "design_notes": [],
+        "warnings": [],
+    }
+
+    gated, warnings, _ = _gate_generated_payload(
+        payload,
+        request,
+        project_base_url="https://example.com",
+    )
+
+    assert gated["steps_json"][0]["wait_until"] == "domcontentloaded"
+    assert any("DOM 就绪" in item for item in warnings)
+
+
 def test_ui_case_ai_skill_cannot_bypass_supported_action_schema(monkeypatch) -> None:
     from app import schemas
     import app.ui_case_ai as ui_case_ai
@@ -5844,13 +6042,14 @@ def test_case_duplicate_detection_groups_matching_entries(client) -> None:
     assert {item["case_type"] for item in group["items"]} == {"API"}
 
 
-def test_case_center_batch_update_and_add_to_plan(client) -> None:
+def test_case_center_batch_update_and_add_to_plan(client, reviewer_client) -> None:
     project_id = client.get("/projects").json()[0]["id"]
     create_response = client.post(
         "/api-cases",
         json={
             "project_id": project_id,
             "name": f"批量用例_{time.time_ns()}",
+            "folder_path": "待清空目录",
             "method": "GET",
             "path": "/api/v1/system/health",
             "priority": "P2",
@@ -5861,6 +6060,12 @@ def test_case_center_batch_update_and_add_to_plan(client) -> None:
     )
     assert create_response.status_code == 201
     api_case_id = create_response.json()["id"]
+    assert client.post(f"/api-cases/{api_case_id}/review/submit").status_code == 200
+    approved = reviewer_client.post(
+        "/cases/batch-review",
+        json={"items": [{"case_type": "API", "case_id": api_case_id}], "review_status": "APPROVED"},
+    )
+    assert approved.status_code == 200
 
     batch_update = client.post(
         "/cases/batch-update",
@@ -5877,6 +6082,17 @@ def test_case_center_batch_update_and_add_to_plan(client) -> None:
     assert updated_case["status"] == "DISABLED"
     assert "batch" in (updated_case["tags_json"] or [])
 
+    clear_folder = client.put(
+        "/api-cases/batch",
+        json={
+            "case_ids": [api_case_id],
+            "patch": {"folder_path": None},
+        },
+    )
+    assert clear_folder.status_code == 200
+    cleared_case = client.get(f"/api-cases/{api_case_id}").json()
+    assert cleared_case["folder_path"] is None
+
     plan_id = next(plan["id"] for plan in client.get("/test-plans").json() if plan["project_id"] == project_id)
     batch_add = client.post(
         f"/test-plans/{plan_id}/cases/batch",
@@ -5892,7 +6108,7 @@ def test_case_center_batch_update_and_add_to_plan(client) -> None:
     assert plan_cases.status_code == 200
     assert any(item["case_id"] == api_case_id and item["case_type"] == "API" for item in plan_cases.json())
 
-    batch_review = client.post(
+    batch_review = reviewer_client.post(
         "/cases/batch-review",
         json={
             "items": [{"case_type": "API", "case_id": api_case_id}],
@@ -5900,15 +6116,13 @@ def test_case_center_batch_update_and_add_to_plan(client) -> None:
             "review_note": "批量评审通过",
         },
     )
-    assert batch_review.status_code == 200
-    assert batch_review.json()["affected_count"] == 1
+    assert batch_review.status_code == 400
 
     reviewed_cases = client.get("/cases?review_status=APPROVED")
     assert reviewed_cases.status_code == 200
     assert any(
         item["case_id"] == api_case_id
         and item["review_status"] == "APPROVED"
-        and item["review_note"] == "批量评审通过"
         for item in reviewed_cases.json()
     )
 
@@ -5932,6 +6146,8 @@ def test_plan_case_review_gate_requires_override_and_records_creator(client) -> 
     )
     assert create_response.status_code == 201
     api_case_id = create_response.json()["id"]
+    submitted = client.post(f"/api-cases/{api_case_id}/review/submit")
+    assert submitted.status_code == 200
 
     plan_id = next(plan["id"] for plan in client.get("/test-plans").json() if plan["project_id"] == project_id)
 
@@ -5964,10 +6180,10 @@ def test_plan_case_review_gate_requires_override_and_records_creator(client) -> 
     created = next(item for item in plan_cases.json() if item["case_id"] == api_case_id and item["case_type"] == "API")
     assert created["created_by"] == payload["created_by"]
     assert created["case_snapshot_json"]["review_status"] == "IN_REVIEW"
-    assert created["case_snapshot_json"]["review_note"] == "等待计划准入评审"
+    assert created["case_snapshot_json"]["review_note"] is None
 
 
-def test_plan_cases_reorder_updates_order_index(client) -> None:
+def test_plan_cases_reorder_updates_order_index(client, reviewer_client) -> None:
     project_id = client.get("/projects").json()[0]["id"]
     plan_id = next(plan["id"] for plan in client.get("/test-plans").json() if plan["project_id"] == project_id)
 
@@ -6001,6 +6217,19 @@ def test_plan_cases_reorder_updates_order_index(client) -> None:
     assert second.status_code == 201
     first_case_id = first.json()["id"]
     second_case_id = second.json()["id"]
+    assert client.post(f"/api-cases/{first_case_id}/review/submit").status_code == 200
+    assert client.post(f"/api-cases/{second_case_id}/review/submit").status_code == 200
+    approved = reviewer_client.post(
+        "/cases/batch-review",
+        json={
+            "items": [
+                {"case_type": "API", "case_id": first_case_id},
+                {"case_type": "API", "case_id": second_case_id},
+            ],
+            "review_status": "APPROVED",
+        },
+    )
+    assert approved.status_code == 200
 
     add_first = client.post(
         f"/test-plans/{plan_id}/cases",
@@ -6033,7 +6262,7 @@ def test_plan_cases_reorder_updates_order_index(client) -> None:
     assert [item["id"] for item in latest] == [add_second.json()["id"], add_first.json()["id"]]
 
 
-def test_case_history_tracks_create_update_and_review(client) -> None:
+def test_case_history_tracks_create_update_and_review(client, reviewer_client) -> None:
     project_id = client.get("/projects").json()[0]["id"]
     create_response = client.post(
         "/api-cases",
@@ -6074,7 +6303,8 @@ def test_case_history_tracks_create_update_and_review(client) -> None:
     )
     assert update_response.status_code == 200
 
-    batch_review = client.post(
+    assert client.post(f"/api-cases/{case_id}/review/submit").status_code == 200
+    batch_review = reviewer_client.post(
         "/cases/batch-review",
         json={
             "items": [{"case_type": "API", "case_id": case_id}],
@@ -6087,10 +6317,10 @@ def test_case_history_tracks_create_update_and_review(client) -> None:
     history_response = client.get(f"/cases/API/{case_id}/history")
     assert history_response.status_code == 200
     history = history_response.json()
-    assert [item["action"] for item in history[:3]] == ["BATCH_REVIEW", "UPDATE", "CREATE"]
+    assert [item["action"] for item in history[:4]] == ["BATCH_REVIEW", "REVIEW", "UPDATE", "CREATE"]
     assert history[0]["review_status"] == "APPROVED"
     assert history[0]["review_note"] == "评审通过"
-    assert history[1]["version_no"] == "1.0.1"
+    assert history[2]["version_no"] == "1.0.1"
 
 
 def test_api_case_update_bumps_version_and_review_status(client) -> None:
@@ -6138,6 +6368,87 @@ def test_api_case_update_bumps_version_and_review_status(client) -> None:
     assert payload["review_status"] == "DRAFT"
     assert payload["version_no"] == "1.0.1"
     assert payload["path"] == "/api/v1/system/info"
+
+
+def test_api_case_update_cannot_change_project(client) -> None:
+    projects = client.get("/projects").json()
+    if len(projects) < 2:
+        response = client.post(
+            "/projects",
+            json={"name": f"目标项目_{time.time_ns()}", "base_url": "http://target.test"},
+        )
+        assert response.status_code == 201
+        projects.append(response.json())
+    source_project_id = projects[0]["id"]
+    target_project_id = projects[1]["id"]
+    created = client.post(
+        "/api-cases",
+        json={
+            "project_id": source_project_id,
+            "name": f"禁止跨项目更新_{time.time_ns()}",
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "expected_status": 200,
+        },
+    )
+    assert created.status_code == 201
+    payload = created.json()
+    response = client.put(
+        f"/api-cases/{payload['id']}",
+        json={
+            **payload,
+            "project_id": target_project_id,
+            "headers_json": None,
+            "body_json": None,
+        },
+    )
+    assert response.status_code == 400
+    assert "不允许变更" in response.json()["detail"]
+    assert client.get(f"/api-cases/{payload['id']}").json()["project_id"] == source_project_id
+
+
+def test_case_create_and_import_cannot_preapprove(client) -> None:
+    project_id = client.get("/projects").json()[0]["id"]
+    created_name = f"创建不可预批准_{time.time_ns()}"
+    created = client.post(
+        "/api-cases",
+        json={
+            "project_id": project_id,
+            "name": created_name,
+            "method": "GET",
+            "path": "/api/v1/system/health",
+            "review_status": "APPROVED",
+            "review_note": "绕过评审",
+            "expected_status": 200,
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["review_status"] == "DRAFT"
+    assert created.json()["review_note"] is None
+
+    imported_name = f"导入不可预批准_{time.time_ns()}"
+    imported = client.post(
+        "/cases/import",
+        json={
+            "items": [{
+                "case_type": "API",
+                "project_id": project_id,
+                "name": imported_name,
+                "method": "GET",
+                "path": "/api/v1/system/health",
+                "review_status": "APPROVED",
+                "review_note": "绕过评审",
+                "expected_status": 200,
+            }]
+        },
+    )
+    assert imported.status_code == 200
+    imported_case = next(
+        item for item in client.get("/api-cases", params={"project_id": project_id}).json()
+        if item["name"] == imported_name
+    )
+    assert imported_case["review_status"] == "DRAFT"
+    assert imported_case["review_note"] is None
 
 
 def test_ui_case_update_bumps_version_and_review_status(client) -> None:
@@ -6319,6 +6630,57 @@ def test_case_generation_new_attempt_supersedes_old_and_prevents_late_write() ->
         assert persisted_first.error_message is None
 
 
+def test_case_generation_cancelled_job_cannot_be_overwritten_by_stale_session() -> None:
+    from app.core.database import SessionLocal
+    from app.models import CaseGenerationAttempt, CaseGenerationJob, Project
+    from app.tasks.case_generation_runtime import (
+        bind_attempt,
+        create_attempt,
+        finish_attempt,
+        mark_attempt_running,
+        raise_if_job_cancelled,
+    )
+
+    worker_db = SessionLocal()
+    try:
+        project = worker_db.query(Project).first()
+        job = CaseGenerationJob(
+            workspace_id=project.workspace_id,
+            project_id=project.id,
+            name=f"cancel并发保护_{time.time_ns()}",
+            mode="MARKDOWN",
+            status="PENDING",
+            progress_json={"stages": []},
+            input_payload_json={"markdown_text": "# 登录\n支持登录"},
+            summary="初始任务",
+            created_by=1,
+        )
+        worker_db.add(job)
+        worker_db.commit()
+        worker_db.refresh(job)
+        attempt = create_attempt(worker_db, job, pipeline_version="v1")
+        mark_attempt_running(worker_db, job, attempt)
+        job_id, attempt_id = job.id, attempt.id
+
+        with SessionLocal() as api_db:
+            persisted_job = api_db.get(CaseGenerationJob, job_id)
+            persisted_attempt = api_db.get(CaseGenerationAttempt, attempt_id)
+            persisted_job.status = "CANCELLED"
+            persisted_attempt.status = "CANCELLED"
+            api_db.commit()
+
+        with bind_attempt(attempt_id, "v1", "cancelled-run"):
+            with pytest.raises(RuntimeError, match="任务已取消"):
+                raise_if_job_cancelled(worker_db, CaseGenerationJob, job_id)
+            assert finish_attempt(worker_db, job, status="SUCCESS", summary="不应覆盖取消") is False
+    finally:
+        worker_db.close()
+
+    with SessionLocal() as db:
+        assert db.get(CaseGenerationJob, job_id).status == "CANCELLED"
+        assert db.get(CaseGenerationAttempt, attempt_id).status == "CANCELLED"
+
+
 def test_case_generation_watchdog_respects_heartbeat_and_celery_activity(monkeypatch) -> None:
     from datetime import timedelta
 
@@ -6449,7 +6811,7 @@ def test_ai_model_config_encrypts_key_at_rest() -> None:
         assert persisted.api_key == secret
 
 
-def test_case_generation_v2_local_rerun_copies_inherited_artifacts(tmp_path, monkeypatch) -> None:
+def test_case_generation_v2_local_rerun_copies_inherited_artifacts(client, tmp_path, monkeypatch) -> None:
     import app.tasks.case_generation_runtime as runtime
     from app.api import _inherit_case_generation_v2_artifacts
     from app.core.database import SessionLocal
@@ -6477,7 +6839,7 @@ def test_case_generation_v2_local_rerun_copies_inherited_artifacts(tmp_path, mon
         first_dir.mkdir(parents=True)
         source_file = first_dir / "scope_index.json"
         source_file.write_text('{"source":"old"}', encoding="utf-8")
-        db.add(
+        first_artifacts = [
             CaseGenerationV2Artifact(
                 job_id=job.id,
                 attempt_id=first_attempt.id,
@@ -6485,8 +6847,28 @@ def test_case_generation_v2_local_rerun_copies_inherited_artifacts(tmp_path, mon
                 file_name="scope_index.json",
                 file_path=str(source_file),
                 content_json={"source": "old"},
-            )
-        )
+            ),
+            *[
+                CaseGenerationV2Artifact(
+                    job_id=job.id,
+                    attempt_id=first_attempt.id,
+                    artifact_type=artifact_type,
+                    content_json={"source": "attempt-a", "artifact_type": artifact_type},
+                )
+                for artifact_type in (
+                    "source_manifest",
+                    "evidence_trace",
+                    "function_points",
+                    "requirement_handoff",
+                    "testcase_base_package",
+                    "testcase_package",
+                    "scope_index_gate",
+                    "trusted_review_report",
+                    "xmind",
+                )
+            ],
+        ]
+        db.add_all(first_artifacts)
         db.commit()
 
         second_attempt = runtime.create_attempt(
@@ -6496,21 +6878,157 @@ def test_case_generation_v2_local_rerun_copies_inherited_artifacts(tmp_path, mon
             kind="source_shard",
             source_id="SRC-001",
         )
-        _inherit_case_generation_v2_artifacts(db, job_id=job.id, attempt_id=second_attempt.id)
-        inherited = db.scalar(
-            select(CaseGenerationV2Artifact).where(
-                CaseGenerationV2Artifact.attempt_id == second_attempt.id,
-                CaseGenerationV2Artifact.artifact_type == "scope_index",
-            )
+        _inherit_case_generation_v2_artifacts(
+            db,
+            job_id=job.id,
+            attempt_id=second_attempt.id,
+            parent_attempt_id=first_attempt.id,
         )
+        inherited_by_type = {
+            artifact.artifact_type: artifact
+            for artifact in db.scalars(
+                select(CaseGenerationV2Artifact).where(CaseGenerationV2Artifact.attempt_id == second_attempt.id)
+            ).all()
+        }
+        assert set(inherited_by_type) == {
+            "source_manifest",
+            "evidence_trace",
+            "scope_index",
+            "function_points",
+            "requirement_handoff",
+            "testcase_base_package",
+            "testcase_package",
+        }
+        inherited = inherited_by_type["scope_index"]
 
         assert inherited is not None
+        assert inherited.parent_attempt_id == first_attempt.id
         assert inherited.file_path != str(source_file)
         expected_dir = tmp_path / "case_generation_v2" / f"job_{job.id}" / f"attempt_{second_attempt.id}" / "inherited"
         assert Path(inherited.file_path).parent == expected_dir
         assert "legacy" not in Path(inherited.file_path).parts
         assert Path(inherited.file_path).read_text(encoding="utf-8") == '{"source":"old"}'
         assert source_file.exists()
+
+        second_attempt.status = "FAILED"
+        second_file = first_dir / "scope_index-second.json"
+        second_file.write_text('{"source":"attempt-b"}', encoding="utf-8")
+        inherited.file_path = str(second_file)
+        inherited.content_json = {"source": "attempt-b"}
+        inherited_by_type["testcase_package"].content_json = {"source": "attempt-b"}
+        db.add_all(
+            [
+                CaseGenerationV2Artifact(
+                    job_id=job.id,
+                    attempt_id=second_attempt.id,
+                    artifact_type=artifact_type,
+                    content_json={"source": "attempt-b"},
+                )
+                for artifact_type in ("testcase_handoff", "trusted_review_report", "xmind")
+            ]
+        )
+        db.commit()
+
+        third_attempt = runtime.create_attempt(db, job, pipeline_version="v2", kind="full")
+        _inherit_case_generation_v2_artifacts(
+            db,
+            job_id=job.id,
+            attempt_id=third_attempt.id,
+            parent_attempt_id=second_attempt.id,
+        )
+        third_artifacts = list(
+            db.scalars(
+                select(CaseGenerationV2Artifact).where(CaseGenerationV2Artifact.attempt_id == third_attempt.id)
+            ).all()
+        )
+        assert {artifact.artifact_type for artifact in third_artifacts} == {
+            "source_manifest",
+            "evidence_trace",
+            "scope_index",
+            "function_points",
+            "requirement_handoff",
+            "testcase_base_package",
+            "testcase_package",
+        }
+        assert all(artifact.parent_attempt_id == second_attempt.id for artifact in third_artifacts)
+        assert next(item for item in third_artifacts if item.artifact_type == "scope_index").content_json == {
+            "source": "attempt-b"
+        }
+        assert Path(next(item for item in third_artifacts if item.artifact_type == "scope_index").file_path).read_text(
+            encoding="utf-8"
+        ) == '{"source":"attempt-b"}'
+
+
+def test_case_generation_v2_detail_hides_source_rerun_without_testcase_package(client) -> None:
+    import app.tasks.case_generation_runtime as runtime
+    from app.core.database import SessionLocal
+    from app.models import CaseGenerationV2Artifact, CaseGenerationV2Job, Project
+
+    project = client.get("/projects").json()[0]
+    with SessionLocal() as db:
+        job = CaseGenerationV2Job(
+            workspace_id=project["workspace_id"],
+            project_id=project["id"],
+            name=f"recovery_actions_{time.time_ns()}",
+            mode="MARKDOWN",
+            status="FAILED",
+            progress_json={"stages": [{"key": "requirement_gate", "status": "failed"}]},
+            input_payload_json={"pipeline_mode": "trusted"},
+            summary="需求门禁失败",
+            created_by=1,
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        attempt = runtime.create_attempt(db, job, pipeline_version="v2")
+        attempt.status = "FAILED"
+        db.add(
+            CaseGenerationV2Artifact(
+                job_id=job.id,
+                attempt_id=attempt.id,
+                artifact_type="requirement_handoff",
+                content_json={
+                    "requirement_gate": {
+                        "issues": [{"severity": "blocker", "message": "SRC-007 功能点未覆盖"}],
+                        "recovery_plan": {
+                            "strategy": "local_rerun",
+                            "rerun_scope": {"source_ids": ["SRC-007"]},
+                            "preserve_artifacts": ["scope_index"],
+                            "regenerate_artifacts": ["requirement_handoff", "testcase_package"],
+                        },
+                    }
+                },
+            )
+        )
+        db.commit()
+        job_id = job.id
+
+    response = client.get(f"/case-generation-v2/jobs/{job_id}")
+    assert response.status_code == 200, response.text
+    detail = response.json()
+    assert "recovery_actions" in detail
+    actions = detail["recovery_actions"]
+    assert not any(item.get("action") == "rerun_source" for item in actions)
+
+    with SessionLocal() as db:
+        db.add(
+            CaseGenerationV2Artifact(
+                job_id=job_id,
+                attempt_id=attempt.id,
+                artifact_type="testcase_package",
+                content_json={"testcase_shards": [{"source_id": "SRC-007", "status": "failed", "testcases": []}]},
+            )
+        )
+        db.commit()
+
+    response = client.get(f"/case-generation-v2/jobs/{job_id}")
+    assert response.status_code == 200, response.text
+    source_action = next(
+        item for item in response.json()["recovery_actions"]
+        if item.get("action") == "rerun_source" and item.get("source_id") == "SRC-007"
+    )
+    assert source_action["gate_artifact_type"] == "requirement_handoff"
+    assert source_action["calls_model"] is True
 
 
 def test_case_generation_retention_expires_content_and_removes_orphans(tmp_path, monkeypatch) -> None:
@@ -6881,9 +7399,14 @@ def test_ui_cases_pagination_and_filters(client) -> None:
     payload = paged.json()
     assert payload["total"] == 3
     assert len(payload["items"]) == 2
+    assert [item["name"] for item in payload["items"]] == [
+        f"{marker}_用例2",
+        f"{marker}_用例1",
+    ]
 
     page2 = client.get(f"/ui-cases?project_id={project_id}&page=2&page_size=2").json()
     assert len(page2["items"]) == 1
+    assert page2["items"][0]["name"] == f"{marker}_用例0"
 
     folder_filtered = client.get(f"/ui-cases?project_id={project_id}&page=1&page_size=10&folder=分页/组一").json()
     assert folder_filtered["total"] == 2
@@ -7373,7 +7896,7 @@ def test_api_batch_run_and_rerun_failed(client, monkeypatch) -> None:
     assert stats_payload["recent_success_rate"] is not None
 
 
-def test_project_workspace_full_flow(client) -> None:
+def test_project_workspace_full_flow(client, reviewer_client) -> None:
     project_id = client.get("/projects").json()[0]["id"]
 
     # --- iteration ---
@@ -7429,6 +7952,12 @@ def test_project_workspace_full_flow(client) -> None:
     )
     assert case_resp.status_code == 201
     case_id = case_resp.json()["id"]
+    assert client.post(f"/api-cases/{case_id}/review/submit").status_code == 200
+    approved = reviewer_client.post(
+        "/cases/batch-review",
+        json={"items": [{"case_type": "API", "case_id": case_id}], "review_status": "APPROVED"},
+    )
+    assert approved.status_code == 200
 
     link_resp = client.post(
         f"/requirements/{requirement_id}/cases",
@@ -7459,6 +7988,18 @@ def test_project_workspace_full_flow(client) -> None:
     assert task_bad.status_code == 422
     task_ok = client.put(f"/tasks/{task_id}/status", json={"status": "DOING"})
     assert task_ok.status_code == 200
+    task_planning = client.put(
+        f"/tasks/{task_id}",
+        json={"iteration_id": iteration_id, "estimate_hours": 3.5, "spent_hours": 1.5},
+    )
+    assert task_planning.status_code == 200, task_planning.text
+    assert task_planning.json()["iteration_id"] == iteration_id
+    assert task_planning.json()["estimate_hours"] == 3.5
+    assert task_planning.json()["spent_hours"] == 1.5
+
+    requirement_planning = client.put(f"/requirements/{requirement_id}", json={"iteration_id": None})
+    assert requirement_planning.status_code == 200, requirement_planning.text
+    assert requirement_planning.json()["iteration_id"] is None
 
     # --- defect ---
     defect_resp = client.post(
@@ -7559,7 +8100,7 @@ def test_plan_schedule_config_and_validation(client) -> None:
     assert client.delete(f"/test-plans/{plan_id}").status_code == 204
 
 
-def test_scan_scheduled_plans_triggers_and_defers(client, monkeypatch) -> None:
+def test_scan_scheduled_plans_triggers_and_defers(client, monkeypatch, reviewer_client) -> None:
     from datetime import timedelta
 
     from sqlalchemy import select as sa_select
@@ -7585,6 +8126,12 @@ def test_scan_scheduled_plans_triggers_and_defers(client, monkeypatch) -> None:
     )
     assert case_resp.status_code == 201
     case_id = case_resp.json()["id"]
+    assert client.post(f"/api-cases/{case_id}/review/submit").status_code == 200
+    approved = reviewer_client.post(
+        "/cases/batch-review",
+        json={"items": [{"case_type": "API", "case_id": case_id}], "review_status": "APPROVED"},
+    )
+    assert approved.status_code == 200
 
     plan_resp = client.post("/test-plans", json={"project_id": project_id, "name": f"定时触发计划_{time.time_ns()}"})
     assert plan_resp.status_code == 201
@@ -7676,9 +8223,20 @@ def test_notification_setting_crud_and_test_endpoint(client, monkeypatch) -> Non
     payload = saved.json()
     assert payload["channel_type"] == "DINGTALK"
     assert payload["notify_on"] == "FAIL_ONLY"
+    assert "secret" not in payload
+    assert payload["secret_configured"] is True
 
     fetched = client.get(f"/projects/{project_id}/notification-setting")
     assert fetched.json()["enabled"] is True
+    assert fetched.json()["secret_configured"] is True
+    assert "SEC123" not in fetched.text
+
+    preserved = client.put(
+        f"/projects/{project_id}/notification-setting",
+        json={"enabled": True, "channel_type": "DINGTALK", "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=x", "notify_on": "FAIL_ONLY"},
+    )
+    assert preserved.status_code == 200
+    assert preserved.json()["secret_configured"] is True
 
     captured = {}
 

@@ -1,9 +1,10 @@
 const { test, expect } = require('@playwright/test')
+const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || ''
 
 async function login(page) {
   await page.goto('/login')
   await page.getByPlaceholder('请输入用户名').fill('admin')
-  await page.getByPlaceholder('请输入密码').fill('admin123')
+  await page.getByPlaceholder('请输入密码').fill(ADMIN_PASSWORD)
   await page.getByRole('button', { name: '登录' }).click()
   await page.waitForURL(/\/dashboard/, { timeout: 10000 })
 }
