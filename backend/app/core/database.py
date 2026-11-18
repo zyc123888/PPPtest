@@ -21,21 +21,15 @@ def get_db() -> Generator:
 
 
 def init_db() -> dict:
-    from app import models  # noqa: F401
+    from app.db_migrate import assert_database_current
 
-    inspector_before = inspect(engine)
-    tables_before = set(inspector_before.get_table_names())
-
-    Base.metadata.create_all(bind=engine)
-
-    inspector_after = inspect(engine)
-    tables_after = set(inspector_after.get_table_names())
+    assert_database_current(engine)
 
     return {
         "database_backend": engine.url.get_backend_name(),
         "database_name": engine.url.database,
-        "created_tables": sorted(tables_after - tables_before),
-        "schema_changes": ensure_schema(engine),
+        "created_tables": [],
+        "schema_changes": [],
     }
 
 

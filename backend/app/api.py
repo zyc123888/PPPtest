@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -6,11 +7,11 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 from xml.etree import ElementTree as ET
 
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, Cookie, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import String, cast, delete, func, or_, select, update
@@ -20,6 +21,7 @@ from sqlalchemy.orm import Session
 from app import schemas, services
 from app import notifications
 from app import spec_import
+from app.artifact_revision import artifact_revision, revision_from_bytes
 from app.core.config import settings
 from app.core.celery_app import celery_app
 from app.core.database import get_db
@@ -69,6 +71,7 @@ from app.execution_runtime import (
 )
 from app.assertion_engine import ResponseFacts, evaluate_assertions, run_extractors
 from app.model_registry import case_generation_model_options
+from app.permissions import PROJECT_ROLE_RANK, project_role_allows
 from app.tasks.case_generation import (
     _normalize_model_base_url,
     normalize_model_api_key,
@@ -99,12 +102,20 @@ _TEMPLATE_VAR_PATTERN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(auth_scheme),
+    browser_session: str | None = Cookie(default=None, alias="tp_browser_session"),
     db: Session = Depends(get_db),
 ) -> User:
-    if credentials is None or not credentials.credentials:
+    token = credentials.credentials if credentials and credentials.credentials else None
+    # Native resources such as <img> cannot attach the SPA's Bearer header.
+    # Only read-only requests may fall back to the HttpOnly browser session;
+    # mutations continue to require an explicit Authorization header.
+    if token is None and request.method in {"GET", "HEAD"}:
+        token = browser_session
+    if not token:
         raise HTTPException(status_code=401, detail="请先登录")
-    user = services.get_user_by_token(db, credentials.credentials)
+    user = services.get_user_by_token(db, token)
     if user is None:
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
     return user
@@ -120,6 +131,22 @@ def require_tester(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role not in {"admin", "tester"}:
         raise HTTPException(status_code=403, detail="需要测试执行权限")
     return current_user
+
+
+def _initial_case_data(payload) -> dict:
+    """Create/import paths cannot grant a review decision."""
+    data = payload.model_dump()
+    data["review_status"] = "DRAFT"
+    data["review_note"] = None
+    return data
+
+
+def _reject_case_project_reassignment(current_project_id: int, requested_project_id: int) -> None:
+    if requested_project_id != current_project_id:
+        raise HTTPException(
+            status_code=400,
+            detail="普通更新不允许变更用例所属项目，请使用专用移动操作",
+        )
 
 
 def _workspace_ids_for_user(db: Session, user: User) -> list[int]:
@@ -167,12 +194,14 @@ def _is_project_member(db: Session, user: User, project_id: int) -> bool:
 def _can_access_project(db: Session, user: User, project: Project) -> bool:
     """项目级数据隔离判定。
 
-    - admin 拥有全部权限；
+    - admin 或项目创建人拥有全部权限；
     - 显式项目成员始终可访问；
     - 项目一旦配置显式成员则仅成员可访问（隔离模式）；
     - 未配置成员时回退到工作空间级可见性（向后兼容旧行为）。
     """
     if user.role == "admin":
+        return True
+    if project.created_by is not None and project.created_by == user.id:
         return True
     if _is_project_member(db, user, project.id):
         return True
@@ -189,12 +218,36 @@ def _require_project_access(db: Session, user: User, project: Project | None) ->
     return project
 
 
+def _require_project_member(db: Session, user: User, project: Project | None, minimum_role: str = "member") -> Project:
+    project = _require_project_access(db, user, project)
+    if user.role == "admin" or (project.created_by is not None and project.created_by == user.id):
+        return project
+    member = db.scalar(select(ProjectMember).where(ProjectMember.project_id == project.id, ProjectMember.user_id == user.id))
+    if not project_role_allows(member.role if member else "viewer", minimum_role):
+        raise HTTPException(status_code=403, detail="项目内权限不足")
+    return project
+
+
+def _guard_project_member_change(db: Session, user: User, project: Project, member: ProjectMember | None, next_role: str | None) -> None:
+    if next_role is not None and next_role not in PROJECT_ROLE_RANK:
+        raise HTTPException(status_code=400, detail="无效的项目角色")
+    if user.role != "admin" and ((member and member.role == "owner") or next_role == "owner"):
+        _require_project_member(db, user, project, "owner")
+    if member and member.role == "owner" and next_role != "owner":
+        count = db.scalar(select(func.count(ProjectMember.id)).where(ProjectMember.project_id == project.id, ProjectMember.role == "owner"))
+        if count <= 1:
+            raise HTTPException(status_code=400, detail="项目至少需要保留一个 Owner")
+
+
 def _accessible_project_ids(db: Session, user: User) -> list[int]:
     if user.role == "admin":
         return list(db.scalars(select(Project.id)).all())
-    # 用户显式加入的项目（隔离授权）
+    # 用户显式加入的项目（隔离授权）与自己创建的项目
     member_project_ids = set(
         db.scalars(select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)).all()
+    )
+    created_project_ids = set(
+        db.scalars(select(Project.id).where(Project.created_by == user.id)).all()
     )
     # 所有配置了显式成员的项目（处于隔离模式，非成员不可见）
     restricted_project_ids = set(db.scalars(select(ProjectMember.project_id).distinct()).all())
@@ -205,7 +258,7 @@ def _accessible_project_ids(db: Session, user: User) -> list[int]:
         workspace_project_ids = set(
             db.scalars(select(Project.id).where(Project.workspace_id.in_(workspace_ids))).all()
         )
-    accessible = member_project_ids | (workspace_project_ids - restricted_project_ids)
+    accessible = member_project_ids | created_project_ids | (workspace_project_ids - restricted_project_ids)
     return list(accessible)
 
 
@@ -295,7 +348,8 @@ def _collect_missing_template_issues(value, variables: dict | None, *, scope: st
 
 
 def _validate_environment_usage(db: Session, env: Environment) -> schemas.EnvironmentValidationResult:
-    variables = env.variables_json or {}
+    project = db.get(Project, env.project_id)
+    variables = build_variable_context(project, env) if project else (env.variables_json or {})
     issues: list[schemas.EnvironmentValidationIssue] = []
 
     issues.extend(
@@ -325,17 +379,15 @@ def _validate_environment_usage(db: Session, env: Environment) -> schemas.Enviro
 
     api_cases = list(db.scalars(select(APICase).where(APICase.project_id == env.project_id).order_by(APICase.id.asc())).all())
     for case in api_cases:
-        case_scope = f"api_case:{case.name}"
-        issues.extend(_collect_missing_template_issues(case.path, variables, scope=case_scope, field="path"))
-        issues.extend(_collect_missing_template_issues(case.headers_json, variables, scope=case_scope, field="headers_json"))
-        issues.extend(_collect_missing_template_issues(case.body_json, variables, scope=case_scope, field="body_json"))
+        issues.extend(_validation_issues_for_api_case(case, variables))
 
     ui_cases = list(db.scalars(select(UICase).where(UICase.project_id == env.project_id).order_by(UICase.id.asc())).all())
     for case in ui_cases:
-        case_scope = f"ui_case:{case.name}"
-        issues.extend(_collect_missing_template_issues(case.target_url, variables, scope=case_scope, field="target_url"))
-        issues.extend(_collect_missing_template_issues(case.expect_text, variables, scope=case_scope, field="expect_text"))
-        issues.extend(_collect_missing_template_issues(case.steps_json, variables, scope=case_scope, field="steps_json"))
+        issues.extend(_validation_issues_for_ui_case(case, variables))
+
+    perf_cases = list(db.scalars(select(PerformanceCase).where(PerformanceCase.project_id == env.project_id).order_by(PerformanceCase.id.asc())).all())
+    for case in perf_cases:
+        issues.extend(_validation_issues_for_performance_case(case, variables))
 
     summary, scope_counts, missing_variables = _summarize_precheck_issues(issues)
     return schemas.EnvironmentValidationResult(
@@ -607,9 +659,9 @@ def _validation_issues_for_performance_case(
 
 
 def _validation_issues_for_environment_runtime(env: Environment | None, project: Project) -> list[schemas.EnvironmentValidationIssue]:
+    variables = build_variable_context(project, env)
     if env is None:
-        return _collect_missing_template_issues(project.base_url, {}, scope=f"project:{project.name}", field="base_url")
-    variables = env.variables_json or {}
+        return _collect_missing_template_issues(project.base_url, variables, scope=f"project:{project.name}", field="base_url")
     issues: list[schemas.EnvironmentValidationIssue] = []
     issues.extend(_collect_missing_template_issues(env.base_url, variables, scope=f"environment:{env.name}", field="base_url"))
     issues.extend(
@@ -710,6 +762,11 @@ def _serialize_case_generation_v2_artifact(
         field: getattr(artifact, field)
         for field in schemas.CaseGenerationV2ArtifactRead.model_fields.keys()
     }
+    payload["revision"] = artifact.revision or artifact_revision(
+        content_json=artifact.content_json,
+        file_name=artifact.file_name,
+        file_path=artifact.file_path,
+    )
     if not include_content:
         payload["content_json"] = None
     return schemas.CaseGenerationV2ArtifactRead(**payload)
@@ -748,28 +805,225 @@ def _case_generation_artifact_media_type(artifact_type: str) -> str:
     return "application/octet-stream"
 
 
+_INHERITABLE_CASE_GENERATION_V2_ARTIFACT_TYPES = {
+    "source_manifest",
+    "evidence_trace",
+    "scope_index",
+    "function_points",
+    "requirement_handoff",
+    "testcase_base_package",
+    "testcase_package",
+}
+
+
+def _case_generation_v2_parent_attempt_id(db: Session, job: CaseGenerationV2Job) -> int | None:
+    if job.active_attempt_id is not None:
+        return job.active_attempt_id
+    return db.scalar(
+        select(CaseGenerationV2Attempt.id)
+        .where(CaseGenerationV2Attempt.job_id == job.id)
+        .order_by(CaseGenerationV2Attempt.id.desc())
+        .limit(1)
+    )
+
+
+def _case_generation_v2_recovery_actions(
+    db: Session,
+    job: CaseGenerationV2Job,
+    current_user: User,
+) -> list[schemas.CaseGenerationV2RecoveryAction]:
+    parent_attempt_id = _case_generation_v2_parent_attempt_id(db, job)
+    attempt_filter = (
+        CaseGenerationV2Artifact.attempt_id.is_(None)
+        if parent_attempt_id is None
+        else CaseGenerationV2Artifact.attempt_id == parent_attempt_id
+    )
+    artifacts = list(
+        db.scalars(
+            select(CaseGenerationV2Artifact)
+            .where(
+                CaseGenerationV2Artifact.job_id == job.id,
+                attempt_filter,
+                CaseGenerationV2Artifact.expired_at.is_(None),
+            )
+            .order_by(CaseGenerationV2Artifact.id.asc())
+        ).all()
+    )
+    artifacts_by_type = {artifact.artifact_type: artifact for artifact in artifacts}
+
+    source_gate: dict[str, str] = {}
+    gate_payload_keys = {
+        "scope_index_gate": "scope_index_gate",
+        "requirement_handoff": "requirement_gate",
+        "testcase_handoff": "testcase_gate",
+        "final_delivery_gate": "final_delivery_gate",
+    }
+    for artifact_type, payload_key in gate_payload_keys.items():
+        artifact = artifacts_by_type.get(artifact_type)
+        content = artifact.content_json if artifact is not None else None
+        if not isinstance(content, dict):
+            continue
+        gate_payload = content.get(payload_key, content)
+        if not isinstance(gate_payload, dict):
+            continue
+        recovery_plan = gate_payload.get("recovery_plan")
+        rerun_scope = recovery_plan.get("rerun_scope") if isinstance(recovery_plan, dict) else None
+        source_ids = rerun_scope.get("source_ids") if isinstance(rerun_scope, dict) else None
+        valid_source_ids = source_ids if isinstance(source_ids, list) else []
+        for source_id in valid_source_ids:
+            normalized_id = str(source_id or "").strip()
+            if normalized_id:
+                source_gate.setdefault(normalized_id, artifact_type)
+
+    review_artifact = artifacts_by_type.get("trusted_review_report")
+    review_content = review_artifact.content_json if review_artifact is not None else None
+    review_sources = review_content.get("sources_detail") if isinstance(review_content, dict) else None
+    if isinstance(review_sources, list):
+        for source in review_sources:
+            if not isinstance(source, dict):
+                continue
+            source_id = str(source.get("source_id") or "").strip()
+            has_issues = bool(
+                source.get("shard_error")
+                or source.get("gate_issues")
+                or source.get("shard_status") == "failed"
+                or source.get("must_cover_status") in {"gap", "missing", "blocked"}
+                or source.get("method_consumption_status") in {"gap", "missing", "blocked"}
+            )
+            if source_id and has_issues:
+                source_gate.setdefault(source_id, "trusted_review_report")
+
+    testcase_artifact = artifacts_by_type.get("testcase_package")
+    testcase_content = testcase_artifact.content_json if testcase_artifact is not None else None
+    testcase_shards = testcase_content.get("testcase_shards") if isinstance(testcase_content, dict) else None
+    testcase_shards = testcase_shards if isinstance(testcase_shards, list) else []
+    package_source_ids = {
+        str(item.get("source_id") or "").strip()
+        for item in (testcase_shards or [])
+        if isinstance(item, dict) and str(item.get("source_id") or "").strip()
+    }
+
+    try:
+        trusted_mode = _normalize_pipeline_mode((job.input_payload_json or {}).get("pipeline_mode")) == "trusted"
+    except (AttributeError, TypeError, ValueError):
+        trusted_mode = False
+
+    model_config = db.scalar(
+        select(AIModelConfig)
+        .where(AIModelConfig.workspace_id == job.workspace_id, AIModelConfig.is_active == 1)
+        .order_by(AIModelConfig.id.desc())
+    )
+    active_job = _find_active_case_generation_v2_job_for_user(db, current_user.id)
+    reason = None
+    if current_user.role not in {"admin", "tester"}:
+        reason = "需要测试执行权限"
+    elif job.status in {"PENDING", "RUNNING"}:
+        reason = "任务正在执行，暂不可重跑"
+    elif active_job is not None and active_job.id != job.id:
+        reason = f"当前已有进行中的 V2 任务 #{active_job.id}"
+    elif model_config is None or not model_config.api_key:
+        reason = "当前工作空间未配置可用模型"
+
+    available_types = set(artifacts_by_type)
+    progress = job.progress_json if isinstance(job.progress_json, dict) else {}
+    failed_stage = next(
+        (
+            str(stage.get("key") or "").strip()
+            for stage in reversed(progress.get("stages") or [])
+            if isinstance(stage, dict) and stage.get("status") == "failed"
+        ),
+        "",
+    )
+    reusable_shards = bool(
+        testcase_shards
+        and all(
+            isinstance(item, dict)
+            and item.get("status") == "success"
+            and item.get("testcases")
+            for item in testcase_shards
+        )
+    )
+    can_resume_at_testcase_gate = trusted_mode and (
+        (
+            failed_stage == "testcase_gate"
+            and {"scope_index", "requirement_handoff", "testcase_base_package"}.issubset(available_types)
+        )
+        or (
+            failed_stage == "testcase_by_source_shard"
+            and reusable_shards
+            and {"scope_index", "requirement_handoff", "testcase_package"}.issubset(available_types)
+        )
+    )
+    inherited_types = sorted(available_types & _INHERITABLE_CASE_GENERATION_V2_ARTIFACT_TYPES)
+    failed_gate_artifact = {
+        "scope_index": "scope_index_gate",
+        "scope_index_gate": "scope_index_gate",
+        "requirement": "requirement_handoff",
+        "requirement_gate": "requirement_handoff",
+        "testcase": "testcase_handoff",
+        "testcase_gate": "testcase_handoff",
+        "testcase_by_source_shard": "testcase_handoff",
+        "final_delivery_gate": "final_delivery_gate",
+        "export": "final_delivery_gate",
+    }.get(failed_stage)
+    actions = [
+        schemas.CaseGenerationV2RecoveryAction(
+            action="rerun_job",
+            label="重跑任务",
+            enabled=reason is None,
+            reason=reason,
+            preserves=inherited_types if can_resume_at_testcase_gate else [],
+            regenerates=(
+                ["testcase_package", "testcase_handoff", "trusted_review_report", "markdown", "xmindmark", "xmind"]
+                if can_resume_at_testcase_gate
+                else ["全流程产物"]
+            ),
+            calls_model=True,
+            gate_artifact_type=failed_gate_artifact,
+        )
+    ]
+
+    if trusted_mode and package_source_ids:
+        for source_id in sorted(source_gate.keys() & package_source_ids):
+            actions.append(
+                schemas.CaseGenerationV2RecoveryAction(
+                    action="rerun_source",
+                    label=f"重跑 {source_id}",
+                    enabled=reason is None,
+                    reason=reason,
+                    preserves=[
+                        artifact_type
+                        for artifact_type in ("source_manifest", "evidence_trace", "scope_index", "requirement_handoff")
+                        if artifact_type in available_types
+                    ],
+                    regenerates=["该 source 的 testcase shard", "testcase_package", "门禁、复核与导出产物"],
+                    calls_model=True,
+                    source_id=source_id,
+                    gate_artifact_type=source_gate[source_id],
+                )
+            )
+    return actions
+
+
 def _inherit_case_generation_v2_artifacts(
     db: Session,
     *,
     job_id: int,
     attempt_id: int,
+    parent_attempt_id: int | None,
 ) -> None:
-    """Copy prior artifact metadata into a new local-rerun attempt without mutating history."""
+    """Copy only data artifacts from the explicitly selected parent attempt."""
     inherited_dir = Path(attempt_output_dir(job_id, "v2", attempt_id)) / "inherited"
-    prior_artifacts = list(
-        db.scalars(
-            select(CaseGenerationV2Artifact)
-            .where(
-                CaseGenerationV2Artifact.job_id == job_id,
-                or_(
-                    CaseGenerationV2Artifact.attempt_id.is_(None),
-                    CaseGenerationV2Artifact.attempt_id != attempt_id,
-                ),
-                CaseGenerationV2Artifact.expired_at.is_(None),
-            )
-            .order_by(CaseGenerationV2Artifact.id.desc())
-        ).all()
+    artifact_stmt = select(CaseGenerationV2Artifact).where(
+        CaseGenerationV2Artifact.job_id == job_id,
+        CaseGenerationV2Artifact.artifact_type.in_(_INHERITABLE_CASE_GENERATION_V2_ARTIFACT_TYPES),
+        CaseGenerationV2Artifact.expired_at.is_(None),
     )
+    if parent_attempt_id is None:
+        artifact_stmt = artifact_stmt.where(CaseGenerationV2Artifact.attempt_id.is_(None))
+    else:
+        artifact_stmt = artifact_stmt.where(CaseGenerationV2Artifact.attempt_id == parent_attempt_id)
+    prior_artifacts = list(db.scalars(artifact_stmt.order_by(CaseGenerationV2Artifact.id.desc())).all())
     seen_types: set[str] = set()
     for artifact in prior_artifacts:
         if artifact.artifact_type in seen_types:
@@ -789,10 +1043,16 @@ def _inherit_case_generation_v2_artifacts(
             CaseGenerationV2Artifact(
                 job_id=job_id,
                 attempt_id=attempt_id,
+                parent_attempt_id=artifact.attempt_id,
                 artifact_type=artifact.artifact_type,
                 file_name=artifact.file_name,
                 file_path=inherited_path,
                 content_json=artifact.content_json,
+                revision=artifact.revision or artifact_revision(
+                    content_json=artifact.content_json,
+                    file_name=artifact.file_name,
+                    file_path=inherited_path,
+                ),
             )
         )
     db.commit()
@@ -896,16 +1156,41 @@ def _bump_version(version_no: str | None) -> str:
 
 
 def _case_snapshot(case) -> dict:
+    if isinstance(case, APICase):
+        case_type = "API"
+    elif isinstance(case, PerformanceCase):
+        case_type = "PERF"
+    else:
+        case_type = "UI"
     payload = {
         "id": case.id,
         "name": case.name,
         "project_id": case.project_id,
-        "type": "API" if isinstance(case, APICase) else "UI",
+        "type": case_type,
     }
-    for field in ("method", "path", "target_url", "expect_text", "priority", "status", "expected_status"):
-        if hasattr(case, field):
-            payload[field] = getattr(case, field)
     for field in (
+        "folder_path",
+        "method",
+        "path",
+        "target_url",
+        "expect_text",
+        "priority",
+        "status",
+        "expected_status",
+        "tags_json",
+        "headers_json",
+        "body_json",
+        "assertions_json",
+        "extractors_json",
+        "steps_json",
+        "datasets_json",
+        "mock_enabled",
+        "mock_config_json",
+        "concurrency",
+        "total_requests",
+        "max_avg_response_ms",
+        "max_p95_response_ms",
+        "max_error_rate",
         "review_status",
         "version_no",
         "review_note",
@@ -1008,11 +1293,27 @@ def _normalize_mock_path(value: str | None) -> str:
     return "/" + raw.strip("/")
 
 
+def _mock_path_matches(pattern_path: str, target_path: str) -> bool:
+    norm_pattern = _normalize_mock_path(pattern_path)
+    if norm_pattern == target_path:
+        return True
+    if "{" not in norm_pattern and ":" not in norm_pattern:
+        return False
+    regex_parts = []
+    for segment in norm_pattern.strip("/").split("/"):
+        if (segment.startswith("{") and segment.endswith("}")) or segment.startswith(":"):
+            regex_parts.append(r"[^/]+")
+        else:
+            regex_parts.append(re.escape(segment))
+    regex_str = "^/" + "/".join(regex_parts) + "$"
+    return bool(re.match(regex_str, target_path))
+
+
 @public_router.api_route(
     "/mock/{project_id}/{mock_path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
 )
-def mock_service(
+async def mock_service(
     project_id: int,
     mock_path: str,
     request: Request,
@@ -1028,10 +1329,13 @@ def mock_service(
         select(APICase).where(
             APICase.project_id == project_id,
             APICase.mock_enabled.is_(True),
+            APICase.status == "ACTIVE",
             func.upper(APICase.method) == method,
         )
     ).all()
     matched = next((c for c in candidates if _normalize_mock_path(c.path) == target), None)
+    if matched is None:
+        matched = next((c for c in candidates if _mock_path_matches(c.path, target)), None)
     if matched is None:
         raise HTTPException(status_code=404, detail="未找到匹配的 Mock 用例")
 
@@ -1040,7 +1344,7 @@ def mock_service(
     headers = {str(k): str(v) for k, v in (config.get("headers") or {}).items()}
     delay_ms = int(config.get("delay_ms") or 0)
     if delay_ms > 0:
-        time.sleep(min(delay_ms, 10000) / 1000)
+        await asyncio.sleep(min(delay_ms, 10000) / 1000)
     body = config.get("body")
     if isinstance(body, (dict, list)):
         return JSONResponse(content=body, status_code=status_code, headers=headers)
@@ -1063,9 +1367,29 @@ def _dispatch_task_or_run_inline(
         raise HTTPException(status_code=503, detail=f"任务队列暂不可用，请稍后重试：{exc}") from exc
 
 
+def _health_response() -> schemas.SystemHealth | Response:
+    payload = schemas.SystemHealth(**services.collect_system_health())
+    if payload.app_status != "healthy":
+        # degraded 时仍返回完整分项 JSON，便于编排系统与人工排查。
+        return JSONResponse(status_code=503, content=payload.model_dump(mode="json"))
+    return payload
+
+
 @public_router.get("/system/health", response_model=schemas.SystemHealth)
-def system_health() -> schemas.SystemHealth:
-    return schemas.SystemHealth(**services.collect_system_health())
+def system_health() -> schemas.SystemHealth | Response:
+    return _health_response()
+
+
+@public_router.get("/system/health/live")
+def system_health_live() -> dict:
+    # liveness：进程存活即 200，不探测外部依赖。
+    return {"status": "alive"}
+
+
+@public_router.get("/system/health/ready", response_model=schemas.SystemHealth)
+def system_health_ready() -> schemas.SystemHealth | Response:
+    # readiness：依赖全部可用才 200。
+    return _health_response()
 
 
 @protected_router.get("/system/info", response_model=schemas.SystemInfo)
@@ -1086,7 +1410,12 @@ def system_bootstrap(
 
 
 @public_router.post("/auth/login", response_model=schemas.AuthLoginResponse)
-def login(payload: schemas.AuthLoginRequest, db: Session = Depends(get_db)) -> schemas.AuthLoginResponse:
+def login(
+    payload: schemas.AuthLoginRequest,
+    response: Response,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> schemas.AuthLoginResponse:
     try:
         user = services.authenticate_user(db, payload.username, payload.password)
     except services.AccountDisabledError:
@@ -1094,16 +1423,27 @@ def login(payload: schemas.AuthLoginRequest, db: Session = Depends(get_db)) -> s
     if user is None:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = services.issue_user_token(db, user)
+    response.set_cookie(
+        key="tp_browser_session",
+        value=token,
+        max_age=services.TOKEN_TTL_HOURS * 60 * 60,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path=settings.api_v1_prefix,
+    )
     return schemas.AuthLoginResponse(token=token, user=_serialize_user(db, user))
 
 
 @protected_router.post("/auth/logout", status_code=204)
 def logout(
+    response: Response,
     credentials: HTTPAuthorizationCredentials | None = Depends(auth_scheme),
     db: Session = Depends(get_db),
 ) -> None:
     if credentials and credentials.credentials:
         services.revoke_user_token(db, credentials.credentials)
+    response.delete_cookie(key="tp_browser_session", path=settings.api_v1_prefix, samesite="strict")
 
 
 @protected_router.get("/auth/me", response_model=schemas.UserRead)
@@ -1163,6 +1503,49 @@ def create_workspace(
     db.refresh(workspace)
     services.ensure_workspace_member(db, workspace.id, current_user.id, "owner")
     return workspace
+
+
+@protected_router.put(
+    "/workspaces/{workspace_id}",
+    response_model=schemas.WorkspaceRead,
+    dependencies=[Depends(require_admin)],
+)
+def update_workspace(
+    workspace_id: int,
+    payload: schemas.WorkspaceUpdate,
+    db: Session = Depends(get_db),
+) -> Workspace:
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="工作空间不存在")
+    duplicate = db.scalar(
+        select(Workspace.id).where(Workspace.name == payload.name, Workspace.id != workspace_id)
+    )
+    if duplicate is not None:
+        raise HTTPException(status_code=400, detail="工作空间名称已存在")
+    workspace.name = payload.name
+    workspace.description = payload.description
+    db.commit()
+    db.refresh(workspace)
+    return workspace
+
+
+@protected_router.delete(
+    "/workspaces/{workspace_id}",
+    status_code=204,
+    dependencies=[Depends(require_admin)],
+)
+def delete_workspace(workspace_id: int, db: Session = Depends(get_db)) -> None:
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="工作空间不存在")
+    has_projects = db.scalar(select(Project.id).where(Project.workspace_id == workspace_id).limit(1))
+    if has_projects is not None:
+        raise HTTPException(status_code=400, detail="该工作空间下仍存在关联项目，请先迁移或删除项目")
+    db.execute(delete(AIModelConfig).where(AIModelConfig.workspace_id == workspace_id))
+    db.execute(delete(WorkspaceMember).where(WorkspaceMember.workspace_id == workspace_id))
+    db.delete(workspace)
+    db.commit()
 
 
 @protected_router.get(
@@ -1314,10 +1697,16 @@ def add_project_member(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> schemas.ProjectMemberRead:
-    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    project = _require_project_member(db, current_user, db.get(Project, project_id), "manager")
     user = db.get(User, payload.user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在")
+    if not _project_has_members(db, project.id):
+        owner_uid = project.created_by or current_user.id
+        if owner_uid and owner_uid != payload.user_id:
+            services.ensure_project_member(db, project.id, owner_uid, "owner")
+    existing = db.scalar(select(ProjectMember).where(ProjectMember.project_id == project.id, ProjectMember.user_id == payload.user_id))
+    _guard_project_member_change(db, current_user, project, existing, payload.role)
     member = services.ensure_project_member(db, project.id, payload.user_id, payload.role)
     return _project_member_to_read(db, member)
 
@@ -1334,10 +1723,11 @@ def update_project_member(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> schemas.ProjectMemberRead:
-    _require_project_access(db, current_user, db.get(Project, project_id))
+    project = _require_project_member(db, current_user, db.get(Project, project_id), "manager")
     member = db.get(ProjectMember, member_id)
     if member is None or member.project_id != project_id:
         raise HTTPException(status_code=404, detail="成员不存在")
+    _guard_project_member_change(db, current_user, project, member, payload.role)
     member.role = payload.role
     db.commit()
     db.refresh(member)
@@ -1355,10 +1745,11 @@ def delete_project_member(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> None:
-    _require_project_access(db, current_user, db.get(Project, project_id))
+    project = _require_project_member(db, current_user, db.get(Project, project_id), "manager")
     member = db.get(ProjectMember, member_id)
     if member is None or member.project_id != project_id:
         raise HTTPException(status_code=404, detail="成员不存在")
+    _guard_project_member_change(db, current_user, project, member, None)
     db.delete(member)
     db.commit()
 
@@ -1414,6 +1805,33 @@ def create_project(
     return project
 
 
+@protected_router.put(
+    "/projects/{project_id}",
+    response_model=schemas.ProjectRead,
+    dependencies=[Depends(require_tester)],
+)
+def update_project(
+    project_id: int,
+    payload: schemas.ProjectUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Project:
+    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    data = payload.model_dump(exclude_unset=True)
+    if "workspace_id" in data and data["workspace_id"] is not None:
+        workspace = db.get(Workspace, data["workspace_id"])
+        if workspace is None:
+            raise HTTPException(status_code=404, detail="工作空间不存在")
+        _require_workspace_access(db, current_user, workspace.id)
+    for key, value in data.items():
+        if value is not None or key == "description":
+            setattr(project, key, value)
+    project.updated_by = current_user.id
+    db.commit()
+    db.refresh(project)
+    return project
+
+
 @protected_router.delete("/projects/{project_id}", status_code=204, dependencies=[Depends(require_admin)])
 def delete_project(project_id: int, db: Session = Depends(get_db)) -> None:
     project = db.get(Project, project_id)
@@ -1424,11 +1842,51 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> None:
     if plan_ids:
         db.execute(delete(TestPlanCase).where(TestPlanCase.plan_id.in_(plan_ids)))
 
+    run_ids = list(db.scalars(select(TestRun.id).where(TestRun.project_id == project_id)).all())
+    if run_ids:
+        db.execute(delete(ExecutionArtifact).where(ExecutionArtifact.run_id.in_(run_ids)))
+        db.execute(delete(ExecutionLog).where(ExecutionLog.run_id.in_(run_ids)))
+        db.execute(delete(ExecutionStep).where(ExecutionStep.run_id.in_(run_ids)))
+        db.execute(delete(DefectRunLink).where(DefectRunLink.test_run_id.in_(run_ids)))
+
+    defect_ids = list(db.scalars(select(Defect.id).where(Defect.project_id == project_id)).all())
+    if defect_ids:
+        db.execute(delete(DefectRunLink).where(DefectRunLink.defect_id.in_(defect_ids)))
+        db.execute(delete(DefectCaseLink).where(DefectCaseLink.defect_id.in_(defect_ids)))
+
+    req_ids = list(db.scalars(select(Requirement.id).where(Requirement.project_id == project_id)).all())
+    if req_ids:
+        db.execute(delete(RequirementCaseLink).where(RequirementCaseLink.requirement_id.in_(req_ids)))
+
+    job_v1_ids = list(db.scalars(select(CaseGenerationJob.id).where(CaseGenerationJob.project_id == project_id)).all())
+    if job_v1_ids:
+        db.execute(delete(CaseGenerationArtifact).where(CaseGenerationArtifact.job_id.in_(job_v1_ids)))
+        db.execute(delete(CaseGenerationAttempt).where(CaseGenerationAttempt.job_id.in_(job_v1_ids)))
+        db.execute(delete(CaseGenerationJob).where(CaseGenerationJob.id.in_(job_v1_ids)))
+
+    job_v2_ids = list(db.scalars(select(CaseGenerationV2Job.id).where(CaseGenerationV2Job.project_id == project_id)).all())
+    if job_v2_ids:
+        db.execute(delete(CaseGenerationV2Artifact).where(CaseGenerationV2Artifact.job_id.in_(job_v2_ids)))
+        db.execute(delete(CaseGenerationV2Attempt).where(CaseGenerationV2Attempt.job_id.in_(job_v2_ids)))
+        db.execute(delete(CaseGenerationV2Job).where(CaseGenerationV2Job.id.in_(job_v2_ids)))
+
+    db.execute(delete(Comment).where(Comment.project_id == project_id))
+    db.execute(delete(Activity).where(Activity.project_id == project_id))
+    db.execute(delete(Defect).where(Defect.project_id == project_id))
+    db.execute(delete(DefectRecord).where(DefectRecord.project_id == project_id))
+    db.execute(delete(ProjectTask).where(ProjectTask.project_id == project_id))
+    db.execute(delete(Requirement).where(Requirement.project_id == project_id))
+    db.execute(delete(Iteration).where(Iteration.project_id == project_id))
+    db.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
+    db.execute(delete(ProjectNotificationSetting).where(ProjectNotificationSetting.project_id == project_id))
+    db.execute(delete(CaseChangeHistory).where(CaseChangeHistory.project_id == project_id))
     db.execute(delete(TestRun).where(TestRun.project_id == project_id))
+    db.execute(delete(UIBatchRun).where(UIBatchRun.project_id == project_id))
     db.execute(delete(TestPlanRun).where(TestPlanRun.project_id == project_id))
     db.execute(delete(TestPlan).where(TestPlan.project_id == project_id))
     db.execute(delete(APICase).where(APICase.project_id == project_id))
     db.execute(delete(UICase).where(UICase.project_id == project_id))
+    db.execute(delete(PerformanceCase).where(PerformanceCase.project_id == project_id))
     db.execute(delete(Environment).where(Environment.project_id == project_id))
     db.execute(delete(Project).where(Project.id == project_id))
     db.commit()
@@ -1726,24 +2184,45 @@ def detect_duplicate_cases(
             )
         )
 
-    if normalized_type in {"", "API"}:
-        stmt = select(APICase)
+    # 分组与计数下推到数据库：先聚合出「出现 >1 次」的重复键，再只加载重复组成员，
+    # 避免把全表用例（含大 JSON 列）读进内存。键表达式与原 Python 逻辑一致：
+    # API/PERF = lower(trim(upper(method) + ' ' + path))；UI = lower(trim(target_url))。
+    key_specs = [
+        (
+            "API",
+            APICase,
+            func.lower(func.trim(func.upper(APICase.method) + " " + APICase.path)),
+        ),
+        ("UI", UICase, func.lower(func.trim(UICase.target_url))),
+        (
+            "PERF",
+            PerformanceCase,
+            func.lower(func.trim(func.upper(PerformanceCase.method) + " " + PerformanceCase.path)),
+        ),
+    ]
+    for item_type, model, key_expr in key_specs:
+        if normalized_type not in {"", item_type}:
+            continue
+        base_filters = []
         if project_ids is not None:
-            stmt = stmt.where(APICase.project_id.in_(project_ids))
-        for case in db.scalars(stmt).all():
-            add_item("API", case, f"{case.method.upper()} {case.path}")
-    if normalized_type in {"", "UI"}:
-        stmt = select(UICase)
-        if project_ids is not None:
-            stmt = stmt.where(UICase.project_id.in_(project_ids))
-        for case in db.scalars(stmt).all():
-            add_item("UI", case, case.target_url)
-    if normalized_type in {"", "PERF"}:
-        stmt = select(PerformanceCase)
-        if project_ids is not None:
-            stmt = stmt.where(PerformanceCase.project_id.in_(project_ids))
-        for case in db.scalars(stmt).all():
-            add_item("PERF", case, f"{case.method.upper()} {case.path}")
+            base_filters.append(model.project_id.in_(project_ids))
+        dup_key_stmt = (
+            select(key_expr)
+            .where(*base_filters, key_expr.isnot(None), key_expr != "")
+            .group_by(key_expr)
+            .having(func.count() > 1)
+        )
+        duplicate_keys = [row[0] for row in db.execute(dup_key_stmt).all()]
+        if not duplicate_keys:
+            continue
+        for case in db.scalars(
+            select(model).where(*base_filters, key_expr.in_(duplicate_keys))
+        ).all():
+            if item_type == "UI":
+                entry = case.target_url or ""
+            else:
+                entry = f"{(case.method or '').upper()} {case.path}"
+            add_item(item_type, case, entry)
 
     groups = [
         schemas.CaseDuplicateGroup(case_type=item_type, duplicate_key=duplicate_key, count=len(items), items=items)
@@ -1764,97 +2243,109 @@ def import_cases(
     current_user: User = Depends(get_current_user),
 ) -> schemas.BatchActionResult:
     affected_count = 0
-    for item in payload.items:
-        project = _require_project_access(db, current_user, db.get(Project, item.project_id))
-        case_type = item.case_type.upper()
-        if case_type == "API":
-            case = APICase(
-                project_id=project.id,
-                name=item.name,
-                folder_path=item.folder_path,
-                method=(item.method or "GET").upper(),
-                path=item.path or "/",
-                priority=item.priority,
-                status=item.status,
-                review_status=item.review_status,
-                version_no=item.version_no,
-                review_note=item.review_note,
-                tags_json=item.tags_json,
-                headers_json=item.headers_json,
-                body_json=item.body_json,
-                assertions_json=item.assertions_json,
-                extractors_json=item.extractors_json,
-                steps_json=item.steps_json,
-                expected_status=item.expected_status or 200,
-                created_by=current_user.id,
-                updated_by=current_user.id,
-            )
-            db.add(case)
-            db.flush()
-            _record_case_history(db, case_type="API", case=case, action="IMPORT", changed_by=current_user.id, summary="批量导入接口用例")
-        elif case_type == "UI":
-            validated = schemas.UICaseCreate(
-                project_id=project.id,
-                name=item.name,
-                folder_path=item.folder_path,
-                target_url=item.target_url or "http://localhost",
-                priority=item.priority,
-                status=item.status,
-                review_status=item.review_status,
-                version_no=item.version_no,
-                review_note=item.review_note,
-                tags_json=item.tags_json,
-                steps_json=item.steps_json or [],
-                assertions_json=item.assertions_json,
-                expect_text=item.expect_text or "ok",
-                generation_mode=item.generation_mode,
-                execution_mode=item.execution_mode,
-                engine=item.engine,
-                self_heal_enabled=item.self_heal_enabled,
-                max_agent_steps=item.max_agent_steps,
-                allowed_origins_json=item.allowed_origins_json,
-                prohibited_actions_json=item.prohibited_actions_json,
-                ai_goal=item.ai_goal,
-                skill_name=item.skill_name,
-                skill_version=item.skill_version,
-                generation_meta_json=item.generation_meta_json,
-            ).model_dump()
-            case = UICase(
-                **validated,
-                created_by=current_user.id,
-                updated_by=current_user.id,
-            )
-            db.add(case)
-            db.flush()
-            _record_case_history(db, case_type="UI", case=case, action="IMPORT", changed_by=current_user.id, summary="批量导入 UI 用例")
-        else:
-            case = PerformanceCase(
-                project_id=project.id,
-                name=item.name,
-                folder_path=item.folder_path,
-                method=(item.method or "GET").upper(),
-                path=item.path or "/",
-                priority=item.priority,
-                status=item.status,
-                review_status=item.review_status,
-                version_no=item.version_no,
-                review_note=item.review_note,
-                tags_json=item.tags_json,
-                headers_json=item.headers_json,
-                body_json=item.body_json,
-                expected_status=item.expected_status or 200,
-                concurrency=item.concurrency or 5,
-                total_requests=item.total_requests or 20,
-                max_avg_response_ms=item.max_avg_response_ms,
-                max_p95_response_ms=item.max_p95_response_ms,
-                max_error_rate=item.max_error_rate,
-                created_by=current_user.id,
-                updated_by=current_user.id,
-            )
-            db.add(case)
-            db.flush()
-            _record_case_history(db, case_type="PERF", case=case, action="IMPORT", changed_by=current_user.id, summary="批量导入性能用例")
-        affected_count += 1
+    for index, item in enumerate(payload.items, start=1):
+        # 整批事务内逐条定位失败原因：任何一条失败都回滚整批，
+        # 并在错误信息中标明条目序号与名称，避免“整批失败但不知道坏在哪一条”。
+        try:
+            project = _require_project_access(db, current_user, db.get(Project, item.project_id))
+            case_type = item.case_type.upper()
+            if case_type == "API":
+                case = APICase(
+                    project_id=project.id,
+                    name=item.name,
+                    folder_path=item.folder_path,
+                    method=(item.method or "GET").upper(),
+                    path=item.path or "/",
+                    priority=item.priority,
+                    status=item.status,
+                    review_status="DRAFT",
+                    version_no=item.version_no,
+                    review_note=None,
+                    tags_json=item.tags_json,
+                    headers_json=item.headers_json,
+                    body_json=item.body_json,
+                    assertions_json=item.assertions_json,
+                    extractors_json=item.extractors_json,
+                    steps_json=item.steps_json,
+                    expected_status=item.expected_status or 200,
+                    created_by=current_user.id,
+                    updated_by=current_user.id,
+                )
+                db.add(case)
+                db.flush()
+                _record_case_history(db, case_type="API", case=case, action="IMPORT", changed_by=current_user.id, summary="批量导入接口用例")
+            elif case_type == "UI":
+                validated = schemas.UICaseCreate(
+                    project_id=project.id,
+                    name=item.name,
+                    folder_path=item.folder_path,
+                    target_url=item.target_url or "http://localhost",
+                    priority=item.priority,
+                    status=item.status,
+                    review_status="DRAFT",
+                    version_no=item.version_no,
+                    review_note=None,
+                    tags_json=item.tags_json,
+                    steps_json=item.steps_json or [],
+                    assertions_json=item.assertions_json,
+                    expect_text=item.expect_text or "ok",
+                    generation_mode=item.generation_mode,
+                    execution_mode=item.execution_mode,
+                    engine=item.engine,
+                    self_heal_enabled=item.self_heal_enabled,
+                    max_agent_steps=item.max_agent_steps,
+                    allowed_origins_json=item.allowed_origins_json,
+                    prohibited_actions_json=item.prohibited_actions_json,
+                    ai_goal=item.ai_goal,
+                    skill_name=item.skill_name,
+                    skill_version=item.skill_version,
+                    generation_meta_json=item.generation_meta_json,
+                ).model_dump()
+                case = UICase(
+                    **validated,
+                    created_by=current_user.id,
+                    updated_by=current_user.id,
+                )
+                db.add(case)
+                db.flush()
+                _record_case_history(db, case_type="UI", case=case, action="IMPORT", changed_by=current_user.id, summary="批量导入 UI 用例")
+            else:
+                case = PerformanceCase(
+                    project_id=project.id,
+                    name=item.name,
+                    folder_path=item.folder_path,
+                    method=(item.method or "GET").upper(),
+                    path=item.path or "/",
+                    priority=item.priority,
+                    status=item.status,
+                    review_status="DRAFT",
+                    version_no=item.version_no,
+                    review_note=None,
+                    tags_json=item.tags_json,
+                    headers_json=item.headers_json,
+                    body_json=item.body_json,
+                    expected_status=item.expected_status or 200,
+                    concurrency=item.concurrency or 5,
+                    total_requests=item.total_requests or 20,
+                    max_avg_response_ms=item.max_avg_response_ms,
+                    max_p95_response_ms=item.max_p95_response_ms,
+                    max_error_rate=item.max_error_rate,
+                    created_by=current_user.id,
+                    updated_by=current_user.id,
+                )
+                db.add(case)
+                db.flush()
+                _record_case_history(db, case_type="PERF", case=case, action="IMPORT", changed_by=current_user.id, summary="批量导入性能用例")
+            affected_count += 1
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail=f"导入失败：第 {index} 条（{item.case_type} · {item.name}）：{exc}",
+            ) from exc
 
     db.commit()
     return schemas.BatchActionResult(success=True, affected_count=affected_count, message=f"已导入 {affected_count} 条用例")
@@ -2153,6 +2644,12 @@ def create_case_generation_job(
         "model_config_id": model_config.id,
         "openai_model": model_config.model,
         "openai_base_url": _normalize_model_base_url(model_config.model, model_config.base_url, model_config.api_key),
+        "model_config_snapshot": {
+            "provider": model_config.provider,
+            "model": model_config.model,
+            "base_url": _normalize_model_base_url(model_config.model, model_config.base_url, model_config.api_key),
+            "model_config_id": model_config.id,
+        },
     }
     job = CaseGenerationJob(
         workspace_id=project.workspace_id,
@@ -2255,6 +2752,12 @@ def rerun_case_generation_job_api(
     payload["model_config_id"] = model_config.id
     payload["openai_model"] = model_config.model
     payload["openai_base_url"] = _normalize_model_base_url(model_config.model, model_config.base_url, model_config.api_key)
+    payload["model_config_snapshot"] = {
+        "provider": model_config.provider,
+        "model": model_config.model,
+        "base_url": payload["openai_base_url"],
+        "model_config_id": model_config.id,
+    }
     job.input_payload_json = payload
     db.commit()
     db.refresh(job)
@@ -2461,6 +2964,13 @@ def create_case_generation_v2_job(
         db.refresh(model_config)
     if model_config is None or not model_config.api_key:
         raise HTTPException(status_code=400, detail="请先配置该工作空间的模型连接信息")
+    effective_model = (payload.openai_model or model_config.model or "").strip()
+    try:
+        effective_base_url, effective_model = validate_model_connection_config(
+            effective_model, payload.openai_base_url or model_config.base_url, model_config.api_key
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     input_payload = sanitize_case_generation_payload(payload.model_dump()) | {
         "source_url": source_url,
         "markdown_text": markdown_text,
@@ -2468,8 +2978,15 @@ def create_case_generation_v2_job(
         "pipeline": "case-generation-v2",
         "pipeline_mode": payload.pipeline_mode or "lite",
         "model_config_id": model_config.id,
-        "openai_model": model_config.model,
-        "openai_base_url": _normalize_model_base_url(model_config.model, model_config.base_url, model_config.api_key),
+        "model_provider": payload.model_provider or model_config.provider,
+        "openai_model": effective_model,
+        "openai_base_url": effective_base_url,
+        "model_config_snapshot": {
+            "provider": payload.model_provider or model_config.provider,
+            "model": effective_model,
+            "base_url": effective_base_url,
+            "model_config_id": model_config.id,
+        },
     }
     job = CaseGenerationV2Job(
         workspace_id=project.workspace_id,
@@ -2538,6 +3055,7 @@ def get_case_generation_v2_job(
         job=_serialize_case_generation_v2_job(job),
         artifacts=[_serialize_case_generation_v2_artifact(item, include_content=include_content) for item in artifacts],
         attempts=[schemas.CaseGenerationV2AttemptRead.model_validate(item) for item in attempts],
+        recovery_actions=_case_generation_v2_recovery_actions(db, job, current_user),
     )
 
 
@@ -2659,6 +3177,7 @@ def rerun_case_generation_v2_job_api(
     if job.status in {"PENDING", "RUNNING"}:
         return _serialize_case_generation_v2_job(job)
     previous_progress = dict(job.progress_json or {})
+    parent_attempt_id = _case_generation_v2_parent_attempt_id(db, job)
     failed_stage = next(
         (
             str(stage.get("key") or "").strip()
@@ -2672,10 +3191,17 @@ def rerun_case_generation_v2_job_api(
         normalized_pipeline_mode = _normalize_pipeline_mode(payload.get("pipeline_mode"))
     except ValueError:
         normalized_pipeline_mode = "lite"
+    parent_artifact_filter = (
+        CaseGenerationV2Artifact.attempt_id.is_(None)
+        if parent_attempt_id is None
+        else CaseGenerationV2Artifact.attempt_id == parent_attempt_id
+    )
     available_artifact_types = set(
         db.scalars(
             select(CaseGenerationV2Artifact.artifact_type).where(
-                CaseGenerationV2Artifact.job_id == job.id
+                CaseGenerationV2Artifact.job_id == job.id,
+                parent_artifact_filter,
+                CaseGenerationV2Artifact.expired_at.is_(None),
             )
         ).all()
     )
@@ -2683,7 +3209,9 @@ def rerun_case_generation_v2_job_api(
         select(CaseGenerationV2Artifact)
         .where(
             CaseGenerationV2Artifact.job_id == job.id,
+            parent_artifact_filter,
             CaseGenerationV2Artifact.artifact_type == "testcase_package",
+            CaseGenerationV2Artifact.expired_at.is_(None),
         )
         .order_by(CaseGenerationV2Artifact.id.desc())
     )
@@ -2730,12 +3258,23 @@ def rerun_case_generation_v2_job_api(
     payload["model_config_id"] = model_config.id
     payload["openai_model"] = model_config.model
     payload["openai_base_url"] = _normalize_model_base_url(model_config.model, model_config.base_url, model_config.api_key)
+    payload["model_config_snapshot"] = {
+        "provider": model_config.provider,
+        "model": model_config.model,
+        "base_url": payload["openai_base_url"],
+        "model_config_id": model_config.id,
+    }
     job.input_payload_json = payload
     db.commit()
     db.refresh(job)
     attempt = create_attempt(db, job, pipeline_version="v2")
     if resume_from_testcase_gate:
-        _inherit_case_generation_v2_artifacts(db, job_id=job.id, attempt_id=attempt.id)
+        _inherit_case_generation_v2_artifacts(
+            db,
+            job_id=job.id,
+            attempt_id=attempt.id,
+            parent_attempt_id=parent_attempt_id,
+        )
     job.summary = "V2 任务将复用已有基线，从用例门禁继续" if resume_from_testcase_gate else "V2 任务重新提交，等待生成"
     attempt.summary = job.summary
     if resume_from_testcase_gate:
@@ -2836,11 +3375,19 @@ def rerun_case_generation_v2_source_shard_api(
         raise HTTPException(status_code=400, detail="只有可信模式任务支持 source shard 重跑")
     if job.status in {"PENDING", "RUNNING"}:
         raise HTTPException(status_code=400, detail="任务正在执行中，不能重跑单个 source shard")
+    parent_attempt_id = _case_generation_v2_parent_attempt_id(db, job)
+    parent_artifact_filter = (
+        CaseGenerationV2Artifact.attempt_id.is_(None)
+        if parent_attempt_id is None
+        else CaseGenerationV2Artifact.attempt_id == parent_attempt_id
+    )
     artifact = db.scalar(
         select(CaseGenerationV2Artifact).where(
             CaseGenerationV2Artifact.job_id == job.id,
+            parent_artifact_filter,
             CaseGenerationV2Artifact.artifact_type == "testcase_package",
-        )
+            CaseGenerationV2Artifact.expired_at.is_(None),
+        ).order_by(CaseGenerationV2Artifact.id.desc()).limit(1)
     )
     if artifact is None or not isinstance(artifact.content_json, dict):
         raise HTTPException(status_code=400, detail="缺少 testcase_package，无法重跑 source shard")
@@ -2876,7 +3423,12 @@ def rerun_case_generation_v2_source_shard_api(
         kind="source_shard",
         source_id=source_id,
     )
-    _inherit_case_generation_v2_artifacts(db, job_id=job.id, attempt_id=attempt.id)
+    _inherit_case_generation_v2_artifacts(
+        db,
+        job_id=job.id,
+        attempt_id=attempt.id,
+        parent_attempt_id=parent_attempt_id,
+    )
     job.summary = f"{source_id} source shard 重跑已提交"
     attempt.summary = job.summary
     db.commit()
@@ -2912,6 +3464,7 @@ def rerun_case_generation_v2_source_shard_api(
 def download_case_generation_v2_artifact(
     job_id: int,
     artifact_id: int,
+    revision: str | None = Query(default=None, min_length=64, max_length=64),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -2924,12 +3477,25 @@ def download_case_generation_v2_artifact(
         raise HTTPException(status_code=404, detail="V2 生成产物不存在")
     if not artifact.file_path or not os.path.exists(artifact.file_path):
         raise HTTPException(status_code=404, detail="V2 生成产物文件不存在")
+    try:
+        artifact_bytes = Path(artifact.file_path).read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="V2 生成产物文件无法读取") from exc
+    file_name = artifact.file_name or os.path.basename(artifact.file_path)
+    file_revision = revision_from_bytes(file_name, artifact_bytes)
+    current_revision = artifact.revision or artifact_revision(
+        content_json=artifact.content_json,
+        file_name=file_name,
+        file_path=artifact.file_path,
+    )
+    if revision and (revision != current_revision or revision != file_revision):
+        raise HTTPException(status_code=409, detail="产物内容已更新，请刷新详情后重新下载")
 
-    return FileResponse(
-        path=artifact.file_path,
+    return Response(
+        content=artifact_bytes,
         media_type=_case_generation_artifact_media_type(artifact.artifact_type),
-        filename=artifact.file_name or os.path.basename(artifact.file_path),
         headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(file_name)}",
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
@@ -2944,6 +3510,7 @@ def download_case_generation_v2_artifact(
 def get_case_generation_v2_artifact_content(
     job_id: int,
     artifact_id: int,
+    revision: str | None = Query(default=None, min_length=64, max_length=64),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> schemas.CaseGenerationV2ArtifactRead:
@@ -2954,7 +3521,260 @@ def get_case_generation_v2_artifact_content(
     artifact = db.get(CaseGenerationV2Artifact, artifact_id)
     if artifact is None or artifact.job_id != job.id:
         raise HTTPException(status_code=404, detail="V2 生成产物不存在")
+    current_revision = artifact.revision or artifact_revision(
+        content_json=artifact.content_json,
+        file_name=artifact.file_name,
+        file_path=artifact.file_path,
+    )
+    if revision and revision != current_revision:
+        raise HTTPException(status_code=409, detail="产物内容已更新，请刷新详情后重新加载")
     return _serialize_case_generation_v2_artifact(artifact, include_content=True)
+
+
+def _import_generated_artifacts_to_project(
+    db: Session,
+    *,
+    project: Project,
+    current_user: User,
+    testcase_package: dict | None,
+    function_points: dict | list | None,
+    payload: schemas.CaseGenerationImportRequest,
+) -> schemas.BatchActionResult:
+    folder_base = (payload.folder_path or "/AI生成").strip()
+    if not folder_base.startswith("/"):
+        folder_base = "/" + folder_base
+    import_type = (payload.import_type or "AUTO").upper()
+    created_count = 0
+
+    if import_type == "REQUIREMENT":
+        fp_items = []
+        if isinstance(function_points, dict):
+            fp_items = function_points.get("function_points") or function_points.get("items") or []
+        elif isinstance(function_points, list):
+            fp_items = function_points
+        selected = set(payload.selected_indices) if payload.selected_indices is not None else None
+        for idx, fp in enumerate(fp_items):
+            if selected is not None and idx not in selected:
+                continue
+            if not isinstance(fp, dict):
+                continue
+            title = str(fp.get("title") or fp.get("name") or fp.get("point_name") or f"AI提取功能点-{idx + 1}")[:200]
+            desc = str(fp.get("description") or fp.get("summary") or fp.get("rules") or "")
+            req = Requirement(
+                project_id=project.id,
+                title=title,
+                description=desc or None,
+                status="PLANNING",
+                priority=str(fp.get("priority") or "P1") if str(fp.get("priority") or "P1") in {"P0", "P1", "P2", "P3"} else "P1",
+                type="FEATURE",
+                folder_path=folder_base,
+                created_by=current_user.id,
+                updated_by=current_user.id,
+                reporter_id=current_user.id,
+            )
+            db.add(req)
+            created_count += 1
+        db.commit()
+        return schemas.BatchActionResult(
+            success=True,
+            affected_count=created_count,
+            message=f"已成功导入 {created_count} 条需求功能点至需求池",
+        )
+
+    raw_cases: list[dict] = []
+    if isinstance(testcase_package, dict):
+        if isinstance(testcase_package.get("testcases"), list):
+            raw_cases.extend(testcase_package["testcases"])
+        elif isinstance(testcase_package.get("cases"), list):
+            raw_cases.extend(testcase_package["cases"])
+        if isinstance(testcase_package.get("testcase_shards"), list):
+            for shard in testcase_package["testcase_shards"]:
+                if isinstance(shard, dict) and isinstance(shard.get("testcases"), list):
+                    raw_cases.extend(shard["testcases"])
+        if not raw_cases and isinstance(testcase_package.get("modules"), list):
+            for mod in testcase_package["modules"]:
+                if isinstance(mod, dict) and isinstance(mod.get("testcases"), list):
+                    for tc in mod["testcases"]:
+                        if isinstance(tc, dict):
+                            raw_cases.append({**tc, "module": tc.get("module") or mod.get("name")})
+
+    if not raw_cases:
+        raise HTTPException(status_code=400, detail="当前生成任务未包含可导入的结构化用例数据")
+
+    selected = set(payload.selected_indices) if payload.selected_indices is not None else None
+    target_base_url = (payload.base_url or project.base_url or "http://testserver").strip()
+
+    for idx, tc in enumerate(raw_cases):
+        if selected is not None and idx not in selected:
+            continue
+        if not isinstance(tc, dict):
+            continue
+        title = str(tc.get("title") or tc.get("name") or tc.get("case_title") or f"AI生成用例-{idx + 1}")[:120]
+        module_name = str(tc.get("module") or tc.get("category") or tc.get("feature") or "").strip().strip("/")
+        folder = f"{folder_base.rstrip('/')}/{module_name}" if module_name else folder_base
+        priority_raw = str(tc.get("priority") or "P2").upper()
+        priority = priority_raw if priority_raw in {"P0", "P1", "P2", "P3"} else "P2"
+        steps_raw = tc.get("steps") or tc.get("test_steps") or []
+        expected_raw = tc.get("expected_result") or tc.get("expected") or tc.get("expectation") or "验证通过"
+        if isinstance(expected_raw, list):
+            expected_text = "；".join(str(x) for x in expected_raw if x)[:255] or "验证通过"
+        else:
+            expected_text = str(expected_raw)[:255] or "验证通过"
+
+        effective_type = import_type
+        if effective_type == "AUTO":
+            text_blob = f"{title} {module_name} {json.dumps(steps_raw, ensure_ascii=False)}".lower()
+            if any(k in text_blob for k in ("api", "接口", "http", "post ", "get ", "put ", "delete ", "/api/")):
+                effective_type = "API"
+            else:
+                effective_type = "UI"
+
+        if effective_type == "API":
+            method = str(tc.get("method") or "GET").upper()
+            if method not in {"GET", "POST", "PUT", "DELETE", "PATCH"}:
+                method = "GET"
+            path = str(tc.get("path") or tc.get("url") or "/api/v1/system/health")
+            if not path.startswith("/") and not path.startswith("http"):
+                path = "/" + path
+            case = APICase(
+                project_id=project.id,
+                name=title,
+                folder_path=folder[:255],
+                method=method,
+                path=path,
+                priority=priority,
+                status="ACTIVE",
+                review_status="DRAFT",
+                version_no="1.0.0",
+                tags_json=["AI生成"],
+                expected_status=200,
+                assertions_json=[{"type": "status_code", "operator": "eq", "expected": 200}],
+                created_by=current_user.id,
+                updated_by=current_user.id,
+            )
+            db.add(case)
+            db.flush()
+            _record_case_history(db, case_type="API", case=case, action="IMPORT", changed_by=current_user.id, summary="从 AI 用例生成任务导入")
+        else:
+            ui_steps = [{"action": "goto", "value": target_url if (target_url := str(tc.get("target_url") or target_base_url)).startswith("http") else target_base_url, "name": "打开目标页面"}]
+            if isinstance(steps_raw, list):
+                for s_idx, step_item in enumerate(steps_raw[:15]):
+                    step_desc = step_item.get("action") or step_item.get("step") or step_item.get("description") if isinstance(step_item, dict) else str(step_item)
+                    step_desc = str(step_desc or f"步骤 {s_idx + 1}").strip()
+                    if step_desc:
+                        ui_steps.append({"action": "wait", "duration_ms": 500, "name": step_desc[:120]})
+            case = UICase(
+                project_id=project.id,
+                name=title,
+                folder_path=folder[:255],
+                target_url=target_base_url,
+                priority=priority,
+                status="ACTIVE",
+                review_status="DRAFT",
+                version_no="1.0.0",
+                tags_json=["AI生成"],
+                steps_json=ui_steps,
+                expect_text=expected_text,
+                generation_mode="ai_skill",
+                execution_mode="adaptive",
+                engine="native",
+                ai_goal=f"{title}：{expected_text}",
+                created_by=current_user.id,
+                updated_by=current_user.id,
+            )
+            db.add(case)
+            db.flush()
+            _record_case_history(db, case_type="UI", case=case, action="IMPORT", changed_by=current_user.id, summary="从 AI 用例生成任务导入")
+        created_count += 1
+
+    db.commit()
+    return schemas.BatchActionResult(
+        success=True,
+        affected_count=created_count,
+        message=f"已成功将 {created_count} 条 AI 生成用例导入项目资产库",
+    )
+
+
+@protected_router.post(
+    "/case-generation/jobs/{job_id}/import-cases",
+    response_model=schemas.BatchActionResult,
+    dependencies=[Depends(require_tester)],
+)
+def import_case_generation_job_to_cases(
+    job_id: int,
+    payload: schemas.CaseGenerationImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.BatchActionResult:
+    job = db.get(CaseGenerationJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="生成任务不存在")
+    project = _require_project_access(db, current_user, db.get(Project, job.project_id))
+    artifacts = list(
+        db.scalars(
+            select(CaseGenerationArtifact)
+            .where(CaseGenerationArtifact.job_id == job.id)
+            .order_by(CaseGenerationArtifact.id.desc())
+        ).all()
+    )
+    tc_pkg = next((a.content_json for a in artifacts if a.artifact_type == "testcase_package" and a.content_json), None)
+    fp_pkg = next((a.content_json for a in artifacts if a.artifact_type == "function_points" and a.content_json), None)
+    return _import_generated_artifacts_to_project(
+        db,
+        project=project,
+        current_user=current_user,
+        testcase_package=tc_pkg if isinstance(tc_pkg, dict) else None,
+        function_points=fp_pkg,
+        payload=payload,
+    )
+
+
+@protected_router.post(
+    "/case-generation-v2/jobs/{job_id}/import-cases",
+    response_model=schemas.BatchActionResult,
+    dependencies=[Depends(require_tester)],
+)
+def import_case_generation_v2_job_to_cases(
+    job_id: int,
+    payload: schemas.CaseGenerationImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.BatchActionResult:
+    job = db.get(CaseGenerationV2Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="V2 生成任务不存在")
+    project = _require_project_access(db, current_user, db.get(Project, job.project_id))
+    artifacts = list(
+        db.scalars(
+            select(CaseGenerationV2Artifact)
+            .where(CaseGenerationV2Artifact.job_id == job.id)
+            .order_by(CaseGenerationV2Artifact.id.desc())
+        ).all()
+    )
+    tc_pkg = next(
+        (
+            a.content_json
+            for a in artifacts
+            if a.artifact_type in {"testcase_package", "testcase_base_package"} and a.content_json
+        ),
+        None,
+    )
+    fp_pkg = next(
+        (
+            a.content_json
+            for a in artifacts
+            if a.artifact_type in {"function_points", "requirement_handoff"} and a.content_json
+        ),
+        None,
+    )
+    return _import_generated_artifacts_to_project(
+        db,
+        project=project,
+        current_user=current_user,
+        testcase_package=tc_pkg if isinstance(tc_pkg, dict) else None,
+        function_points=fp_pkg,
+        payload=payload,
+    )
 
 
 @protected_router.get("/cases/{case_type}/{case_id}/history", response_model=list[schemas.CaseHistoryRead])
@@ -3053,22 +3873,48 @@ def batch_review_cases(
 ) -> schemas.BatchActionResult:
     affected_count = 0
     normalized_review_status = payload.review_status.strip().upper()
+    if normalized_review_status not in {"IN_REVIEW", "APPROVED", "REJECTED"}:
+        raise HTTPException(status_code=400, detail="批量评审仅支持提交评审(IN_REVIEW)、通过(APPROVED)或拒绝(REJECTED)")
+    cases = []
+    seen = set()
     for item in payload.items:
+        key = (item.case_type.upper(), item.case_id)
+        if key in seen:
+            raise HTTPException(status_code=400, detail="评审用例存在重复")
+        seen.add(key)
         case = _load_case_entity(db, item.case_type, item.case_id)
         if case is None:
-            continue
-        _require_project_access(db, current_user, db.get(Project, case.project_id))
+            raise HTTPException(status_code=404, detail="部分评审用例不存在")
+        if normalized_review_status == "IN_REVIEW":
+            _require_project_access(db, current_user, db.get(Project, case.project_id))
+            if (case.review_status or "DRAFT").upper() not in {"DRAFT", "REJECTED"}:
+                raise HTTPException(status_code=400, detail="仅草稿或已拒绝状态的用例可批量提交评审")
+        else:
+            _require_project_member(db, current_user, db.get(Project, case.project_id))
+            if case.created_by is not None and case.created_by == current_user.id:
+                raise HTTPException(status_code=403, detail="不能评审自己创建的用例")
+            if (case.review_status or "DRAFT").upper() != "IN_REVIEW":
+                raise HTTPException(status_code=400, detail="部分用例不在评审中")
+        cases.append((item.case_type, case))
+    for case_type, case in cases:
         case.review_status = normalized_review_status
-        case.review_note = payload.review_note
+        if normalized_review_status == "IN_REVIEW":
+            case.submitted_review_at = utc_now_naive()
+            case.reviewed_by = None
+            case.reviewed_at = None
+        else:
+            case.review_note = payload.review_note
+            case.reviewed_by = current_user.id
+            case.reviewed_at = utc_now_naive()
         if hasattr(case, "updated_by"):
             case.updated_by = current_user.id
         _record_case_history(
             db,
-            case_type=item.case_type,
+            case_type=case_type,
             case=case,
             action="BATCH_REVIEW",
             changed_by=current_user.id,
-            summary=f"批量评审为 {normalized_review_status}",
+            summary="批量提交评审" if normalized_review_status == "IN_REVIEW" else f"批量评审为 {normalized_review_status}",
         )
         affected_count += 1
 
@@ -3076,7 +3922,7 @@ def batch_review_cases(
     return schemas.BatchActionResult(
         success=True,
         affected_count=affected_count,
-        message=f"已评审 {affected_count} 条用例",
+        message=f"已提交 {affected_count} 条用例评审" if normalized_review_status == "IN_REVIEW" else f"已评审 {affected_count} 条用例",
     )
 
 
@@ -3133,7 +3979,7 @@ def create_api_case(
 ) -> APICase:
     _require_project_access(db, current_user, db.get(Project, payload.project_id))
 
-    data = payload.model_dump()
+    data = _initial_case_data(payload)
     data["method"] = data["method"].upper()
     api_case = APICase(**data, created_by=current_user.id, updated_by=current_user.id)
     db.add(api_case)
@@ -3164,7 +4010,139 @@ def debug_api_case(
         environment = db.get(Environment, payload.environment_id)
         if environment is None or environment.project_id != project.id:
             raise HTTPException(status_code=404, detail="执行环境不存在")
-    variables = build_variable_context(project, environment)
+
+    dataset_applied: dict = {}
+    if isinstance(payload.datasets_json, list) and payload.datasets_json:
+        first_row = payload.datasets_json[0]
+        if isinstance(first_row, dict):
+            if "data" in first_row and isinstance(first_row.get("data"), dict):
+                dataset_applied = {k: v for k, v in first_row["data"].items()}
+            else:
+                dataset_applied = {k: v for k, v in first_row.items() if k != "__name__"}
+
+    variables = build_variable_context(project, environment, dataset_applied or None)
+
+    def _send_debug_http(prepared_req):
+        parsed_url = urlparse(prepared_req.url)
+        req_started = time.perf_counter()
+        if parsed_url.hostname == "testserver":
+            from app.main import app
+            from fastapi.testclient import TestClient
+
+            with TestClient(app, base_url="http://testserver") as client:
+                resp = client.request(
+                    prepared_req.method, parsed_url.path, headers=prepared_req.headers, **prepared_req.kwargs()
+                )
+        else:
+            with httpx.Client(timeout=payload.timeout_seconds) as client:
+                resp = client.request(
+                    prepared_req.method, prepared_req.url, headers=prepared_req.headers, **prepared_req.kwargs()
+                )
+        dur = int((time.perf_counter() - req_started) * 1000)
+        return resp, dur
+
+    steps = [s for s in (payload.steps_json or []) if isinstance(s, dict)]
+    if steps:
+        step_results: list[dict] = []
+        extracted_all: dict = {}
+        all_assertions: list[dict] = []
+        all_extractors: list[dict] = []
+        total_duration = 0
+        last_req_dict = {}
+        last_resp_dict = {}
+        all_passed = True
+
+        for idx, step in enumerate(steps):
+            step_name = str(step.get("name") or f"步骤 {idx + 1}")
+            try:
+                prepared = prepare_http_request(
+                    method=str(step.get("method") or "GET"),
+                    project=project,
+                    environment=environment,
+                    case_path=str(step.get("path") or "/"),
+                    case_headers=step.get("headers_json"),
+                    case_body=step.get("body_json"),
+                    variables=variables,
+                )
+            except MissingTemplateVariableError as exc:
+                raise HTTPException(status_code=400, detail=f"{step_name}：{exc}") from exc
+
+            try:
+                response, dur_ms = _send_debug_http(prepared)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"{step_name} 调试请求失败：{exc}") from exc
+
+            total_duration += dur_ms
+            response_headers = dict(response.headers)
+            response_text = response.text
+            try:
+                response_body = response.json()
+                body_type = "json"
+            except Exception:
+                response_body = response_text[:5000]
+                body_type = "text"
+
+            facts = ResponseFacts(
+                status_code=response.status_code,
+                headers=response_headers,
+                body_text=response_text or "",
+                body_json=response_body if body_type == "json" else None,
+                duration_ms=dur_ms,
+            )
+            exp_status = int(step.get("expected_status") or 200)
+            outcome = evaluate_assertions(step.get("assertions"), facts, expected_status=exp_status)
+            extracted, extractor_results = run_extractors(step.get("extractors"), facts)
+            variables.update(extracted)
+            extracted_all.update({k: str(v) for k, v in extracted.items()})
+            all_assertions.extend(outcome.results)
+            all_extractors.extend(extractor_results)
+            extract_failed = any(not item.get("ok") for item in extractor_results)
+            step_ok = outcome.passed and not extract_failed
+            if not step_ok:
+                all_passed = False
+
+            last_req_dict = {
+                "method": prepared.method,
+                "url": prepared.url,
+                "headers": prepared.headers,
+                "body": prepared.body,
+            }
+            last_resp_dict = {
+                "status_code": response.status_code,
+                "headers": response_headers,
+                "body": response_body,
+                "body_type": body_type,
+                "size": len(response.content),
+            }
+            step_results.append(
+                {
+                    "index": idx + 1,
+                    "name": step_name,
+                    "status": "SUCCESS" if step_ok else "FAILED",
+                    "duration_ms": dur_ms,
+                    "request": last_req_dict,
+                    "response": last_resp_dict,
+                    "assertion_passed": step_ok,
+                    "assertion_results": outcome.results,
+                    "extracted_variables": {k: str(v) for k, v in extracted.items()},
+                    "extractor_results": extractor_results,
+                }
+            )
+            if not step_ok:
+                break
+
+        return schemas.APICaseDebugResponse(
+            request=last_req_dict,
+            response=last_resp_dict,
+            duration_ms=total_duration,
+            assertion_passed=all_passed,
+            assertion_results=all_assertions,
+            extracted_variables=extracted_all,
+            extractor_results=all_extractors,
+            step_results=step_results,
+            dataset_applied={k: str(v) for k, v in dataset_applied.items()},
+        )
+
     try:
         prepared = prepare_http_request(
             method=payload.method,
@@ -3178,28 +4156,13 @@ def debug_api_case(
     except MissingTemplateVariableError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    started_at = time.perf_counter()
-
     try:
-        parsed_url = urlparse(prepared.url)
-        if parsed_url.hostname == "testserver":
-            from app.main import app
-
-            from fastapi.testclient import TestClient
-
-            with TestClient(app, base_url="http://testserver") as client:
-                response = client.request(prepared.method, parsed_url.path, headers=prepared.headers, **prepared.kwargs())
-            response_headers = dict(response.headers)
-            response_text = response.text
-        else:
-            with httpx.Client(timeout=payload.timeout_seconds) as client:
-                response = client.request(prepared.method, prepared.url, headers=prepared.headers, **prepared.kwargs())
-            response_headers = dict(response.headers)
-            response_text = response.text
+        response, duration_ms = _send_debug_http(prepared)
+        response_headers = dict(response.headers)
+        response_text = response.text
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"调试请求失败：{exc}") from exc
 
-    duration_ms = int((time.perf_counter() - started_at) * 1000)
     try:
         response_body = response.json()
         body_type = "json"
@@ -3236,6 +4199,8 @@ def debug_api_case(
         assertion_results=outcome.results,
         extracted_variables={key: str(value) for key, value in extracted.items()},
         extractor_results=extractor_results,
+        step_results=[],
+        dataset_applied={k: str(v) for k, v in dataset_applied.items()},
     )
 
 
@@ -3471,6 +4436,7 @@ def update_api_case(
     if api_case is None:
         raise HTTPException(status_code=404, detail="接口用例不存在")
     _require_project_access(db, current_user, db.get(Project, api_case.project_id))
+    _reject_case_project_reassignment(api_case.project_id, payload.project_id)
     original_review_status = (api_case.review_status or "DRAFT").upper()
     original_signature = (
         api_case.name,
@@ -3486,8 +4452,11 @@ def update_api_case(
         api_case.assertions_json,
         api_case.extractors_json,
         api_case.steps_json,
+        api_case.datasets_json,
+        api_case.mock_enabled,
+        api_case.mock_config_json,
     )
-    data = payload.model_dump(exclude={"review_status", "review_note"})
+    data = payload.model_dump(exclude={"project_id", "review_status", "review_note"})
     data["method"] = data["method"].upper()
     for key, value in data.items():
         setattr(api_case, key, value)
@@ -3505,6 +4474,9 @@ def update_api_case(
         api_case.assertions_json,
         api_case.extractors_json,
         api_case.steps_json,
+        api_case.datasets_json,
+        api_case.mock_enabled,
+        api_case.mock_config_json,
     )
     if new_signature != original_signature:
         api_case.version_no = _bump_version(api_case.version_no)
@@ -3576,9 +4548,9 @@ def decide_api_case_review(
     api_case = db.get(APICase, case_id)
     if api_case is None:
         raise HTTPException(status_code=404, detail="接口用例不存在")
-    _require_project_access(db, current_user, db.get(Project, api_case.project_id))
     if api_case.created_by is not None and api_case.created_by == current_user.id:
         raise HTTPException(status_code=403, detail="不能评审自己创建的用例")
+    _require_project_member(db, current_user, db.get(Project, api_case.project_id))
     _ensure_case_defaults(api_case)
     current_status = (api_case.review_status or "DRAFT").upper()
     if current_status != "IN_REVIEW":
@@ -3615,7 +4587,8 @@ def list_ui_cases(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> schemas.UICasePage | list[UICase]:
-    stmt = select(UICase).order_by(UICase.id.asc())
+    # UI 用例列表按最新创建顺序展示，避免新建用例落到后续分页而不可见。
+    stmt = select(UICase).order_by(UICase.id.desc())
     if project_id:
         _require_project_access(db, current_user, db.get(Project, project_id))
         stmt = stmt.where(UICase.project_id == project_id)
@@ -3931,6 +4904,7 @@ def update_ui_case(
     if ui_case is None:
         raise HTTPException(status_code=404, detail="UI 用例不存在")
     _require_project_access(db, current_user, db.get(Project, ui_case.project_id))
+    _reject_case_project_reassignment(ui_case.project_id, payload.project_id)
     original_review_status = (ui_case.review_status or "DRAFT").upper()
     original_signature = (
         ui_case.name,
@@ -3954,7 +4928,7 @@ def update_ui_case(
         ui_case.skill_version,
         ui_case.generation_meta_json,
     )
-    for key, value in payload.model_dump(exclude={"review_status", "review_note"}).items():
+    for key, value in payload.model_dump(exclude={"project_id", "review_status", "review_note"}).items():
         setattr(ui_case, key, value)
     new_signature = (
         ui_case.name,
@@ -4035,9 +5009,9 @@ def decide_ui_case_review(
     ui_case = db.get(UICase, case_id)
     if ui_case is None:
         raise HTTPException(status_code=404, detail="UI 用例不存在")
-    _require_project_access(db, current_user, db.get(Project, ui_case.project_id))
     if ui_case.created_by is not None and ui_case.created_by == current_user.id:
         raise HTTPException(status_code=403, detail="不能评审自己创建的用例")
+    _require_project_member(db, current_user, db.get(Project, ui_case.project_id))
     _ensure_case_defaults(ui_case)
     current_status = (ui_case.review_status or "DRAFT").upper()
     if current_status != "IN_REVIEW":
@@ -4361,7 +5335,7 @@ def create_performance_case(
     current_user: User = Depends(get_current_user),
 ) -> PerformanceCase:
     _require_project_access(db, current_user, db.get(Project, payload.project_id))
-    perf_case = PerformanceCase(**payload.model_dump(), created_by=current_user.id, updated_by=current_user.id)
+    perf_case = PerformanceCase(**_initial_case_data(payload), created_by=current_user.id, updated_by=current_user.id)
     db.add(perf_case)
     db.commit()
     db.refresh(perf_case)
@@ -4399,6 +5373,7 @@ def update_performance_case(
     if perf_case is None:
         raise HTTPException(status_code=404, detail="性能用例不存在")
     _require_project_access(db, current_user, db.get(Project, perf_case.project_id))
+    _reject_case_project_reassignment(perf_case.project_id, payload.project_id)
     original_review_status = (perf_case.review_status or "DRAFT").upper()
     original_signature = (
         perf_case.name,
@@ -4417,7 +5392,7 @@ def update_performance_case(
         perf_case.max_p95_response_ms,
         perf_case.max_error_rate,
     )
-    data = payload.model_dump(exclude={"review_status", "review_note"})
+    data = payload.model_dump(exclude={"project_id", "review_status", "review_note"})
     data["method"] = data["method"].upper()
     for key, value in data.items():
         setattr(perf_case, key, value)
@@ -4507,9 +5482,9 @@ def decide_performance_case_review(
     perf_case = db.get(PerformanceCase, case_id)
     if perf_case is None:
         raise HTTPException(status_code=404, detail="性能用例不存在")
-    _require_project_access(db, current_user, db.get(Project, perf_case.project_id))
     if perf_case.created_by is not None and perf_case.created_by == current_user.id:
         raise HTTPException(status_code=403, detail="不能评审自己创建的用例")
+    _require_project_member(db, current_user, db.get(Project, perf_case.project_id))
     _ensure_case_defaults(perf_case)
     current_status = (perf_case.review_status or "DRAFT").upper()
     if current_status != "IN_REVIEW":
@@ -4754,6 +5729,10 @@ def precheck_plan_execution(
             case = db.get(UICase, plan_case.case_id)
             if case:
                 issues.extend(_validation_issues_for_ui_case(case, variables))
+        elif plan_case.case_type == "PERF":
+            case = db.get(PerformanceCase, plan_case.case_id)
+            if case:
+                issues.extend(_validation_issues_for_performance_case(case, variables))
     return _build_execution_precheck_result(
         target_type="PLAN",
         target_id=plan.id,
@@ -4848,6 +5827,29 @@ def create_test_plan(
     return plan
 
 
+@protected_router.put(
+    "/test-plans/{plan_id}",
+    response_model=schemas.TestPlanRead,
+    dependencies=[Depends(require_tester)],
+)
+def update_test_plan(
+    plan_id: int,
+    payload: schemas.TestPlanUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TestPlan:
+    plan = db.get(TestPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="测试计划不存在")
+    _require_project_access(db, current_user, db.get(Project, plan.project_id))
+    plan.name = payload.name
+    plan.description = payload.description
+    plan.updated_by = current_user.id
+    db.commit()
+    db.refresh(plan)
+    return plan
+
+
 @protected_router.delete("/test-plans/{plan_id}", status_code=204, dependencies=[Depends(require_admin)])
 def delete_test_plan(plan_id: int, db: Session = Depends(get_db)) -> None:
     plan = db.get(TestPlan, plan_id)
@@ -4913,6 +5915,8 @@ def add_test_plan_case(
 
     if payload.case_type == "API":
         case = db.get(APICase, payload.case_id)
+    elif payload.case_type == "PERF":
+        case = db.get(PerformanceCase, payload.case_id)
     else:
         case = db.get(UICase, payload.case_id)
 
@@ -4936,6 +5940,54 @@ def add_test_plan_case(
     db.commit()
     db.refresh(plan_case)
     return plan_case
+
+
+@protected_router.post(
+    "/test-plans/{plan_id}/cases/copy-to-review",
+    response_model=schemas.TestPlanRead,
+    status_code=201,
+    dependencies=[Depends(require_tester)],
+)
+def copy_plan_cases_to_review(
+    plan_id: int,
+    payload: schemas.PlanCopyToReviewPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TestPlan:
+    source = db.get(TestPlan, plan_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="测试计划不存在")
+    _require_project_access(db, current_user, db.get(Project, source.project_id))
+    if len(set(payload.item_ids)) != len(payload.item_ids):
+        raise HTTPException(status_code=400, detail="计划用例存在重复")
+    entries = list(db.scalars(select(TestPlanCase).where(TestPlanCase.plan_id == plan_id, TestPlanCase.id.in_(payload.item_ids))).all())
+    if len(entries) != len(payload.item_ids):
+        raise HTTPException(status_code=404, detail="部分计划用例不存在或不属于来源计划")
+    by_id = {entry.id: entry for entry in entries}
+    cases = []
+    seen = set()
+    for item_id in payload.item_ids:
+        entry = by_id[item_id]
+        key = (entry.case_type.upper(), entry.case_id)
+        if key in seen:
+            raise HTTPException(status_code=400, detail="来源计划包含重复用例")
+        seen.add(key)
+        case = _load_case_entity(db, *key)
+        if case is None or case.project_id != source.project_id:
+            raise HTTPException(status_code=404, detail="部分来源用例不存在或项目不匹配")
+        _validate_plan_case_review_gate(case, current_user, True)
+        cases.append((key, case))
+    plan = TestPlan(project_id=source.project_id, name=f"{source.name[:95]}-待评审-{utc_now_naive():%Y-%m-%d}",
+                    description=f"从计划「{source.name}」复制的待评审风险用例，使用当前用例版本快照",
+                    created_by=current_user.id, updated_by=current_user.id)
+    db.add(plan)
+    db.flush()
+    for index, ((case_type, case_id), case) in enumerate(cases, start=1):
+        db.add(TestPlanCase(plan_id=plan.id, case_type=case_type, case_id=case_id, case_name=case.name,
+                            case_snapshot_json=_case_snapshot(case), order_index=index, created_by=current_user.id))
+    db.commit()
+    db.refresh(plan)
+    return plan
 
 
 @protected_router.post(
@@ -5000,14 +6052,51 @@ def add_plan_cases_batch(
 @protected_router.delete(
     "/test-plans/{plan_id}/cases/{plan_case_id}",
     status_code=204,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_tester)],
 )
-def delete_test_plan_case(plan_id: int, plan_case_id: int, db: Session = Depends(get_db)) -> None:
+def delete_test_plan_case(
+    plan_id: int,
+    plan_case_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    plan = db.get(TestPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="测试计划不存在")
+    _require_project_access(db, current_user, db.get(Project, plan.project_id))
     plan_case = db.get(TestPlanCase, plan_case_id)
     if plan_case is None or plan_case.plan_id != plan_id:
         raise HTTPException(status_code=404, detail="计划用例不存在")
     db.delete(plan_case)
     db.commit()
+
+
+@protected_router.post(
+    "/test-plans/{plan_id}/cases/batch-delete",
+    response_model=schemas.BatchActionResult,
+    dependencies=[Depends(require_tester)],
+)
+def batch_delete_test_plan_cases(
+    plan_id: int,
+    payload: schemas.TestPlanCaseBatchDeleteRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.BatchActionResult:
+    plan = db.get(TestPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="测试计划不存在")
+    _require_project_access(db, current_user, db.get(Project, plan.project_id))
+    ids = list(dict.fromkeys(payload.plan_case_ids))
+    result = db.execute(
+        delete(TestPlanCase).where(TestPlanCase.plan_id == plan_id, TestPlanCase.id.in_(ids))
+    )
+    db.commit()
+    affected = result.rowcount or 0
+    return schemas.BatchActionResult(
+        success=True,
+        affected_count=affected,
+        message=f"已从计划移除 {affected} 条用例",
+    )
 
 
 @protected_router.post(
@@ -5070,7 +6159,7 @@ def trigger_test_plan(
     plan = db.get(TestPlan, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="测试计划不存在")
-    _require_project_access(db, current_user, db.get(Project, plan.project_id))
+    _require_project_member(db, current_user, db.get(Project, plan.project_id))
 
     cases = list(
         db.scalars(
@@ -5171,7 +6260,15 @@ def get_project_notification_setting(
     )
     if setting is None:
         return schemas.NotificationSettingRead(project_id=project_id)
-    return schemas.NotificationSettingRead.model_validate(setting)
+    return schemas.NotificationSettingRead(
+        project_id=setting.project_id,
+        enabled=setting.enabled,
+        channel_type=setting.channel_type,
+        webhook_url=setting.webhook_url,
+        secret_configured=bool(setting.secret),
+        notify_on=setting.notify_on,
+        updated_at=setting.updated_at,
+    )
 
 
 def _upsert_notification_setting(
@@ -5186,7 +6283,8 @@ def _upsert_notification_setting(
     setting.enabled = payload.enabled
     setting.channel_type = payload.channel_type
     setting.webhook_url = payload.webhook_url
-    setting.secret = payload.secret
+    if payload.secret is not None and payload.secret != "":
+        setting.secret = payload.secret
     setting.notify_on = payload.notify_on
     db.commit()
     db.refresh(setting)
@@ -5205,7 +6303,16 @@ def update_project_notification_setting(
     current_user: User = Depends(get_current_user),
 ) -> ProjectNotificationSetting:
     _require_project_access(db, current_user, db.get(Project, project_id))
-    return _upsert_notification_setting(db, project_id, payload)
+    setting = _upsert_notification_setting(db, project_id, payload)
+    return schemas.NotificationSettingRead(
+        project_id=setting.project_id,
+        enabled=setting.enabled,
+        channel_type=setting.channel_type,
+        webhook_url=setting.webhook_url,
+        secret_configured=bool(setting.secret),
+        notify_on=setting.notify_on,
+        updated_at=setting.updated_at,
+    )
 
 
 @protected_router.post(
@@ -5312,7 +6419,7 @@ def _trigger_batch_run(
     project_ids = {case.project_id for case in cases}
     if len(project_ids) > 1:
         raise HTTPException(status_code=400, detail="批量执行的用例必须属于同一项目")
-    project = _require_project_access(db, current_user, db.get(Project, project_ids.pop()))
+    project = _require_project_member(db, current_user, db.get(Project, project_ids.pop()))
     inactive = [case.name for case in cases if (case.status or "ACTIVE").upper() != "ACTIVE"]
     if inactive:
         raise HTTPException(status_code=400, detail=f"以下用例未启用：{', '.join(inactive)}")
@@ -5484,7 +6591,7 @@ def _rerun_failed_batch_run(
     batch_run = db.get(UIBatchRun, batch_id)
     if batch_run is None:
         raise HTTPException(status_code=404, detail="批量执行记录不存在")
-    _require_project_access(db, current_user, db.get(Project, batch_run.project_id))
+    _require_project_member(db, current_user, db.get(Project, batch_run.project_id))
     if batch_run.status in {"PENDING", "RUNNING"}:
         raise HTTPException(status_code=400, detail="批量执行尚未结束")
     failed_runs = list(
@@ -5598,7 +6705,7 @@ def create_ui_case(
 ) -> UICase:
     _require_project_access(db, current_user, db.get(Project, payload.project_id))
 
-    ui_case = UICase(**payload.model_dump(), created_by=current_user.id, updated_by=current_user.id)
+    ui_case = UICase(**_initial_case_data(payload), created_by=current_user.id, updated_by=current_user.id)
     db.add(ui_case)
     db.commit()
     db.refresh(ui_case)
@@ -5870,7 +6977,7 @@ def rerun_execution(
     environment = db.get(Environment, run.environment_id) if run.environment_id else None
     if environment is not None and environment.project_id != run.project_id:
         raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
-    variables = environment.variables_json if environment and environment.variables_json else {}
+    variables = build_variable_context(project, environment)
     if run.case_type == "API":
         case = db.get(APICase, run.case_id)
         if case is None:
@@ -5987,7 +7094,7 @@ def trigger_api_case(
     api_case = db.get(APICase, case_id)
     if api_case is None:
         raise HTTPException(status_code=404, detail="接口用例不存在")
-    _require_project_access(db, current_user, db.get(Project, api_case.project_id))
+    _require_project_member(db, current_user, db.get(Project, api_case.project_id))
 
     environment_id = payload.environment_id if payload else None
     if environment_id is not None:
@@ -6039,7 +7146,7 @@ def trigger_ui_case(
     ui_case = db.get(UICase, case_id)
     if ui_case is None:
         raise HTTPException(status_code=404, detail="UI 用例不存在")
-    _require_project_access(db, current_user, db.get(Project, ui_case.project_id))
+    _require_project_member(db, current_user, db.get(Project, ui_case.project_id))
 
     environment_id = payload.environment_id if payload else None
     if environment_id is not None:
@@ -6091,7 +7198,7 @@ def trigger_performance_case(
     perf_case = db.get(PerformanceCase, case_id)
     if perf_case is None:
         raise HTTPException(status_code=404, detail="性能用例不存在")
-    _require_project_access(db, current_user, db.get(Project, perf_case.project_id))
+    _require_project_member(db, current_user, db.get(Project, perf_case.project_id))
 
     environment_id = payload.environment_id if payload else None
     if environment_id is not None:
@@ -6235,6 +7342,7 @@ def create_defect(
     current_user: User = Depends(get_current_user),
 ) -> DefectRecord:
     _require_project_access(db, current_user, db.get(Project, payload.project_id))
+    run = None
     if payload.run_id is not None:
         run = db.get(TestRun, payload.run_id)
         if run is None or run.project_id != payload.project_id:
@@ -6245,6 +7353,35 @@ def create_defect(
             raise HTTPException(status_code=400, detail="关联报告不存在或不属于该项目")
     defect = DefectRecord(**payload.model_dump(), created_by=current_user.id, updated_by=current_user.id)
     db.add(defect)
+    db.flush()
+
+    status_map = {"OPEN": "NEW", "FIXING": "IN_PROGRESS", "RESOLVED": "RESOLVED", "CLOSED": "CLOSED"}
+    max_order = db.scalar(select(func.max(Defect.order_index)).where(Defect.project_id == payload.project_id)) or 0.0
+    ws_defect = Defect(
+        project_id=payload.project_id,
+        title=payload.title[:200],
+        description=payload.detail,
+        severity=payload.severity if payload.severity in {"BLOCKER", "CRITICAL", "MAJOR", "MINOR", "TRIVIAL"} else "MAJOR",
+        priority="P1",
+        status=status_map.get(payload.status, "NEW"),
+        reporter_id=current_user.id,
+        created_by=current_user.id,
+        updated_by=current_user.id,
+        order_index=max_order + 1000.0,
+    )
+    db.add(ws_defect)
+    db.flush()
+    if run is not None:
+        db.add(DefectRunLink(defect_id=ws_defect.id, test_run_id=run.id))
+        if run.case_type and run.case_id:
+            db.add(
+                DefectCaseLink(
+                    defect_id=ws_defect.id,
+                    case_type=_normalize_case_type(run.case_type),
+                    case_id=run.case_id,
+                )
+            )
+
     db.commit()
     db.refresh(defect)
     return defect
@@ -6261,9 +7398,25 @@ def update_defect(
     if defect is None:
         raise HTTPException(status_code=404, detail="缺陷记录不存在")
     _require_project_access(db, current_user, db.get(Project, defect.project_id))
+    old_title = defect.title
     for key, value in payload.model_dump().items():
         setattr(defect, key, value)
     defect.updated_by = current_user.id
+
+    status_map = {"OPEN": "NEW", "FIXING": "IN_PROGRESS", "RESOLVED": "RESOLVED", "CLOSED": "CLOSED"}
+    ws_defect = db.scalar(
+        select(Defect)
+        .where(Defect.project_id == defect.project_id, Defect.title == old_title)
+        .order_by(Defect.id.desc())
+    )
+    if ws_defect is not None:
+        ws_defect.title = defect.title[:200]
+        ws_defect.description = defect.detail
+        if defect.severity in {"BLOCKER", "CRITICAL", "MAJOR", "MINOR", "TRIVIAL"}:
+            ws_defect.severity = defect.severity
+        ws_defect.status = status_map.get(defect.status, ws_defect.status)
+        ws_defect.updated_by = current_user.id
+
     db.commit()
     db.refresh(defect)
     return defect
@@ -6357,11 +7510,29 @@ def _assemble_report_detail(db: Session, plan_run: TestPlanRun) -> schemas.Repor
             .order_by(DefectRecord.id.desc())
         ).all()
     )
+    run_ids = [run.id for run in test_runs]
+    internal_defects = (
+        list(
+            db.scalars(
+                select(Defect)
+                .join(DefectRunLink, DefectRunLink.defect_id == Defect.id)
+                .where(
+                    Defect.project_id == plan_run.project_id,
+                    DefectRunLink.test_run_id.in_(run_ids),
+                )
+                .order_by(Defect.id.desc())
+                .distinct()
+            ).all()
+        )
+        if run_ids
+        else []
+    )
     return schemas.ReportDetail(
         plan_run=_serialize_plan_run(plan_run),
         test_runs=test_runs,
         recent_history=recent_history,
         defects=defects,
+        internal_defects=internal_defects,
     )
 
 

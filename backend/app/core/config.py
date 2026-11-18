@@ -1,6 +1,7 @@
 from functools import lru_cache
 
-from pydantic import Field
+from cryptography.fernet import Fernet
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,9 +38,9 @@ class Settings(BaseSettings):
     seed_demo_data_on_bootstrap: bool = False
     bootstrap_max_retries: int = 30
     bootstrap_retry_interval_seconds: int = 2
-    initial_admin_password: str = "admin123"
+    initial_admin_password: str
     password_hash_iterations: int = 260000
-    app_encryption_key: str = ""
+    app_encryption_key: str
     normalize_mysql_charset_on_bootstrap: bool = False
 
     # —— 用例生成（case generation）可调参数 ——
@@ -88,6 +89,7 @@ class Settings(BaseSettings):
     case_gen_dispatch_stale_seconds: int = 120
     case_gen_watchdog_interval_seconds: int = 30
     case_gen_artifact_retention_days: int = 30
+    execution_artifact_retention_days: int = 30
     case_gen_artifact_content_preview_bytes: int = 131072
     case_gen_max_source_download_bytes: int = 10 * 1024 * 1024
     case_gen_max_image_download_bytes: int = 12 * 1024 * 1024
@@ -95,6 +97,42 @@ class Settings(BaseSettings):
     case_gen_trusted_min_evidence_coverage_rate: float = 0.80
     case_gen_trusted_max_weak_expected_rate: float = 0.10
     case_gen_trusted_max_weak_step_rate: float = 0.10
+
+    @model_validator(mode="after")
+    def _require_secret_settings(self) -> "Settings":
+        # 安全红线：禁止代码内默认弱口令 / 空加密密钥，缺失即启动失败（fail-fast）。
+        pw = (self.initial_admin_password or "").strip()
+        if not pw:
+            raise ValueError(
+                "INITIAL_ADMIN_PASSWORD 未设置：必须显式提供初始管理员口令，"
+                "禁止依赖代码内默认弱口令"
+            )
+        weak = {
+            "admin123",
+            "admin",
+            "password",
+            "123456",
+            "root",
+            "test",
+            "changeme",
+            "letmein",
+        }
+        if pw.lower() in weak:
+            raise ValueError("INITIAL_ADMIN_PASSWORD 命中弱口令黑名单，请更换为高强度口令")
+        if len(pw) < 12:
+            raise ValueError("INITIAL_ADMIN_PASSWORD 长度不能少于 12 个字符")
+        key = (self.app_encryption_key or "").strip()
+        if not key:
+            raise ValueError(
+                "APP_ENCRYPTION_KEY 未设置：模型密钥加密所必需，缺失将导致密钥无法安全存储"
+            )
+        try:
+            Fernet(key.encode("ascii"))
+        except (TypeError, ValueError, UnicodeEncodeError) as exc:
+            raise ValueError(
+                "APP_ENCRYPTION_KEY 不是合法 Fernet key，请按文档命令重新生成"
+            ) from exc
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -674,7 +674,11 @@ class CaseGenerationV2Attempt(Base):
     )
 
     job = relationship("CaseGenerationV2Job", back_populates="attempts")
-    artifacts = relationship("CaseGenerationV2Artifact", back_populates="attempt")
+    artifacts = relationship(
+        "CaseGenerationV2Artifact",
+        back_populates="attempt",
+        foreign_keys="CaseGenerationV2Artifact.attempt_id",
+    )
 
 
 class CaseGenerationV2Artifact(Base):
@@ -687,11 +691,19 @@ class CaseGenerationV2Artifact(Base):
     file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     file_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     content_json: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parent_attempt_id: Mapped[int | None] = mapped_column(
+        ForeignKey("case_generation_v2_attempts.id"), nullable=True, index=True
+    )
     expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
 
     job = relationship("CaseGenerationV2Job", back_populates="artifacts")
-    attempt = relationship("CaseGenerationV2Attempt", back_populates="artifacts")
+    attempt = relationship(
+        "CaseGenerationV2Attempt",
+        back_populates="artifacts",
+        foreign_keys=[attempt_id],
+    )
 
 
 class DefectRecord(Base):

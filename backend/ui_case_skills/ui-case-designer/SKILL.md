@@ -25,6 +25,9 @@ Produce one executable UI case draft. Return only the JSON object defined in
    step must include a non-empty `value`. Every text, URL, title, or visual assertion
    must also include a non-empty `value`; never use `name` or `target` as its expected
    result.
+   For every `goto` step, set `wait_until` to `domcontentloaded`; use a following
+   semantic wait or assertion to prove the page is ready. Do not use `load` or
+   `networkidle` in AI-generated drafts.
 6. Keep the total number of steps at or below `max_steps`.
 7. End with an observable assertion. Make `expect_text` a concise text that should be
    visible after the journey succeeds.

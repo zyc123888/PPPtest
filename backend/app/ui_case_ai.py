@@ -123,6 +123,11 @@ def _normalize_generated_workflow_values(
             raise ValueError(f"AI 草稿第 {index} 个步骤 {action} 缺少必填值，请补充具体输入或地址后重试")
         if action in {"wait_for_text", "assert_text"} and not value:
             raise ValueError(f"AI 草稿第 {index} 个步骤 {action} 缺少要验证的具体文本，请在测试目标中写明期望文案后重试")
+        if action == "goto" and step.get("wait_until") != "domcontentloaded":
+            # AI 草稿以可交互的 DOM 为导航完成条件；后续等待/断言步骤负责验证业务页面。
+            # 完整 load 或 networkidle 会被第三方统计、长连接等慢资源无谓阻塞。
+            step["wait_until"] = "domcontentloaded"
+            warnings.append(f"第 {index} 个导航步骤已使用 DOM 就绪，避免慢资源阻塞页面打开")
         normalized_steps.append(step)
 
     text_assertion_types = {"text_present", "text_visible", "text_hidden"}

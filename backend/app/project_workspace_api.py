@@ -7,6 +7,7 @@ platform conventions (``get_current_user``, ``_require_project_access`` etc.).
 """
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -22,6 +23,7 @@ from app.api import (
 )
 from app.core.config import settings
 from app.core.database import get_db
+from app.rich_text_security import plain_text_to_safe_html, sanitize_rich_text, validate_image_content
 from app.models import (
     Activity,
     Comment,
@@ -37,6 +39,7 @@ from app.models import (
     TestRun,
     User,
 )
+from app.permissions import project_role_allows
 from app.timeutil import utc_now_naive
 
 
@@ -47,11 +50,8 @@ workspace_router = APIRouter(dependencies=[Depends(get_current_user)])
 # Project role resolution (platform role x project member role)
 # ---------------------------------------------------------------------------
 
-_ROLE_RANK = {"viewer": 0, "member": 1, "manager": 2, "owner": 3}
-
-
 def _resolve_project_role(db: Session, user: User, project: Project) -> str:
-    if user.role == "admin":
+    if user.role == "admin" or project.created_by == user.id:
         return "owner"
     member = db.scalar(
         select(ProjectMember).where(
@@ -61,6 +61,12 @@ def _resolve_project_role(db: Session, user: User, project: Project) -> str:
     )
     if member is not None:
         return member.role
+    # If project has no members yet, any workspace member can manage it so initial setup works.
+    has_any_member = db.scalar(
+        select(ProjectMember.id).where(ProjectMember.project_id == project.id).limit(1)
+    )
+    if has_any_member is None and user.role == "tester":
+        return "owner"
     # Workspace members that are not explicit project members can still view.
     return "viewer"
 
@@ -68,7 +74,7 @@ def _resolve_project_role(db: Session, user: User, project: Project) -> str:
 def _require_project_role(db: Session, user: User, project_id: int, min_role: str) -> Project:
     project = _require_project_access(db, user, db.get(Project, project_id))
     role = _resolve_project_role(db, user, project)
-    if _ROLE_RANK.get(role, 0) < _ROLE_RANK.get(min_role, 0):
+    if not project_role_allows(role, min_role):
         raise HTTPException(status_code=403, detail="项目内权限不足")
     return project
 
@@ -87,6 +93,23 @@ _ALLOWED_IMAGE_TYPES = {
 }
 
 
+@workspace_router.get("/uploads/{filename}", response_class=FileResponse)
+def get_rich_text_image(
+    filename: str,
+    current_user: User = Depends(get_current_user),
+) -> FileResponse:
+    """Return an uploaded image to authenticated workspace users."""
+    safe_name = Path(filename).name
+    allowed_extensions = set(_ALLOWED_IMAGE_TYPES.values())
+    if safe_name != filename or Path(safe_name).suffix.lower() not in allowed_extensions:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    upload_dir = Path(settings.upload_dir).resolve()
+    path = upload_dir / safe_name
+    if path.is_symlink() or path.parent.resolve() != upload_dir or not path.is_file():
+        raise HTTPException(status_code=404, detail="图片不存在")
+    return FileResponse(path)
+
+
 @workspace_router.post("/uploads/image", response_model=schemas.UploadResult)
 async def upload_rich_text_image(
     file: UploadFile = File(...),
@@ -97,8 +120,8 @@ async def upload_rich_text_image(
     The file is stored under ``settings.upload_dir`` and served back through the
     ``{api_v1_prefix}/uploads`` static mount (already proxied by nginx ``/api/``).
     """
-    ext = _ALLOWED_IMAGE_TYPES.get((file.content_type or "").lower())
-    if ext is None:
+    declared_ext = _ALLOWED_IMAGE_TYPES.get((file.content_type or "").lower())
+    if declared_ext is None:
         raise HTTPException(status_code=422, detail="仅支持 PNG/JPG/GIF/WEBP/BMP 图片")
     data = await file.read()
     if not data:
@@ -106,6 +129,10 @@ async def upload_rich_text_image(
     if len(data) > settings.max_image_upload_bytes:
         limit_mb = settings.max_image_upload_bytes // (1024 * 1024)
         raise HTTPException(status_code=413, detail=f"图片大小不能超过 {limit_mb}MB")
+    try:
+        ext = validate_image_content(data, declared_ext)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{uuid.uuid4().hex}{ext}"
@@ -233,10 +260,18 @@ def add_project_member(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> schemas.ProjectMemberRead:
-    _require_project_role(db, current_user, project_id, "manager")
+    project = _require_project_role(db, current_user, project_id, "manager")
     user = db.get(User, payload.user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在")
+    existing_any = db.scalar(
+        select(ProjectMember.id).where(ProjectMember.project_id == project_id).limit(1)
+    )
+    if existing_any is None:
+        owner_uid = project.created_by or current_user.id
+        if owner_uid and owner_uid != payload.user_id:
+            db.add(ProjectMember(project_id=project_id, user_id=owner_uid, role="owner"))
+            db.flush()
     existing = db.scalar(
         select(ProjectMember).where(
             ProjectMember.project_id == project_id,
@@ -426,14 +461,50 @@ def iteration_burndown(
     reqs = list(db.scalars(select(Requirement).where(Requirement.iteration_id == iteration_id)).all())
     total_points = sum((r.story_points or 0) for r in reqs)
     done_points = sum((r.story_points or 0) for r in reqs if r.status in {"DONE", "CLOSED"})
+    remaining_points = max(total_points - done_points, 0)
+
+    series = []
+    start_dt = iteration.start_date
+    end_dt = iteration.end_date
+    if start_dt and end_dt and end_dt >= start_dt:
+        total_days = max((end_dt - start_dt).days, 1)
+        steps = min(total_days + 1, 8)
+        for i in range(steps):
+            ratio = i / max(steps - 1, 1)
+            day_offset = int(round(ratio * total_days))
+            point_date = start_dt + __import__("datetime").timedelta(days=day_offset)
+            ideal_rem = round(max(total_points * (1.0 - ratio), 0.0), 1)
+            done_by_day = sum(
+                (r.story_points or 0)
+                for r in reqs
+                if r.status in {"DONE", "CLOSED"}
+                and r.updated_at is not None
+                and r.updated_at.date() <= point_date
+            )
+            actual_rem = max(total_points - done_by_day, 0) if i < steps - 1 else remaining_points
+            series.append(
+                {
+                    "label": point_date.strftime("%m-%d"),
+                    "ideal": ideal_rem,
+                    "actual": actual_rem,
+                }
+            )
+    else:
+        for i, label in enumerate(["起点", "25%", "50%", "75%", "当前"]):
+            ratio = i / 4.0
+            ideal_rem = round(max(total_points * (1.0 - ratio), 0.0), 1)
+            actual_rem = round(total_points - (done_points * ratio), 1) if i < 4 else remaining_points
+            series.append({"label": label, "ideal": ideal_rem, "actual": actual_rem})
+
     return {
         "iteration_id": iteration_id,
         "capacity_points": iteration.capacity_points,
         "total_points": total_points,
         "done_points": done_points,
-        "remaining_points": max(total_points - done_points, 0),
+        "remaining_points": remaining_points,
         "requirement_total": len(reqs),
         "requirement_done": sum(1 for r in reqs if r.status in {"DONE", "CLOSED"}),
+        "series": series,
     }
 
 
@@ -478,6 +549,14 @@ def list_requirements(
     return schemas.RequirementPage(items=rows, total=total, page=page, page_size=page_size)
 
 
+def _validate_iteration_project(db: Session, project_id: int, iteration_id: int | None) -> None:
+    if iteration_id is None:
+        return
+    iteration = db.get(Iteration, iteration_id)
+    if iteration is None or iteration.project_id != project_id:
+        raise HTTPException(status_code=400, detail="迭代不存在或不属于当前项目")
+
+
 @workspace_router.post(
     "/projects/{project_id}/requirements",
     response_model=schemas.RequirementRead,
@@ -490,6 +569,7 @@ def create_requirement(
     current_user: User = Depends(get_current_user),
 ) -> Requirement:
     _require_project_role(db, current_user, project_id, "member")
+    _validate_iteration_project(db, project_id, payload.iteration_id)
     max_order = db.scalar(select(func.max(Requirement.order_index)).where(Requirement.project_id == project_id)) or 0.0
     requirement = Requirement(
         project_id=project_id,
@@ -513,6 +593,35 @@ def create_requirement(
     )
     db.commit()
     return requirement
+
+
+@workspace_router.put("/requirements/batch-iteration", response_model=list[schemas.RequirementRead])
+def batch_plan_requirements_to_iteration(
+    payload: schemas.RequirementBatchIterationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[Requirement]:
+    """批量把需求规划到指定迭代；iteration_id 为空表示移出迭代。"""
+    requirements = (
+        db.scalars(select(Requirement).where(Requirement.id.in_(payload.requirement_ids))).all()
+    )
+    found_ids = {requirement.id for requirement in requirements}
+    missing = [rid for rid in payload.requirement_ids if rid not in found_ids]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"需求不存在：{missing[:10]}")
+    project_ids = {requirement.project_id for requirement in requirements}
+    if len(project_ids) > 1:
+        raise HTTPException(status_code=400, detail="批量操作仅支持同一项目内的需求")
+    project_id = project_ids.pop()
+    _require_project_role(db, current_user, project_id, "member")
+    _validate_iteration_project(db, project_id, payload.iteration_id)
+    for requirement in requirements:
+        requirement.iteration_id = payload.iteration_id
+        requirement.updated_by = current_user.id
+    db.commit()
+    for requirement in requirements:
+        db.refresh(requirement)
+    return list(requirements)
 
 
 @workspace_router.get("/requirements/{requirement_id}", response_model=schemas.RequirementRead)
@@ -540,6 +649,8 @@ def update_requirement(
         raise HTTPException(status_code=404, detail="需求不存在")
     _require_project_role(db, current_user, requirement.project_id, "member")
     data = payload.model_dump(exclude_unset=True)
+    if "iteration_id" in data:
+        _validate_iteration_project(db, requirement.project_id, data["iteration_id"])
     for key, value in data.items():
         setattr(requirement, key, value)
     requirement.updated_by = current_user.id
@@ -795,6 +906,7 @@ def create_task(
     current_user: User = Depends(get_current_user),
 ) -> ProjectTask:
     _require_project_role(db, current_user, project_id, "member")
+    _validate_iteration_project(db, project_id, payload.iteration_id)
     max_order = db.scalar(select(func.max(ProjectTask.order_index)).where(ProjectTask.project_id == project_id)) or 0.0
     task = ProjectTask(
         project_id=project_id,
@@ -844,7 +956,10 @@ def update_task(
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     _require_project_role(db, current_user, task.project_id, "member")
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    if "iteration_id" in data:
+        _validate_iteration_project(db, task.project_id, data["iteration_id"])
+    for key, value in data.items():
         setattr(task, key, value)
     task.updated_by = current_user.id
     db.commit()
@@ -963,6 +1078,8 @@ def create_defect(
     _require_project_role(db, current_user, project_id, "member")
     max_order = db.scalar(select(func.max(Defect.order_index)).where(Defect.project_id == project_id)) or 0.0
     data = payload.model_dump()
+    for field in ("description", "reproduce_steps", "resolution"):
+        data[field] = sanitize_rich_text(data.get(field))
     assignees = data.get("assignees_json")
     if assignees and not data.get("assignee_id"):
         data["assignee_id"] = assignees[0]
@@ -1003,7 +1120,7 @@ def create_defect_from_run(
     _require_project_role(db, current_user, run.project_id, "member")
     payload = payload or schemas.DefectFromRunCreate()
     title = payload.title or f"[{run.case_name}] 执行失败缺陷"
-    description = payload.description or run.summary or "由执行失败自动创建"
+    description = plain_text_to_safe_html(payload.description or run.summary or "由执行失败自动创建")
     max_order = db.scalar(select(func.max(Defect.order_index)).where(Defect.project_id == run.project_id)) or 0.0
     defect = Defect(
         project_id=run.project_id,
@@ -1011,7 +1128,7 @@ def create_defect_from_run(
         assignee_id=payload.assignee_id,
         title=title[:200],
         description=description,
-        reproduce_steps=run.stderr_text or run.summary,
+        reproduce_steps=plain_text_to_safe_html(run.stderr_text or run.summary),
         severity=payload.severity,
         priority=payload.priority,
         status="NEW",
@@ -1070,6 +1187,9 @@ def update_defect(
         raise HTTPException(status_code=404, detail="缺陷不存在")
     _require_project_role(db, current_user, defect.project_id, "member")
     data = payload.model_dump(exclude_unset=True)
+    for field in ("description", "reproduce_steps", "resolution"):
+        if field in data:
+            data[field] = sanitize_rich_text(data.get(field))
     if "assignees_json" in data:
         assignees = data.get("assignees_json") or []
         data["assignee_id"] = assignees[0] if assignees else None
@@ -1419,6 +1539,47 @@ def project_overview(
     )
 
 
+_TRACE_ACTIVE_STATUSES = {"PENDING", "RUNNING"}
+_TRACE_SUCCESS_STATUSES = {"SUCCESS", "PASS", "PASSED"}
+
+
+def _summarize_trace_runs(statuses: list[str | None], open_defect_count: int = 0) -> dict:
+    normalized = [str(status).upper() if status else None for status in statuses]
+    terminal = [status for status in normalized if status and status not in _TRACE_ACTIVE_STATUSES]
+    passed = [status for status in terminal if status in _TRACE_SUCCESS_STATUSES]
+    active = [status for status in normalized if status in _TRACE_ACTIVE_STATUSES]
+    linked_count = len(normalized)
+    executed_count = len(terminal)
+    passed_count = len(passed)
+
+    if linked_count == 0:
+        coverage = "NONE"
+    elif executed_count == 0 and not active:
+        coverage = "UNTESTED"
+    elif executed_count < linked_count or active:
+        coverage = "PARTIAL"
+    elif passed_count == linked_count and not open_defect_count:
+        coverage = "COVERED"
+    else:
+        coverage = "AT_RISK"
+
+    if active:
+        aggregate_status = "RUNNING"
+    elif any(status not in _TRACE_SUCCESS_STATUSES for status in terminal):
+        aggregate_status = "FAILED"
+    elif terminal:
+        aggregate_status = "SUCCESS"
+    else:
+        aggregate_status = None
+    return {
+        "linked_case_count": linked_count,
+        "executed_case_count": executed_count,
+        "passed_case_count": passed_count,
+        "last_run_status": aggregate_status,
+        "coverage": coverage,
+    }
+
+
 @workspace_router.get("/projects/{project_id}/trace", response_model=schemas.TraceMatrix)
 def project_trace(
     project_id: int,
@@ -1442,20 +1603,14 @@ def project_trace(
         ui_count = sum(1 for link in links if link.case_type == "UI")
         perf_count = sum(1 for link in links if link.case_type == "PERF")
         total_cases = len(links)
-        last_status = None
-        if links:
-            for link in links:
-                run = db.scalar(
-                    select(TestRun)
-                    .where(TestRun.case_type == link.case_type, TestRun.case_id == link.case_id)
-                    .order_by(TestRun.id.desc())
-                )
-                if run is not None:
-                    if last_status is None:
-                        last_status = run.status
-                    if run.status != "SUCCESS":
-                        last_status = run.status
-                        break
+        run_statuses: list[str | None] = []
+        for link in links:
+            run = db.scalar(
+                select(TestRun)
+                .where(TestRun.case_type == link.case_type, TestRun.case_id == link.case_id)
+                .order_by(TestRun.id.desc())
+            )
+            run_statuses.append(run.status if run is not None else None)
         open_defects = db.scalar(
             select(func.count(Defect.id)).where(
                 Defect.requirement_id == requirement.id,
@@ -1468,14 +1623,7 @@ def project_trace(
                 Defect.status.in_(["CLOSED", "WONTFIX"]),
             )
         ) or 0
-        if total_cases == 0:
-            coverage = "NONE"
-        elif last_status == "SUCCESS":
-            coverage = "COVERED"
-        elif last_status is None:
-            coverage = "UNTESTED"
-        else:
-            coverage = "FAILED"
+        run_summary = _summarize_trace_runs(run_statuses, open_defects)
         rows.append(
             schemas.TraceRow(
                 requirement_id=requirement.id,
@@ -1486,10 +1634,13 @@ def project_trace(
                 ui_case_count=ui_count,
                 perf_case_count=perf_count,
                 total_case_count=total_cases,
-                last_run_status=last_status,
+                linked_case_count=run_summary["linked_case_count"],
+                executed_case_count=run_summary["executed_case_count"],
+                passed_case_count=run_summary["passed_case_count"],
+                last_run_status=run_summary["last_run_status"],
                 open_defect_count=open_defects,
                 closed_defect_count=closed_defects,
-                coverage=coverage,
+                coverage=run_summary["coverage"],
             )
         )
     return schemas.TraceMatrix(project_id=project_id, rows=rows)

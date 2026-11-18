@@ -747,6 +747,26 @@ def sanitize_case_generation_payload(payload: dict | None, *, cleanup_secret: bo
     return sanitized
 
 
+def _resolve_model_execution_config(db, payload: dict, attempt_payload: dict | None = None) -> tuple[str, str, str]:
+    """解析执行用模型参数：优先读提交时冻结到 attempt 的任务级快照，
+    避免排队期间共享配置被改动导致串味；API Key 等秘密参数仍按引用解析。"""
+    snapshot = None
+    candidate = (attempt_payload or {}).get("model_config_snapshot") or payload.get("model_config_snapshot")
+    if isinstance(candidate, dict) and candidate.get("model"):
+        snapshot = candidate
+    model_config_id = (snapshot or {}).get("model_config_id") or payload.get("model_config_id")
+    model_config = db.get(AIModelConfig, model_config_id) if model_config_id else None
+    api_key = (model_config.api_key or "").strip() if model_config and model_config.api_key else ""
+    if snapshot is not None:
+        model = str(snapshot.get("model") or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
+        raw_base_url = snapshot.get("base_url")
+    else:
+        model = ((model_config.model if model_config else None) or payload.get("openai_model") or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
+        raw_base_url = (model_config.base_url if model_config else None) or payload.get("openai_base_url")
+    base_url, model = validate_model_connection_config(model, raw_base_url, api_key)
+    return api_key, model, base_url
+
+
 def _update_stage(job: CaseGenerationJob, db, key: str, title: str, status: str, summary: str) -> None:
     update_job_stage(db, job, key, title, status, summary)
 
@@ -3146,15 +3166,8 @@ def _run_case_generation_job_attempt(job_id: int, attempt_id: int) -> None:
             finish_attempt(db, job, status="FAILED", summary="输入内容为空", error_message=message)
             raise ValueError(message)
 
-        model_config_id = payload.get("model_config_id")
-        model_config = db.get(AIModelConfig, model_config_id) if model_config_id else None
-        api_key = (model_config.api_key or "").strip() if model_config and model_config.api_key else ""
-        model = ((model_config.model if model_config else None) or payload.get("openai_model") or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
-        base_url, model = validate_model_connection_config(
-            model,
-            (model_config.base_url if model_config else None) or payload.get("openai_base_url"),
-            api_key,
-        )
+        attempt_payload = dict(attempt.input_payload_json or {}) if isinstance(attempt.input_payload_json, dict) else {}
+        api_key, model, base_url = _resolve_model_execution_config(db, payload, attempt_payload)
         if not api_key:
             message = "当前工作空间未配置可用模型或 API Key"
             finish_attempt(db, job, status="FAILED", summary="缺少模型配置", error_message=message)

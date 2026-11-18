@@ -220,6 +220,19 @@ async function runStep(agent, page, step, index, job, navigationGuard) {
   return record
 }
 
+function inferModelFamily(modelName, baseUrl) {
+  if (process.env.MIDSCENE_MODEL_FAMILY) return process.env.MIDSCENE_MODEL_FAMILY
+  const lowerName = String(modelName || '').toLowerCase()
+  const lowerUrl = String(baseUrl || '').toLowerCase()
+  if (lowerName.includes('qwen3-vl') || lowerName.includes('qwen3_vl')) return 'qwen3-vl'
+  if (lowerName.includes('qwen2.5-vl') || lowerName.includes('qwen2_5_vl') || lowerName.includes('qwen-vl')) return 'qwen2.5-vl'
+  if (lowerName.includes('ui-tars') || lowerName.includes('uitars')) return 'vlm-ui-tars'
+  if (lowerName.includes('doubao') || lowerUrl.includes('volces.com')) return 'doubao-vision'
+  if (lowerName.includes('gemini')) return 'gemini'
+  if (lowerName.includes('glm-4v') || lowerName.includes('glm4v') || lowerName.includes('autoglm')) return 'glm-v'
+  return 'qwen2.5-vl'
+}
+
 async function main() {
   const jobPath = process.argv[2]
   if (!jobPath) {
@@ -240,10 +253,13 @@ async function main() {
     error: null,
   }
 
+  const modelFamily = inferModelFamily(process.env.MIDSCENE_MODEL_NAME, process.env.MIDSCENE_MODEL_BASE_URL)
+  process.env.MIDSCENE_MODEL_FAMILY = modelFamily
   overrideAIConfig({
     MIDSCENE_MODEL_NAME: process.env.MIDSCENE_MODEL_NAME,
     MIDSCENE_MODEL_BASE_URL: process.env.MIDSCENE_MODEL_BASE_URL,
     MIDSCENE_MODEL_API_KEY: process.env.MIDSCENE_MODEL_API_KEY,
+    MIDSCENE_MODEL_FAMILY: modelFamily,
   })
 
   let browser
@@ -329,6 +345,9 @@ async function main() {
       if (agent && typeof agent.writeOutActionDumps === 'function') agent.writeOutActionDumps()
     } catch (_) {}
     try {
+      if (agent && typeof agent.destroy === 'function') await agent.destroy()
+    } catch (_) {}
+    try {
       const reportDir = path.join(process.env.MIDSCENE_RUN_DIR || runDir, 'report')
       if (fs.existsSync(reportDir)) {
         const htmls = fs
@@ -338,9 +357,6 @@ async function main() {
           .sort((left, right) => right.time - left.time)
         if (htmls.length) result.reportPath = path.join(reportDir, htmls[0].file)
       }
-    } catch (_) {}
-    try {
-      if (agent && typeof agent.destroy === 'function') await agent.destroy()
     } catch (_) {}
     try {
       if (browser) await browser.close()

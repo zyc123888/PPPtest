@@ -12,7 +12,7 @@ import textwrap
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Thread
 from types import SimpleNamespace
 from typing import NoReturn
@@ -799,9 +799,44 @@ def _execute_api_scenario(
     failure_detail = ""
 
     for index, step in enumerate(steps):
+        try:
+            db.refresh(run)
+            if run.status == "CANCELLED":
+                return {
+                    "status": "CANCELLED",
+                    "error_type": "CANCELLED",
+                    "summary": "执行已手动取消",
+                    "exit_code": 130,
+                    "stdout_text": "\n".join(stdout_lines),
+                    "stderr_text": "任务已取消",
+                    "artifacts_json": artifacts,
+                    "step_results_json": step_results,
+                    "request_payload": {"steps_count": len(steps)},
+                    "response_payload": {"extracted_variables": extracted_all},
+                }
+        except Exception:
+            pass
         step_no = index + 1
         step_name = str(step.get("name") or f"步骤 {step_no}")
         prefix = f"step_{step_no:02d}_"
+        try:
+            db.refresh(run)
+        except Exception:
+            pass
+        if run.status == "CANCELLED":
+            step_results.append({"name": step_name, "status": "SKIPPED", "detail": "任务已取消"})
+            return {
+                "status": "CANCELLED",
+                "summary": "场景执行已取消",
+                "error_type": "CANCELLED",
+                "exit_code": 130,
+                "stdout_text": "\n".join(stdout_lines),
+                "stderr_text": "场景执行已取消",
+                "artifacts_json": artifacts,
+                "request_payload": {"scenario_steps": len(steps)},
+                "response_payload": {"extracted_variables": extracted_all},
+                "step_results_json": step_results,
+            }
         if failed_at is not None:
             step_results.append({"name": step_name, "status": "SKIPPED", "detail": "前置步骤失败，已跳过"})
             continue
@@ -1047,45 +1082,81 @@ def _execute_performance_case(
         },
     }
 
-    def perform_request(index: int) -> dict:
-        started_at = time.perf_counter()
-        parsed_url = urlparse(prepared.url)
-        response_status = 0
-        response_body = None
-        error = None
-        try:
-            if parsed_url.hostname == "testserver":
-                from app.main import app
-
-                with TestClient(app, base_url="http://testserver") as client:
-                    response = client.request(prepared.method, parsed_url.path, headers=prepared.headers, **prepared.kwargs())
-                response_status = response.status_code
-                response_body = response.text[:500]
-            else:
-                timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
-                with httpx.Client(timeout=timeout_seconds) as client:
-                    response = client.request(prepared.method, prepared.url, headers=prepared.headers, **prepared.kwargs())
-                response_status = response.status_code
-                response_body = response.text[:500]
-        except Exception as exc:
-            error = str(exc)
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        success = error is None and response_status == case.expected_status
-        return {
-            "index": index + 1,
-            "status": "SUCCESS" if success else "FAILED",
-            "status_code": response_status,
-            "duration_ms": duration_ms,
-            "error": error,
-            "response_sample": response_body,
-        }
+    parsed_url = urlparse(prepared.url)
+    is_testserver = parsed_url.hostname == "testserver"
+    timeout_seconds = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else _run_timeout_seconds(run)
+    limits = httpx.Limits(max_connections=max(concurrency * 2, 20), max_keepalive_connections=max(concurrency, 10))
 
     started_at = time.perf_counter()
     results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        future_map = {executor.submit(perform_request, index): index for index in range(total_requests)}
-        for future in as_completed(future_map):
-            results.append(future.result())
+
+    if is_testserver:
+        from app.main import app as fastapi_app
+
+        with TestClient(fastapi_app, base_url="http://testserver") as shared_test_client:
+            def perform_testserver_request(index: int) -> dict:
+                req_start = time.perf_counter()
+                response_status = 0
+                response_body = None
+                error = None
+                try:
+                    response = shared_test_client.request(
+                        prepared.method, parsed_url.path, headers=prepared.headers, **prepared.kwargs()
+                    )
+                    response_status = response.status_code
+                    response_body = response.text[:500]
+                except Exception as exc:
+                    error = str(exc)
+                duration_ms = int((time.perf_counter() - req_start) * 1000)
+                success = error is None and response_status == case.expected_status
+                return {
+                    "index": index + 1,
+                    "status": "SUCCESS" if success else "FAILED",
+                    "status_code": response_status,
+                    "duration_ms": duration_ms,
+                    "error": error,
+                    "response_sample": response_body,
+                }
+
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                future_map = {executor.submit(perform_testserver_request, index): index for index in range(total_requests)}
+                for future in as_completed(future_map):
+                    results.append(future.result())
+    else:
+        with httpx.Client(timeout=timeout_seconds, limits=limits) as shared_client:
+            def perform_http_request(index: int) -> dict:
+                req_start = time.perf_counter()
+                response_status = 0
+                response_body = None
+                error = None
+                try:
+                    req_timeout = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else timeout_seconds
+                    response = shared_client.request(
+                        prepared.method,
+                        prepared.url,
+                        headers=prepared.headers,
+                        timeout=req_timeout,
+                        **prepared.kwargs(),
+                    )
+                    response_status = response.status_code
+                    response_body = response.text[:500]
+                except Exception as exc:
+                    error = str(exc)
+                duration_ms = int((time.perf_counter() - req_start) * 1000)
+                success = error is None and response_status == case.expected_status
+                return {
+                    "index": index + 1,
+                    "status": "SUCCESS" if success else "FAILED",
+                    "status_code": response_status,
+                    "duration_ms": duration_ms,
+                    "error": error,
+                    "response_sample": response_body,
+                }
+
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                future_map = {executor.submit(perform_http_request, index): index for index in range(total_requests)}
+                for future in as_completed(future_map):
+                    results.append(future.result())
 
     results.sort(key=lambda item: item["index"])
     duration_values = [float(item["duration_ms"]) for item in results]
@@ -1698,6 +1769,27 @@ def _midscene_node_path(runner_path: str) -> str | None:
     return repo_e2e_modules if os.path.isdir(repo_e2e_modules) else None
 
 
+def _infer_midscene_model_family(model_name: str, model_base_url: str) -> str:
+    env_family = (os.environ.get("MIDSCENE_MODEL_FAMILY") or "").strip()
+    if env_family:
+        return env_family
+    lower_name = (model_name or "").lower()
+    lower_url = (model_base_url or "").lower()
+    if "qwen3-vl" in lower_name or "qwen3_vl" in lower_name:
+        return "qwen3-vl"
+    if "qwen2.5-vl" in lower_name or "qwen2_5_vl" in lower_name or "qwen-vl" in lower_name:
+        return "qwen2.5-vl"
+    if "ui-tars" in lower_name or "uitars" in lower_name:
+        return "vlm-ui-tars"
+    if "doubao" in lower_name or "volces.com" in lower_url:
+        return "doubao-vision"
+    if "gemini" in lower_name:
+        return "gemini"
+    if "glm-4v" in lower_name or "glm4v" in lower_name or "autoglm" in lower_name:
+        return "glm-v"
+    return "qwen2.5-vl"
+
+
 def _build_midscene_child_env(
     *, runner_path: str, model_base_url: str, model_api_key: str, model_name: str, run_dir: str
 ) -> dict[str, str]:
@@ -1717,6 +1809,7 @@ def _build_midscene_child_env(
             "MIDSCENE_MODEL_BASE_URL": model_base_url,
             "MIDSCENE_MODEL_API_KEY": model_api_key,
             "MIDSCENE_MODEL_NAME": model_name,
+            "MIDSCENE_MODEL_FAMILY": _infer_midscene_model_family(model_name, model_base_url),
             "MIDSCENE_RUN_DIR": run_dir,
         }
     )
@@ -2265,6 +2358,10 @@ def run_test_plan(plan_run_id: int) -> dict:
         for run in runs:
             case_started_at = time.perf_counter()
             try:
+                db.refresh(run)
+                if run.status == "CANCELLED":
+                    fail_count += 1
+                    continue
                 project = db.get(Project, run.project_id)
                 if project is None:
                     finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
@@ -2294,6 +2391,18 @@ def run_test_plan(plan_run_id: int) -> dict:
                         continue
                     result = _execute_case_with_retries(
                         db, run, lambda deadline: _execute_ui_case_by_engine(db, run, case, project, deadline=deadline)
+                    )
+                elif run.case_type == "PERF":
+                    case = db.get(PerformanceCase, run.case_id)
+                    if case is None:
+                        finalize_run(db, run, status="FAILED", summary="性能用例不存在", error_type="SYSTEM")
+                        fail_count += 1
+                        continue
+                    if not mark_run_started(db, run):
+                        fail_count += 1
+                        continue
+                    result = _execute_case_with_retries(
+                        db, run, lambda deadline: _execute_performance_case(db, run, case, project, deadline=deadline)
                     )
                 else:
                     finalize_run(db, run, status="FAILED", summary="未知用例类型", error_type="SYSTEM")
@@ -2440,6 +2549,57 @@ def scan_scheduled_plans() -> dict:
         db.close()
 
 
+@celery_app.task(name="app.tasks.cleanup_execution_artifacts")
+def cleanup_execution_artifacts() -> dict:
+    """清理超过保留期的执行产物目录（run_*），避免磁盘无限增长。
+
+    仅移除「终态且 finished_at 早于保留期」的 run 目录，以及「已无对应 TestRun
+    记录且 mtime 足够旧」的孤儿目录；PENDING/RUNNING 的 run 目录始终保留。
+    """
+    retention = max(1, settings.execution_artifact_retention_days)
+    cutoff = utc_now_naive() - timedelta(days=retention)
+    mtime_cutoff = time.time() - retention * 86400
+    root_dir = settings.report_output_dir
+    if not os.path.isabs(root_dir):
+        root_dir = os.path.abspath(root_dir)
+    if not os.path.isdir(root_dir):
+        return {"removed": 0}
+    db = SessionLocal()
+    removed = 0
+    try:
+        live_run_ids = set(
+            db.scalars(select(TestRun.id).where(TestRun.status.in_(["PENDING", "RUNNING"]))).all()
+        )
+        for name in os.listdir(root_dir):
+            if not name.startswith("run_"):
+                continue
+            run_dir = os.path.join(root_dir, name)
+            if not os.path.isdir(run_dir) or os.path.islink(run_dir):
+                continue
+            try:
+                run_id = int(name[len("run_"):])
+            except ValueError:
+                continue
+            if run_id in live_run_ids:
+                continue
+            run = db.get(TestRun, run_id)
+            if run is not None:
+                finished = run.finished_at
+                if finished is None or finished >= cutoff:
+                    continue
+            else:
+                try:
+                    if os.stat(run_dir).st_mtime >= mtime_cutoff:
+                        continue
+                except OSError:
+                    continue
+            shutil.rmtree(run_dir, ignore_errors=True)
+            removed += 1
+    finally:
+        db.close()
+    return {"removed": removed}
+
+
 @celery_app.task(name="app.tasks.run_ui_batch")
 def run_ui_batch(batch_run_id: int) -> dict:
     db = _open_db()
@@ -2463,6 +2623,10 @@ def run_ui_batch(batch_run_id: int) -> dict:
         for run in runs:
             case_started_at = time.perf_counter()
             try:
+                db.refresh(run)
+                if run.status == "CANCELLED":
+                    fail_count += 1
+                    continue
                 project = db.get(Project, run.project_id)
                 if project is None:
                     finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")

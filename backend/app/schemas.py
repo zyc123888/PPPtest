@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.rich_text_security import sanitize_rich_text
 
 
 class ORMBaseModel(BaseModel):
@@ -18,6 +20,7 @@ class ProjectCreate(BaseModel):
 
 
 class ProjectUpdate(BaseModel):
+    workspace_id: int | None = None
     name: str | None = Field(default=None, min_length=2, max_length=100)
     description: str | None = None
     base_url: str | None = Field(default=None, min_length=5, max_length=255)
@@ -172,6 +175,8 @@ class APICaseDebugResponse(BaseModel):
     assertion_results: list[dict] = Field(default_factory=list)
     extracted_variables: dict = Field(default_factory=dict)
     extractor_results: list[dict] = Field(default_factory=list)
+    step_results: list[dict] = Field(default_factory=list)
+    dataset_applied: dict = Field(default_factory=dict)
 
 
 UI_STEP_ACTIONS = {
@@ -738,6 +743,9 @@ class CaseGenerationV2JobCreate(BaseModel):
     extra_notes: str | None = Field(default=None, max_length=100_000)
     export_xmind: bool = True
     openai_api_key: str | None = None
+    model_provider: str | None = Field(default=None, max_length=40)
+    openai_model: str | None = Field(default=None, max_length=120)
+    openai_base_url: str | None = Field(default=None, max_length=512)
 
 
 class CaseGenerationV2JobRead(ORMBaseModel):
@@ -765,9 +773,11 @@ class CaseGenerationV2ArtifactRead(ORMBaseModel):
     id: int
     job_id: int
     attempt_id: int | None = None
+    parent_attempt_id: int | None = None
     artifact_type: str
     file_name: str | None = None
     content_json: dict | list | None = None
+    revision: str | None = None
     expired_at: datetime | None = None
     created_at: datetime | None = None
 
@@ -790,10 +800,23 @@ class CaseGenerationV2AttemptRead(ORMBaseModel):
     updated_at: datetime | None = None
 
 
+class CaseGenerationV2RecoveryAction(BaseModel):
+    action: str
+    label: str
+    enabled: bool
+    reason: str | None = None
+    preserves: list[str] = Field(default_factory=list)
+    regenerates: list[str] = Field(default_factory=list)
+    calls_model: bool = False
+    source_id: str | None = None
+    gate_artifact_type: str | None = None
+
+
 class CaseGenerationV2JobDetail(BaseModel):
     job: CaseGenerationV2JobRead
     artifacts: list[CaseGenerationV2ArtifactRead] = Field(default_factory=list)
     attempts: list[CaseGenerationV2AttemptRead] = Field(default_factory=list)
+    recovery_actions: list[CaseGenerationV2RecoveryAction] = Field(default_factory=list)
 
 
 class CaseGenerationMetricsComparison(BaseModel):
@@ -994,6 +1017,10 @@ class CaseBatchPlanPayload(BaseModel):
     allow_unapproved: bool = False
 
 
+class PlanCopyToReviewPayload(BaseModel):
+    item_ids: list[int] = Field(..., min_length=1, max_length=2000)
+
+
 class BatchActionResult(BaseModel):
     success: bool
     affected_count: int
@@ -1001,6 +1028,11 @@ class BatchActionResult(BaseModel):
 
 
 class WorkspaceCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100)
+    description: str | None = None
+
+
+class WorkspaceUpdate(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     description: str | None = None
 
@@ -1062,7 +1094,7 @@ class NotificationSettingRead(ORMBaseModel):
     enabled: bool = False
     channel_type: str = "FEISHU"
     webhook_url: str | None = None
-    secret: str | None = None
+    secret_configured: bool = False
     notify_on: str = "ALL"
     updated_at: datetime | None = None
 
@@ -1167,6 +1199,11 @@ class TestPlanCreate(BaseModel):
     description: str | None = None
 
 
+class TestPlanUpdate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    description: str | None = None
+
+
 class TestPlanRead(ORMBaseModel):
     id: int
     project_id: int
@@ -1207,10 +1244,21 @@ class TestPlanScheduleUpdate(BaseModel):
 
 
 class TestPlanCaseCreate(BaseModel):
-    case_type: str = Field(..., pattern="^(API|UI)$")
+    case_type: str = Field(..., pattern="^(API|UI|PERF)$")
     case_id: int
     order_index: int = 1
     allow_unapproved: bool = False
+
+
+class TestPlanCaseBatchDeleteRequest(BaseModel):
+    plan_case_ids: list[int] = Field(..., min_length=1, max_length=500)
+
+
+class CaseGenerationImportRequest(BaseModel):
+    import_type: str = Field(default="AUTO", pattern="^(AUTO|API|UI|REQUIREMENT)$")
+    base_url: str | None = "http://testserver"
+    folder_path: str | None = "/AI生成"
+    selected_indices: list[int] | None = None
 
 
 class TestPlanCaseRead(ORMBaseModel):
@@ -1334,6 +1382,7 @@ class ReportDetail(BaseModel):
     test_runs: list[TestRunRead]
     recent_history: list[ReportHistoryItem] = []
     defects: list["DefectRecordRead"] = []
+    internal_defects: list["DefectRead"] = []
 
 
 class PublicTestPlanRunRead(BaseModel):
@@ -1625,6 +1674,11 @@ class RequirementUpdate(BaseModel):
     due_date: datetime | None = None
 
 
+class RequirementBatchIterationRequest(BaseModel):
+    requirement_ids: list[int] = Field(min_length=1)
+    iteration_id: int | None = None
+
+
 class RequirementRead(ORMBaseModel):
     id: int
     project_id: int
@@ -1782,6 +1836,11 @@ class DefectRead(ORMBaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
+    @field_validator("description", "reproduce_steps", "resolution", mode="before")
+    @classmethod
+    def sanitize_stored_rich_text(cls, value: str | None) -> str | None:
+        return sanitize_rich_text(value)
+
 
 class DefectPage(BaseModel):
     items: list[DefectRead]
@@ -1883,6 +1942,9 @@ class TraceRow(BaseModel):
     ui_case_count: int
     perf_case_count: int
     total_case_count: int
+    linked_case_count: int
+    executed_case_count: int
+    passed_case_count: int
     last_run_status: str | None = None
     open_defect_count: int
     closed_defect_count: int

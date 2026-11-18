@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import settings
 
@@ -31,6 +32,11 @@ celery_app.conf.update(
         "scan-scheduled-plans": {
             "task": "app.tasks.scan_scheduled_plans",
             "schedule": 60.0,
+            "options": {"queue": "execution"},
+        },
+        "cleanup-execution-artifacts": {
+            "task": "app.tasks.cleanup_execution_artifacts",
+            "schedule": crontab(hour=4, minute=0),
             "options": {"queue": "execution"},
         },
     },

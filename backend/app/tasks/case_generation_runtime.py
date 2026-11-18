@@ -299,6 +299,7 @@ def raise_if_job_cancelled(db, job_cls, job_id: int) -> None:
     if current is None:
         return
     assert_active_attempt(current, db=db)
+    db.refresh(current, attribute_names=["status"])
     if current.status == "CANCELLED":
         raise RuntimeError("任务已取消")
 
@@ -317,6 +318,13 @@ def finish_attempt(
     try:
         assert_active_attempt(job, attempt_id, db=db)
     except SupersededAttemptError:
+        db.rollback()
+        return False
+    # The active-attempt assertion locks the job row. Refresh the database
+    # control state without discarding generated progress or artifact data.
+    # A cancellation committed by another session must remain terminal.
+    db.refresh(job, attribute_names=["status"])
+    if job.status == "CANCELLED":
         db.rollback()
         return False
     attempt = db.get(_attempt_model(current_pipeline_version() or "v1"), attempt_id)

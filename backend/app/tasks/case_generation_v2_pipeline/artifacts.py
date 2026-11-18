@@ -9,6 +9,7 @@ from typing import Callable
 import yaml
 from sqlalchemy import select
 
+from app.artifact_revision import artifact_revision
 from app.models import CaseGenerationV2Artifact
 from app.tasks.case_generation_runtime import current_attempt_id
 
@@ -104,6 +105,7 @@ def upsert_artifact(
     file_path: str | None = None,
     content_json: dict | list | None = None,
 ) -> None:
+    revision = artifact_revision(content_json=content_json, file_name=file_name, file_path=file_path)
     attempt_id = current_attempt_id()
     filters = [
         CaseGenerationV2Artifact.job_id == job_id,
@@ -121,12 +123,14 @@ def upsert_artifact(
                 file_name=file_name,
                 file_path=file_path,
                 content_json=content_json,
+                revision=revision,
             )
         )
         return
     artifact.file_name = file_name
     artifact.file_path = file_path
     artifact.content_json = content_json
+    artifact.revision = revision
     artifact.expired_at = None
 
 

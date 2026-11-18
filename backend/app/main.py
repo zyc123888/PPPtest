@@ -7,7 +7,6 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from app.api import protected_router, public_router
 from app.project_workspace_api import workspace_router
@@ -91,16 +90,8 @@ app.include_router(public_router, prefix=settings.api_v1_prefix)
 app.include_router(protected_router, prefix=settings.api_v1_prefix)
 app.include_router(workspace_router, prefix=settings.api_v1_prefix)
 
-# Serve rich-text uploaded images. Mounted AFTER the routers so the POST
-# ``/uploads/image`` endpoint keeps priority; GET of stored files falls through
-# here. nginx already proxies ``/api/`` to the backend, so no proxy change needed.
 _upload_dir = Path(settings.upload_dir)
 _upload_dir.mkdir(parents=True, exist_ok=True)
-app.mount(
-    f"{settings.api_v1_prefix}/uploads",
-    StaticFiles(directory=str(_upload_dir)),
-    name="uploads",
-)
 
 
 @app.get("/")

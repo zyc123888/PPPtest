@@ -27,7 +27,7 @@ import yaml
 from app.core.celery_app import celery_app
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.models import AIModelConfig, CaseGenerationV2Job
+from app.models import AIModelConfig, CaseGenerationV2Attempt, CaseGenerationV2Job
 from app.tasks import case_generation as original_case_generation
 from app.tasks.case_generation_common import (
     inspect_xmind_archive,
@@ -957,6 +957,26 @@ def sanitize_case_generation_payload(payload: dict | None, *, cleanup_secret: bo
         else:
             sanitized["openai_api_key"] = "***已提供***"
     return sanitized
+
+
+def _resolve_model_execution_config(db, payload: dict, attempt_payload: dict | None = None) -> tuple[str, str, str]:
+    """解析执行用模型参数：优先读提交时冻结到 attempt 的任务级快照，
+    避免排队期间共享配置被改动导致串味；API Key 等秘密参数仍按引用解析。"""
+    snapshot = None
+    candidate = (attempt_payload or {}).get("model_config_snapshot") or payload.get("model_config_snapshot")
+    if isinstance(candidate, dict) and candidate.get("model"):
+        snapshot = candidate
+    model_config_id = (snapshot or {}).get("model_config_id") or payload.get("model_config_id")
+    model_config = db.get(AIModelConfig, model_config_id) if model_config_id else None
+    api_key = (model_config.api_key or "").strip() if model_config and model_config.api_key else ""
+    if snapshot is not None:
+        model = str(snapshot.get("model") or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
+        raw_base_url = snapshot.get("base_url")
+    else:
+        model = (payload.get("openai_model") or (model_config.model if model_config else None) or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
+        raw_base_url = payload.get("openai_base_url") or (model_config.base_url if model_config else None)
+    base_url, model = validate_model_connection_config(model, raw_base_url, api_key)
+    return api_key, model, base_url
 
 
 def _update_stage(job: CaseGenerationV2Job, db, key: str, title: str, status: str, summary: str) -> None:
@@ -3860,15 +3880,9 @@ def _resume_trusted_v2_from_testcase_gate(job_id: int) -> None:
             return
         assert_active_attempt(job, attempt_id, db=db)
         payload = dict(job.input_payload_json or {})
-        model_config_id = payload.get("model_config_id")
-        model_config = db.get(AIModelConfig, model_config_id) if model_config_id else None
-        api_key = (model_config.api_key or "").strip() if model_config and model_config.api_key else ""
-        model = ((model_config.model if model_config else None) or payload.get("openai_model") or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
-        base_url, model = validate_model_connection_config(
-            model,
-            (model_config.base_url if model_config else None) or payload.get("openai_base_url"),
-            api_key,
-        )
+        attempt = db.get(CaseGenerationV2Attempt, attempt_id) if attempt_id else None
+        attempt_payload = dict(attempt.input_payload_json or {}) if attempt is not None else {}
+        api_key, model, base_url = _resolve_model_execution_config(db, payload, attempt_payload)
         if not api_key:
             raise ValueError("缺少模型配置，无法从用例门禁继续")
 
@@ -4020,15 +4034,9 @@ def _run_trusted_v2_pipeline(job_id: int) -> None:
             message = "请提供需求文本、上传文件内容或有效的需求文档链接"
             finish_attempt(db, job, status="FAILED", summary="输入内容为空", error_message=message)
             raise ValueError(message)
-        model_config_id = payload.get("model_config_id")
-        model_config = db.get(AIModelConfig, model_config_id) if model_config_id else None
-        api_key = (model_config.api_key or "").strip() if model_config and model_config.api_key else ""
-        model = ((model_config.model if model_config else None) or payload.get("openai_model") or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
-        base_url, model = validate_model_connection_config(
-            model,
-            (model_config.base_url if model_config else None) or payload.get("openai_base_url"),
-            api_key,
-        )
+        attempt = db.get(CaseGenerationV2Attempt, attempt_id) if attempt_id else None
+        attempt_payload = dict(attempt.input_payload_json or {}) if attempt is not None else {}
+        api_key, model, base_url = _resolve_model_execution_config(db, payload, attempt_payload)
         if not api_key:
             message = "当前工作空间未配置可用模型或 API Key"
             finish_attempt(db, job, status="FAILED", summary="缺少模型配置", error_message=message)
@@ -4440,7 +4448,7 @@ def run_case_generation_v2_job(self, job_id: int, attempt_id: int | None = None)
                     pipeline_mode=pipeline_mode,
                     resume_from_stage=payload.get("trusted_resume_from_stage"),
                 ),
-                run_lite=_run_clone_pipeline,
+                run_lite=_run_lite_pipeline,
                 run_trusted=_run_trusted_v2_pipeline,
                 resume_trusted_from_testcase_gate=_resume_trusted_v2_from_testcase_gate,
             )
@@ -4492,15 +4500,9 @@ def _rerun_case_generation_v2_source_shard_attempt(job_id: int, source_id: str, 
         assert_active_attempt(job, attempt_id, db=db)
         payload = dict(job.input_payload_json or {})
         payload["pipeline_mode"] = payload.get("pipeline_mode") or "trusted"
-        model_config_id = payload.get("model_config_id")
-        model_config = db.get(AIModelConfig, model_config_id) if model_config_id else None
-        api_key = (model_config.api_key or "").strip() if model_config and model_config.api_key else ""
-        model = ((model_config.model if model_config else None) or payload.get("openai_model") or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
-        base_url, model = validate_model_connection_config(
-            model,
-            (model_config.base_url if model_config else None) or payload.get("openai_base_url"),
-            api_key,
-        )
+        attempt = db.get(CaseGenerationV2Attempt, attempt_id) if attempt_id else None
+        attempt_payload = dict(attempt.input_payload_json or {}) if attempt is not None else {}
+        api_key, model, base_url = _resolve_model_execution_config(db, payload, attempt_payload)
         if not api_key:
             raise ValueError("缺少模型配置，无法重跑 source shard")
 
@@ -4688,7 +4690,7 @@ def _rerun_case_generation_v2_source_shard_attempt(job_id: int, source_id: str, 
         db.close()
 
 
-def _run_clone_pipeline(job_id: int) -> None:
+def _run_lite_pipeline(job_id: int) -> None:
     db = SessionLocal()
     attempt_id = current_attempt_id()
     run_started_at = time.perf_counter()
@@ -4708,15 +4710,9 @@ def _run_clone_pipeline(job_id: int) -> None:
             finish_attempt(db, job, status="FAILED", summary="输入内容为空", error_message=message)
             raise ValueError(message)
 
-        model_config_id = payload.get("model_config_id")
-        model_config = db.get(AIModelConfig, model_config_id) if model_config_id else None
-        api_key = (model_config.api_key or "").strip() if model_config and model_config.api_key else ""
-        model = ((model_config.model if model_config else None) or payload.get("openai_model") or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
-        base_url, model = validate_model_connection_config(
-            model,
-            (model_config.base_url if model_config else None) or payload.get("openai_base_url"),
-            api_key,
-        )
+        attempt = db.get(CaseGenerationV2Attempt, attempt_id) if attempt_id else None
+        attempt_payload = dict(attempt.input_payload_json or {}) if attempt is not None else {}
+        api_key, model, base_url = _resolve_model_execution_config(db, payload, attempt_payload)
         if not api_key:
             message = "当前工作空间未配置可用模型或 API Key"
             finish_attempt(db, job, status="FAILED", summary="缺少模型配置", error_message=message)
