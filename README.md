@@ -1,122 +1,107 @@
-# 自动化测试平台
+# PPPtest · AI 测试用例生成平台
 
-一个完整的测试工程平台示例，覆盖：
+一个面向测试团队的 **AI 驱动测试用例生成与执行平台**：用大模型把需求/文档自动拆解成结构化用例，并管理 API/UI 用例、测试计划、执行与报告。后端 FastAPI，前端 Vue 3，异步任务 Celery + Redis，端到端用 Playwright 自测。
 
-- API 接口测试管理与执行
-- Web UI 测试管理与执行
-- Celery 异步任务调度
-- MySQL / Redis 健康检查
-- 中文前端控制台
-- pytest 接口自测
-- Playwright 前端自测
-- Docker Compose 一键部署
-- GitHub Actions 构建 GHCR 镜像并自动部署到生产服务器
-
-## 技术栈
-
-- 后端：FastAPI、SQLAlchemy、Celery、PyMySQL、Redis
-- 前端：Vue 3、Vite、Nginx
-- 基础设施：MySQL 8、Redis 7
-- 测试：pytest、Playwright
-
-## 项目结构
-
-```text
-PPPtest/
-├── backend
-│   ├── app
-│   │   ├── api.py
-│   │   ├── main.py
-│   │   ├── models.py
-│   │   ├── schemas.py
-│   │   ├── services.py
-│   │   ├── core
-│   │   │   ├── celery_app.py
-│   │   │   ├── config.py
-│   │   │   └── database.py
-│   │   └── tasks
-│   │       └── executions.py
-│   ├── tests
-│   │   ├── conftest.py
-│   │   └── test_platform_api.py
-│   ├── Dockerfile
-│   ├── pytest.ini
-│   └── requirements.txt
-├── docs
-│   └── architecture.md
-├── e2e
-│   ├── tests
-│   │   └── platform.spec.js
-│   ├── Dockerfile
-│   ├── package.json
-│   └── playwright.config.js
-├── frontend
-│   ├── src
-│   │   ├── lib
-│   │   │   └── api.js
-│   │   ├── styles
-│   │   │   └── main.css
-│   │   ├── App.vue
-│   │   └── main.js
-│   ├── Dockerfile
-│   ├── index.html
-│   ├── nginx.conf
-│   ├── package.json
-│   └── vite.config.js
-├── scripts
-│   ├── health_check.sh
-│   └── run_stack_tests.sh
-├── .env.example
-├── .gitignore
-├── docker-compose.yml
-└── README.md
-```
+> 仓库 docker-compose 项目名 `omnitest`，镜像前缀 `ghcr.io/zyc123888/ppptest`。
 
 ## 平台能力
 
-### 1. 项目与用例管理
+- **AI 用例生成管线**（`backend/app/tasks/case_generation_v2_pipeline/`）
+  - 需求 → 功能点 → 测试用例 的确定性拆解与回填
+  - JSON 截断检测 + 模型自愈修复、重试审计、并发控制
+  - 多模型接入（OpenAI / 阿里云百炼 DashScope / Qwen 兼容端点，走 `httpx` 直连）
+  - 模型密钥经 Fernet 加密存储（`app/core/secrets.py`），不在库内落明文
+- **项目管理**：工作区（Workspace）、成员与 RBAC、项目（Project）
+- **用例管理**：API 用例、UI 用例（含 Tiptap 富文本步骤与图片上传）
+- **测试计划与执行**：测试计划（Plan）、异步执行（Execution，Celery Worker 调 pytest / Playwright）
+- **报告**：执行摘要、请求/响应快照、产物下载
+- **常用工具**：JSON 格式化、Base64 编解码、时间戳转换
 
-- 新增项目
-- 新增 API 用例
-- 新增 UI 用例
-- 查看项目与用例列表
+## 技术栈
 
-### 2. 执行中心
+| 层 | 选型 |
+|----|------|
+| 后端 | FastAPI、SQLAlchemy 2.0、Celery、Redis、Pydantic v2、`cryptography`(Fernet) |
+| AI 生成 | `httpx` 直连多模型供应商（无 OpenAI SDK 依赖） |
+| 前端 | Vue 3、Vite、Pinia、Vue Router 4、Element Plus、Tiptap、设计 Token(`tokens.css`) |
+| 数据库 | MariaDB / MySQL（本地 compose 用 `mariadb`；SQLite 可用于单测） |
+| 异步 | Celery + Redis（按队列拆分：execution / case_generation / beat） |
+| 测试 | pytest（后端）、vitest（前端）、Playwright（e2e） |
+| 部署 | Docker Compose（本地）/ GitHub Actions + GHCR + SSH（生产） |
 
-- 投递 API 异步测试任务
-- 投递 UI 异步测试任务
-- 查看运行状态与摘要
-- 查看请求/响应快照
+## 目录结构（关键部分）
 
-### 3. 常用工具
+```text
+PPPtest/
+├── backend/
+│   ├── app/
+│   │   ├── api.py                # 路由聚合（当前为单体文件，计划按领域拆分，见 docs）
+│   │   ├── main.py               # FastAPI 入口、生命周期、静态上传目录
+│   │   ├── models.py             # ORM 模型（SQLAlchemy 2.0 Mapped 风格）
+│   │   ├── schemas.py            # Pydantic 请求/响应契约
+│   │   ├── services.py           # 业务逻辑层
+│   │   ├── core/                 # config / secrets / database / celery_app
+│   │   └── tasks/                # executions.py, case_generation_v2.py,
+│   │                              # case_generation_v2_pipeline/（AI 生成管线）
+│   ├── tests/                    # pytest 集成测试（conftest 拉起 TestClient）
+│   ├── Dockerfile                # 多阶段、非 root
+│   ├── pytest.ini
+│   └── requirements.txt
+├── frontend/
+│   ├── src/
+│   │   ├── lib/api.js            # 后端 API 封装（Bearer 鉴权）
+│   │   ├── stores/               # Pinia（auth 等）
+│   │   ├── router/               # Vue Router 4
+│   │   ├── views/                # 用例生成器、API/UI 用例、执行、报告等
+│   │   ├── components/           # 公共组件
+│   │   └── styles/tokens.css     # 设计 Token
+│   ├── Dockerfile / nginx.conf / vite.config.js
+│   └── package.json
+├── e2e/                          # Playwright 端到端用例（admin_layout / full_flow /
+│                                  # workspace_membership_flow / workspace_owner_guard /
+│                                  # execution_artifact_download 等）
+├── deploy/                       # 生产部署权威配置（compose.production.yml / deploy.sh /
+│                                  # bootstrap-server.sh / .env.production.example）
+├── docs/                         # 架构与部署文档
+├── scripts/                      # health_check.sh / run_stack_tests.sh
+├── .github/workflows/            # stack-tests.yml（测试门禁）、publish-deploy.yml（发版部署）
+├── docker-compose.yml            # 本地一键起栈
+└── README.md
+```
 
-- JSON 格式化
-- Base64 编解码
-- 时间戳转换
+## 安全与必填环境变量（重要）
 
-## 默认演示数据
+以下变量**无代码内默认值**，缺失会在启动时直接报错（fail-fast），部署前必须提供：
 
-系统启动后会自动初始化：
+| 变量 | 说明 |
+|------|------|
+| `INITIAL_ADMIN_PASSWORD` | 初始管理员口令，**禁止使用弱口令**（如 `admin123`） |
+| `APP_ENCRYPTION_KEY` | 模型密钥 Fernet 加密密钥。生成：`python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'` |
+| `DATABASE_URL` / `REDIS_URL` / `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | 数据库与 Redis 连接 |
+| `CORS_ORIGINS` | 前端来源白名单 |
 
-- 项目：`平台自检项目`
-- API 用例：`示例健康检查接口`
-- UI 用例：`示例前端首页巡检`
+Docker Compose 使用项目根目录的 `.env`；直接运行后端时可参考
+`backend/.env.example`。生产环境参考 `deploy/.env.production.example`。
 
 ## 本地 Docker 启动
 
-### 1. 启动并验证 Docker（Colima）
+### 1. 准备环境
 
-macOS 使用 Colima 时，重启电脑后需要先启动 Colima。若 `docker info` 已能正常返回信息，可跳过 `colima start`。
+复制并填写环境变量（至少包含上面的必填项）：
 
 ```bash
-colima status
-colima start
+cp .env.example .env
+# 编辑根目录 .env，至少替换数据库口令、INITIAL_ADMIN_PASSWORD 与 APP_ENCRYPTION_KEY
+```
+
+### 2. 启动并验证 Docker（macOS Colima）
+
+```bash
+colima status || colima start
 docker info
 ```
 
-若提示 `colima: command not found`，请使用 Docker Desktop 启动 Docker，或安装并配置 Colima。若提示 Docker socket 不存在，通常表示 Colima 尚未启动。
-
-### 2. 启动项目
+### 3. 启动项目
 
 ```bash
 cd /Users/zhangyongcheng/Desktop/PPPtest
@@ -124,82 +109,43 @@ docker-compose up -d --build
 docker-compose ps
 ```
 
-`docker-compose ps` 中 backend、frontend、mysql、redis 和 worker 应处于运行状态；backend、frontend、mysql、redis 会显示 `healthy`。
+`backend` `frontend` `mariadb` `redis` `worker` 应处于运行/`healthy` 状态。
 
-### 3. 访问地址
+### 4. 访问地址
 
-- 前端：[http://localhost:3000](http://localhost:3000)
-- 后端 OpenAPI：[http://localhost:8000/docs](http://localhost:8000/docs)
-- 后端健康检查：[http://localhost:8000/api/v1/system/health](http://localhost:8000/api/v1/system/health)
+- 前端：http://localhost:3000
+- 后端 OpenAPI：http://localhost:8000/docs
+- 健康检查：http://localhost:8000/api/v1/system/health
 
-### 4. 运行健康检查
-
-```bash
-bash scripts/health_check.sh
-```
-
-### 5. 运行后端 pytest
+### 5. 运行测试
 
 ```bash
+# 后端 pytest（容器内）
 docker-compose exec -T backend pytest
-```
 
-### 6. 运行前端 Playwright 自测
-
-```bash
+# 前端 Playwright 端到端（e2e profile）
 docker-compose --profile test run --rm e2e
-```
 
-### 7. 一键启动并执行全部验证
-
-```bash
+# 一键启动并执行全部验证
 bash scripts/run_stack_tests.sh
 ```
 
-### 8. 停止、重启和清理
+### 6. 停止 / 清理
 
 ```bash
-# 临时停止，不删除容器和数据
-docker-compose stop
-
-# 恢复已停止的容器
-docker-compose start
-
-# 停止并删除容器，保留数据库数据
-docker-compose down
-
-# 停止并删除容器和数据库数据（不可恢复）
-docker-compose down -v
+docker-compose stop            # 暂停，保留数据
+docker-compose start           # 恢复
+docker-compose down            # 停止并删容器，保留数据
+docker-compose down -v         # 停止并删除容器与数据库数据（不可恢复）
 ```
-
-## 后端核心接口
-
-- `GET /api/v1/system/health`：系统健康检查
-- `GET /api/v1/system/info`：系统运行信息与配置概览
-- `POST /api/v1/system/bootstrap`：手动初始化数据库与演示数据
-- `GET /api/v1/dashboard/summary`：仪表盘汇总
-- `GET /api/v1/projects`：项目列表
-- `POST /api/v1/projects`：创建项目
-- `GET /api/v1/api-cases`：接口用例列表
-- `POST /api/v1/api-cases`：创建接口用例
-- `GET /api/v1/ui-cases`：UI 用例列表
-- `POST /api/v1/ui-cases`：创建 UI 用例
-- `GET /api/v1/executions/runs`：执行记录
-- `POST /api/v1/executions/api/{case_id}/run`：执行 API 用例
-- `POST /api/v1/executions/ui/{case_id}/run`：执行 UI 用例
-- `POST /api/v1/tools/json/format`：JSON 格式化
-- `POST /api/v1/tools/base64/encode`：Base64 编码
-- `POST /api/v1/tools/base64/decode`：Base64 解码
-- `POST /api/v1/tools/timestamp/convert`：时间戳转换
 
 ## 生产部署
 
-生产环境采用 GitHub Actions、GitHub Container Registry 和远程 Docker Compose。完整初始化、Secrets、自动回滚与备份说明见 [生产部署文档](docs/production_deployment.md)。
+生产采用 GitHub Actions + GitHub Container Registry + 远程 Docker Compose（`deploy/` 为权威配置，`publish-deploy.yml` 在测试通过后构建镜像并 SSH 部署，含 `known_hosts` 与密钥校验、concurrency 保护）。初始化、Secrets、回滚与备份详见 `docs/production_deployment.md` 与 `deploy/.env.production.example`。
 
 ## 说明
 
-- 前端全部中文呈现。
-- 前端通过 Nginx 反向代理 `/api` 到后端，浏览器访问无需额外配置跨域。
-- UI 用例由 Celery Worker 调用 Playwright 浏览器执行。
-- `backend/tests` 直接对已启动系统执行接口与异步任务验证。
-- `e2e/tests` 对平台前端页面执行 Playwright 自测。
+- 前端全部中文呈现，经 Nginx 反向代理 `/api` 到后端，浏览器无需额外跨域配置。
+- UI 用例由 Celery Worker 调用 Playwright 执行；AI 生成管线调用大模型服务。
+- 上传图片经 `/api/v1/uploads/{filename}` 提供，读取与上传均要求登录。
+- 本 README 取代早期「迷你演示平台」描述，当前内容以真实代码为准。

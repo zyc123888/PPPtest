@@ -67,8 +67,9 @@ backend/
 - SQLAlchemy engine / Session： [database.py](file:///Users/zhangyongcheng/Desktop/PPPtest/backend/app/core/database.py)
   - `engine = create_engine(settings.database_url, ...)`
   - `SessionLocal = sessionmaker(...)`
-  - `init_db()`：`Base.metadata.create_all` + `ensure_schema()`（在非迁移体系下用“补列/补索引”方式演进）（见 [database.py:L22-L39](file:///Users/zhangyongcheng/Desktop/PPPtest/backend/app/core/database.py#L22-L39)）
-- 启动时 bootstrap：`services.bootstrap_runtime()` 会调用 `init_db()` 并创建默认空间/管理员等（见 [services.py:L376-L396](file:///Users/zhangyongcheng/Desktop/PPPtest/backend/app/services.py#L376-L396)、[services.py:L124-L185](file:///Users/zhangyongcheng/Desktop/PPPtest/backend/app/services.py#L124-L185)）
+  - `init_db()`：只校验当前 Alembic revision，不再创建/补齐表结构（见 [database.py](file:///Users/zhangyongcheng/Desktop/PPPtest/backend/app/core/database.py)）
+  - schema 变更通过 [alembic/](file:///Users/zhangyongcheng/Desktop/PPPtest/backend/alembic) 管理；启动容器先执行 `python -m app.db_migrate upgrade`
+- 启动时 bootstrap：`services.bootstrap_runtime()` 会检查数据库 revision 并创建默认空间/管理员等（见 [services.py](file:///Users/zhangyongcheng/Desktop/PPPtest/backend/app/services.py)）
 
 ## Schema（Pydantic）与 API 校验
 

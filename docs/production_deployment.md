@@ -130,16 +130,26 @@ docker compose --env-file .env.production -f compose.production.yml restart
 
 不要执行 `docker compose down -v`，该命令会删除数据库和所有持久化数据。
 
-## 六、备份要求
+## 六、备份与回滚
 
-自动回滚只回滚应用镜像，不回滚数据库。上线前至少配置：
+`deploy.sh` 在**每次部署前自动执行** MariaDB 全量备份：
 
-- MariaDB 每日备份
-- `reports_data` 与 `uploads_data` 定期快照
-- 异地保存 `APP_ENCRYPTION_KEY`
-- 定期验证备份可恢复
+1. `mysqldump --single-transaction --routines --triggers` 从运行中的 `mysql` 容器导出，`gzip` 压缩；
+2. 备份文件写入 `backups/omnitest-<UTC时间戳>.sql.gz`（默认目录 `${DEPLOY_PATH}/backups`，可用 `BACKUP_DIR` 覆盖）；
+3. 校验大小，小于 1KB 视为失败并中止部署（不拉起新镜像）；
+4. 只保留最近 `BACKUP_KEEP`（默认 7）份，自动清理更旧备份；
+5. 每次操作写入 `deploy.log`（备份 / 部署开始 / 成功 / 回滚开始 / 回滚成功或失败）。
 
-数据库结构发生不兼容变更时，必须先备份数据库再部署。
+镜像回滚仍沿用既有逻辑：健康检查失败时自动恢复 `.last-successful-image-tag` 记录的上一个 `sha-<commit>` 标签，并写日志。
+
+**仍需人工配置的长期项**（`deploy.sh` 不覆盖）：
+
+- 每日异地备份（把 `backups/` 目录同步到对象存储或另一台机器）；
+- `reports_data` 与 `uploads_data` 定期快照；
+- 异地保存 `APP_ENCRYPTION_KEY`；
+- 定期验证备份可恢复（演练 `zcat backups/omnitest-*.sql.gz | mariadb ...` 导入）。
+
+数据库结构发生不兼容变更时，`deploy.sh` 已强制在部署前留一份全量 dump，但恢复仍需人工执行。
 
 ## 七、HTTPS
 

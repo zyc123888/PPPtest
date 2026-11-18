@@ -9,7 +9,7 @@ PPPtest 是一套“测试工程平台示例”，覆盖：
 - 性能用例管理与执行（并发压测 + 指标判定）
 - 测试计划（计划编排、批量执行、报告产出）
 - 平台自测（后端 pytest + 前端 e2e Playwright）
-- Docker Compose 一键启动与 CloudBase 部署
+- Docker Compose 一键启动与 GitHub Actions 生产部署
 
 项目自带一份架构说明：[architecture.md](file:///Users/zhangyongcheng/Desktop/PPPtest/docs/architecture.md)
 
@@ -98,4 +98,3 @@ sequenceDiagram
   - `playwright` / `httpx`（执行引擎）
   - `services.mark_run_started/finalize_run`（统一状态流转与产物同步）
 - `frontend/src/lib/api.js` 依赖浏览器 `fetch` 与 `localStorage` token（见 [api.js:L64-L120](file:///Users/zhangyongcheng/Desktop/PPPtest/frontend/src/lib/api.js#L64-L120)）
-

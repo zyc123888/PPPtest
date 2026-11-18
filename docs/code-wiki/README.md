@@ -26,7 +26,7 @@ PPPtest/
 ├── scripts/              # 健康检查与全栈验证脚本
 ├── docs/                 # 项目说明文档（本 Wiki 在 docs/code-wiki 下）
 ├── docker-compose.yml    # 本地一键启动（mysql/redis/backend/worker/frontend）
-└── cloudbaserc.json      # CloudBase 部署（云函数 + 静态托管 + /api 重写）
+└── deploy/               # GitHub Actions + GHCR + SSH 生产部署配置
 ```
 
 ## 术语
@@ -34,4 +34,3 @@ PPPtest/
 - 用例类型：API / UI / Performance（性能）
 - 执行记录：TestRun（单用例执行），TestPlanRun（计划执行）
 - 产物：执行期间生成的 request/response、日志、截图、报告等，落地到 `backend/reports/`
-
