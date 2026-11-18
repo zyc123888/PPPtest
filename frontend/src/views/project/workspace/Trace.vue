@@ -37,6 +37,11 @@
             <span v-else class="muted">未执行</span>
           </template>
         </el-table-column>
+        <el-table-column label="执行覆盖" width="170" align="center">
+          <template #default="{ row }">
+            <span class="execution-counts">关联 {{ row.linked_case_count }} · 已执行 {{ row.executed_case_count }} · 通过 {{ row.passed_case_count }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="缺陷 (开/关)" width="120" align="center">
           <template #default="{ row }">
             <span class="defect-counts">
@@ -79,8 +84,8 @@ function runType(status) {
   return 'info'
 }
 
-const coverageLabels = { NONE: '未覆盖', COVERED: '已覆盖', UNTESTED: '待执行', FAILED: '执行失败' }
-const coverageTypes = { NONE: 'info', COVERED: 'success', UNTESTED: 'warning', FAILED: 'danger' }
+const coverageLabels = { NONE: '未关联', COVERED: '已覆盖', UNTESTED: '待执行', PARTIAL: '部分覆盖', AT_RISK: '有风险' }
+const coverageTypes = { NONE: 'info', COVERED: 'success', UNTESTED: 'info', PARTIAL: 'warning', AT_RISK: 'danger' }
 function coverageType(coverage) { return coverageTypes[coverage] || 'info' }
 
 async function fetchMatrix() {
@@ -109,4 +114,5 @@ onMounted(fetchMatrix)
 .defect-counts .open.warn { color: #ef4444; }
 .defect-counts .closed { color: #94a3b8; }
 .muted { color: #cbd5e1; font-size: 12px; }
+.execution-counts { color: #64748b; font-size: 12px; white-space: nowrap; }
 </style>

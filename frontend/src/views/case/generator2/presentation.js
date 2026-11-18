@@ -148,8 +148,9 @@ export function formatRecoveryPlan(plan, stageLabels = {}) {
   return [strategyLabel, returnTo, sourceText].filter(Boolean).join(' / ')
 }
 
-export function buildTrustedGateIssues(artifacts, stageLabels = {}) {
+export function buildTrustedGateIssues(artifacts, stageLabels = {}, recoveryActions = []) {
   const artifactList = Array.isArray(artifacts) ? artifacts : []
+  const availableActions = Array.isArray(recoveryActions) ? recoveryActions : []
   return GATE_ARTIFACTS
     .map((gate) => {
       const artifact = artifactList.find((item) => item.artifact_type === gate.key)
@@ -169,7 +170,11 @@ export function buildTrustedGateIssues(artifacts, stageLabels = {}) {
       const sourceIds = Array.isArray(recoveryPlan?.rerun_scope?.source_ids)
         ? recoveryPlan.rerun_scope.source_ids.filter(Boolean).slice(0, 6)
         : []
-      const strategy = recoveryPlan?.strategy || ''
+      const gateActions = availableActions.filter((action) => {
+        if (action?.gate_artifact_type !== gate.key) return false
+        if (action.action === 'rerun_source') return sourceIds.includes(action.source_id)
+        return action.action === 'rerun_job'
+      })
 
       return {
         key: gate.key,
@@ -185,7 +190,8 @@ export function buildTrustedGateIssues(artifacts, stageLabels = {}) {
         recoveryPlan,
         recoveryText: hasActionableIssue ? formatRecoveryPlan(recoveryPlan, stageLabels) : '',
         sourceIds,
-        canRerunStage: blockingCount > 0 && (strategy === 'stage_rerun' || (!sourceIds.length && strategy && strategy !== 'none'))
+        recoveryActions: gateActions,
+        canRerunStage: blockingCount > 0 && gateActions.some((action) => action.action === 'rerun_job')
       }
     })
     .filter(Boolean)
@@ -202,6 +208,27 @@ export function filterStageArtifacts(artifacts, stageKey, trusted) {
   return filterVisibleArtifacts(artifacts, trusted).filter(
     (artifact) => stageKeys[artifact.artifact_type] === stageKey
   )
+}
+
+export function mergeArtifactPreviewContent(artifacts, cachedArtifacts, preserveCached = true) {
+  const cachedContent = preserveCached
+    ? new Map((Array.isArray(cachedArtifacts) ? cachedArtifacts : []).map((item) => [item.id, item]))
+    : new Map()
+  return (Array.isArray(artifacts) ? artifacts : []).map((item) => {
+    const cached = cachedContent.get(item.id)
+    const sameRevision = Boolean(item.revision) && item.revision === cached?.revision
+    return {
+      ...item,
+      content_json: item.content_json ?? (sameRevision ? cached?.content_json : null) ?? null
+    }
+  })
+}
+
+export function resolveActiveArtifactType(artifacts, preferredType = '') {
+  const artifactList = Array.isArray(artifacts) ? artifacts : []
+  return artifactList.some((item) => item.artifact_type === preferredType)
+    ? preferredType
+    : artifactList[0]?.artifact_type || ''
 }
 
 export function resolveFinalDeliveryGatePassed(artifact, trustedMetrics) {

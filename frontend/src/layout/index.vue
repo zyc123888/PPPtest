@@ -16,7 +16,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAppStore } from '@/stores/app'
 import Sidebar from './components/Sidebar.vue'
 import Header from './components/Header.vue'
@@ -31,14 +31,30 @@ const asideWidth = computed(() =>
 const sidebarOpened = computed(() => appStore.sidebar.opened)
 const isMobile = computed(() => appStore.sidebar.mobile)
 
+// 区分「用户显式折叠」与「断点自动默认」：用户手动改过折叠状态后，resize 不再覆盖
+const userAdjustedSidebar = ref(false)
+let applyingSidebarDefault = false
+
+watch(
+  () => appStore.sidebar.opened,
+  () => {
+    if (applyingSidebarDefault) return
+    userAdjustedSidebar.value = true
+  },
+  { flush: 'sync' }
+)
+
 const updateViewport = () => {
   const isMobileView = window.innerWidth <= 960
   appStore.setMobile(isMobileView)
+  if (userAdjustedSidebar.value) return
+  applyingSidebarDefault = true
   if (isMobileView) {
     appStore.closeSideBar()
   } else {
     appStore.openSideBar()
   }
+  applyingSidebarDefault = false
 }
 
 const closeSidebar = () => {

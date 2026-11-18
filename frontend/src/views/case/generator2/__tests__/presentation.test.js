@@ -12,6 +12,8 @@ import {
   generationDensityLabel,
   hasSourceGap,
   jobPipelineMode,
+  mergeArtifactPreviewContent,
+  resolveActiveArtifactType,
   resolveFinalDeliveryGatePassed,
   sourceStatusTag,
   trustedGenerationStrategyLabel
@@ -84,6 +86,7 @@ describe('generator2 presentation contracts', () => {
       sourceIds: ['SRC-001', 'SRC-002'],
       canRerunStage: false
     })
+    expect(gates[0].recoveryActions).toEqual([])
     expect(gates[0].recoveryText).toBe('局部重跑 / 退回 用例基线 / 影响 SRC-001、SRC-002')
   })
 
@@ -98,7 +101,13 @@ describe('generator2 presentation contracts', () => {
           }
         }
       }
-    ], stageLabels)
+    ], stageLabels, [
+      {
+        action: 'rerun_job',
+        gate_artifact_type: 'scope_index_gate',
+        enabled: true
+      }
+    ])
 
     expect(gates[0].canRerunStage).toBe(true)
     expect(gates[0].recoveryText).toBe('阶段重跑 / 退回 索引')
@@ -132,6 +141,40 @@ describe('generator2 presentation contracts', () => {
       'scope_index_gate'
     ])
     expect(filterStageArtifacts(artifacts, 'export', true)).toEqual([])
+  })
+
+  it('uses refreshed artifact content and preserves the active type when available', () => {
+    const refreshed = mergeArtifactPreviewContent(
+      [{ id: 7, artifact_type: 'scope_index', content_json: { revision: 2 } }],
+      [{ id: 7, content_json: { revision: 1 } }]
+    )
+    expect(refreshed[0].content_json).toEqual({ revision: 2 })
+    expect(resolveActiveArtifactType(refreshed, 'scope_index')).toBe('scope_index')
+    expect(resolveActiveArtifactType(refreshed, 'testcase_package')).toBe('scope_index')
+  })
+
+  it('discards cached artifact content on an explicit refresh', () => {
+    const refreshed = mergeArtifactPreviewContent(
+      [{ id: 7, artifact_type: 'scope_index', content_json: null }],
+      [{ id: 7, content_json: { revision: 1 } }],
+      false
+    )
+    expect(refreshed[0].content_json).toBeNull()
+  })
+
+  it('does not reuse cached content when an artifact revision changes or is missing', () => {
+    const cached = [{ id: 7, revision: 'old-revision', content_json: { revision: 1 } }]
+    const changed = mergeArtifactPreviewContent(
+      [{ id: 7, artifact_type: 'scope_index', revision: 'new-revision', content_json: null }],
+      cached
+    )
+    const unknown = mergeArtifactPreviewContent(
+      [{ id: 7, artifact_type: 'scope_index', content_json: null }],
+      cached
+    )
+
+    expect(changed[0].content_json).toBeNull()
+    expect(unknown[0].content_json).toBeNull()
   })
 
   it('prefers the delivery artifact result and falls back to review metrics', () => {

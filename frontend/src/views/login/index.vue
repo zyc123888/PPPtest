@@ -34,7 +34,7 @@
             </el-form-item>
           </el-form>
 
-          <div class="login-hint">默认管理员：admin / admin123</div>
+          <div class="login-hint">请使用管理员分配的账号登录</div>
         </div>
       </section>
     </div>

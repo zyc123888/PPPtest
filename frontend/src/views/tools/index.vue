@@ -274,7 +274,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import {
@@ -282,7 +283,30 @@ import {
 } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 
-const activeTab = ref('json')
+const route = useRoute()
+const router = useRouter()
+const VALID_TABS = ['json', 'base64', 'url', 'hash', 'timestamp', 'cron', 'jwt', 'datagen', 'regex']
+const resolveInitialTab = () => {
+  const queryTab = String(route.query.tab || '').toLowerCase()
+  if (VALID_TABS.includes(queryTab)) return queryTab
+  if (route.path.endsWith('/timestamp')) return 'timestamp'
+  return 'json'
+}
+const activeTab = ref(resolveInitialTab())
+
+watch(
+  () => [route.path, route.query.tab],
+  () => {
+    const next = resolveInitialTab()
+    if (activeTab.value !== next) activeTab.value = next
+  }
+)
+
+watch(activeTab, (tab) => {
+  if (route.query.tab !== tab) {
+    router.replace({ query: { ...route.query, tab } })
+  }
+})
 
 const jsonTool = reactive({
   input: '{\n  "name": "OmniTest",\n  "module": "接口测试"\n}',
@@ -296,28 +320,46 @@ const base64Tool = reactive({
 
 const handleJsonFormat = async () => {
   try {
-    const res = await api.post('/tools/json/format', { payload: jsonTool.input })
-    jsonTool.output = res.result
-  } catch (error) {
-    ElMessage.error(error.message)
+    const parsed = JSON.parse(jsonTool.input)
+    jsonTool.output = JSON.stringify(parsed, null, 2)
+  } catch (localErr) {
+    try {
+      const res = await api.post('/tools/json/format', { payload: jsonTool.input })
+      jsonTool.output = res.result
+    } catch (error) {
+      ElMessage.error(error.message || localErr.message)
+    }
   }
 }
 
 const handleBase64Encode = async () => {
   try {
-    const res = await api.post('/tools/base64/encode', { payload: base64Tool.input })
-    base64Tool.output = res.result
-  } catch (error) {
-    ElMessage.error(error.message)
+    const bytes = new TextEncoder().encode(base64Tool.input)
+    let binary = ''
+    bytes.forEach((b) => { binary += String.fromCharCode(b) })
+    base64Tool.output = btoa(binary)
+  } catch {
+    try {
+      const res = await api.post('/tools/base64/encode', { payload: base64Tool.input })
+      base64Tool.output = res.result
+    } catch (error) {
+      ElMessage.error(error.message)
+    }
   }
 }
 
 const handleBase64Decode = async () => {
   try {
-    const res = await api.post('/tools/base64/decode', { payload: base64Tool.input })
-    base64Tool.output = res.result
-  } catch (error) {
-    ElMessage.error(error.message)
+    const binary = atob(base64Tool.input.trim())
+    const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0))
+    base64Tool.output = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    try {
+      const res = await api.post('/tools/base64/decode', { payload: base64Tool.input })
+      base64Tool.output = res.result
+    } catch (error) {
+      ElMessage.error(error.message)
+    }
   }
 }
 

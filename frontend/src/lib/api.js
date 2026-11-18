@@ -66,6 +66,7 @@ async function request(path, options = {}) {
   const isForm = options.body instanceof FormData
   const config = {
     method: options.method || 'GET',
+    credentials: 'include',
     headers: {
       ...(options.body && !isForm ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -79,6 +80,12 @@ async function request(path, options = {}) {
 
   const response = await fetch(`${API_PREFIX}${path}`, config)
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith('/auth/login')) {
+      localStorage.removeItem(TOKEN_KEY)
+      if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login'
+      }
+    }
     const text = await response.text()
 
     try {

@@ -145,7 +145,7 @@
       </div>
     </el-card>
 
-    <el-dialog v-model="dialogVisible" title="执行详情" width="960px">
+    <el-dialog v-model="dialogVisible" title="执行详情" width="960px" @closed="clearRunQuery">
       <el-descriptions :column="3" border class="section-gap">
         <el-descriptions-item label="状态">{{ statusText(currentRun.status) }}</el-descriptions-item>
         <el-descriptions-item label="错误类型">{{ currentRun.error_type || '-' }}</el-descriptions-item>
@@ -258,14 +258,17 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
 import {
   EXECUTION_ERROR_TYPE_OPTIONS,
   executionErrorTypeTag,
   executionErrorTypeText,
+  isValidRunId,
   executionStatusTag,
   executionStatusText
 } from '@/lib/execution'
@@ -283,6 +286,8 @@ const logData = ref({})
 const artifactData = ref([])
 const artifactRunId = ref(null)
 const { canTest } = usePermissions()
+const route = useRoute()
+const router = useRouter()
 let timer = null
 
 const filters = reactive({
@@ -313,12 +318,6 @@ const errorTypeTag = executionErrorTypeTag
 
 const canCancel = (row) => {
   return canTest.value && ['PENDING', 'RUNNING'].includes(row.status)
-}
-
-const formatTime = (val) => {
-  if (!val) return '-'
-  const normalized = /(Z|[+-]\d{2}:?\d{2})$/.test(val) ? val : `${val}Z`
-  return new Date(normalized).toLocaleString('zh-CN', { hour12: false })
 }
 
 const projectName = (id) => projects.value.find((item) => item.id === id)?.name || `#${id}`
@@ -421,6 +420,28 @@ const handleDetail = async (row) => {
     dialogVisible.value = true
   } catch (error) {
     ElMessage.error(error.message)
+  }
+}
+
+const clearRunQuery = () => {
+  if (route.query.run_id) {
+    const query = { ...route.query }
+    delete query.run_id
+    router.replace({ query })
+  }
+}
+
+const openRunFromQuery = async (runId) => {
+  if (!isValidRunId(runId)) {
+    if (runId) ElMessage.error('执行编号无效')
+    return
+  }
+  try {
+    const data = await api.get(`/executions/runs/${runId}`)
+    currentRun.value = data
+    dialogVisible.value = true
+  } catch (error) {
+    ElMessage.error(`无法打开执行 #${runId}：${error.message}`)
   }
 }
 
@@ -528,7 +549,12 @@ const downloadArtifact = async (artifactIndex, artifact) => {
 onMounted(() => {
   fetchProjects()
   getList()
+  openRunFromQuery(route.query.run_id)
   restartTimer()
+})
+
+watch(() => route.query.run_id, (runId) => {
+  if (runId) openRunFromQuery(runId)
 })
 
 watch(hasActiveRuns, () => {

@@ -6,29 +6,23 @@
         <el-tag :type="gate.tagType" size="small">{{ gate.label }} · {{ gate.statusText }}</el-tag>
         <span v-if="gate.recoveryText" class="gate-recovery">建议：{{ gate.recoveryText }}</span>
       </div>
-      <div v-if="gate.sourceIds.length || gate.canRerunStage" class="gate-actions">
-        <el-button
-          v-for="sourceId in gate.sourceIds"
-          :key="sourceId"
-          size="small"
-          type="primary"
-          plain
-          :loading="rerunningShard === sourceId"
-          :disabled="!!rerunningShard || ['RUNNING', 'PENDING'].includes(jobStatus)"
-          @click="emit('rerun-source', { source_id: sourceId })"
-        >
-          重跑 {{ sourceId }}
-        </el-button>
-        <el-button
-          v-if="gate.canRerunStage"
-          size="small"
-          plain
-          :loading="rerunning"
-          :disabled="rerunDisabled"
-          @click="emit('rerun-job')"
-        >
-          重跑任务
-        </el-button>
+      <div v-if="gate.recoveryActions?.length" class="gate-actions">
+        <template v-for="action in gate.recoveryActions" :key="`${action.action}:${action.source_id || gate.key}`">
+          <el-button
+            size="small"
+            type="primary"
+            plain
+            :title="action.reason || ''"
+            :loading="action.action === 'rerun_source' ? rerunningShard === action.source_id : rerunning"
+            :disabled="!action.enabled || !!rerunningShard || rerunning || ['RUNNING', 'PENDING'].includes(jobStatus)"
+            @click="action.action === 'rerun_source' ? emit('rerun-source', { source_id: action.source_id }) : emit('rerun-job')"
+          >
+            {{ action.label }}
+          </el-button>
+          <span v-if="!action.enabled && action.reason" class="gate-action-reason">
+            {{ action.reason }}
+          </span>
+        </template>
       </div>
       <div v-for="(issue, index) in gate.issues" :key="index" class="gate-issue-msg" :class="`is-${issue.severity || 'warning'}`">
         {{ issue.message || issue.code || '-' }}
@@ -43,7 +37,6 @@ defineProps({
   jobStatus: { type: String, default: '' },
   rerunningShard: { type: String, default: '' },
   rerunning: { type: Boolean, default: false },
-  rerunDisabled: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['rerun-source', 'rerun-job'])
@@ -84,6 +77,11 @@ const emit = defineEmits(['rerun-source', 'rerun-job'])
 
 .gate-recovery {
   color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.gate-action-reason {
+  color: #b45309;
   font-size: 12px;
 }
 

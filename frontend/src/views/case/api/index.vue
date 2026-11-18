@@ -150,7 +150,7 @@
               <span v-else class="muted">未执行</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" align="right" width="164" fixed="right">
+          <el-table-column label="操作" align="right" width="184" fixed="right">
             <template #default="scope">
               <div class="row-actions">
                 <el-tooltip content="查看详情" placement="top"><el-button circle size="small" :icon="View" aria-label="查看接口用例" @click="openCaseDetail(scope.row)" /></el-tooltip>
@@ -230,10 +230,16 @@
     />
 
     <el-dialog v-model="batchEditVisible" title="批量修改用例" width="520px">
-      <p class="batch-edit-hint">将对已选的 <strong>{{ selectedRows.length }}</strong> 条用例应用以下修改；留空的字段不会变更。</p>
+      <p class="batch-edit-hint">将对已选的 <strong>{{ selectedRows.length }}</strong> 条用例应用以下修改。</p>
       <el-form label-position="top" :model="batchEditForm">
         <el-form-item label="移动到目录">
+          <el-radio-group v-model="batchEditForm.folder_mode">
+            <el-radio-button value="keep">不修改</el-radio-button>
+            <el-radio-button value="set">设置目录</el-radio-button>
+            <el-radio-button value="clear">移至未分组</el-radio-button>
+          </el-radio-group>
           <el-tree-select
+            v-if="batchEditForm.folder_mode === 'set'"
             v-model="batchEditForm.folder_path"
             :data="folderSelectOptions"
             check-strictly
@@ -245,13 +251,25 @@
             style="width: 100%"
           />
         </el-form-item>
+        <el-form-item label="标签">
+          <el-radio-group v-model="batchEditForm.tags_mode"><el-radio-button value="keep">不修改</el-radio-button><el-radio-button value="set">设置标签</el-radio-button><el-radio-button value="clear">清空标签</el-radio-button></el-radio-group>
+          <el-select v-if="batchEditForm.tags_mode === 'set'" v-model="batchEditForm.tags_json" multiple filterable allow-create default-first-option placeholder="选择或输入标签" style="width: 100%; margin-top: 8px"><el-option v-for="item in tagOptions" :key="item" :label="item" :value="item" /></el-select>
+        </el-form-item>
         <el-form-item label="优先级">
-          <el-select v-model="batchEditForm.priority" clearable placeholder="不修改" style="width: 100%">
+          <el-radio-group v-model="batchEditForm.priority_mode">
+            <el-radio-button value="keep">不修改</el-radio-button>
+            <el-radio-button value="set">设置</el-radio-button>
+          </el-radio-group>
+          <el-select v-if="batchEditForm.priority_mode === 'set'" v-model="batchEditForm.priority" placeholder="选择优先级" style="width: 100%; margin-top: 8px">
             <el-option v-for="item in ['P0', 'P1', 'P2']" :key="item" :label="item" :value="item" />
           </el-select>
         </el-form-item>
         <el-form-item label="用例状态">
-          <el-select v-model="batchEditForm.status" clearable placeholder="不修改" style="width: 100%">
+          <el-radio-group v-model="batchEditForm.status_mode">
+            <el-radio-button value="keep">不修改</el-radio-button>
+            <el-radio-button value="set">设置</el-radio-button>
+          </el-radio-group>
+          <el-select v-if="batchEditForm.status_mode === 'set'" v-model="batchEditForm.status" placeholder="选择状态" style="width: 100%; margin-top: 8px">
             <el-option label="启用" value="ACTIVE" />
             <el-option label="停用" value="DISABLED" />
           </el-select>
@@ -263,7 +281,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="dialogVisible" :title="isEditing ? '编辑接口用例' : '新增接口用例'" width="1120px" class="api-editor-dialog">
+    <el-dialog v-model="dialogVisible" :title="isEditing ? '编辑接口用例' : '新增接口用例'" width="1120px" class="api-editor-dialog" :close-on-click-modal="false">
       <el-form
         ref="dataFormRef"
         :model="temp"
@@ -465,7 +483,6 @@
                         <template #default="scope">
                           <el-select v-model="scope.row.type">
                             <el-option label="Text" value="text" />
-                            <el-option label="File（未启用）" value="file" disabled />
                           </el-select>
                         </template>
                       </el-table-column>
@@ -524,11 +541,14 @@
                   </div>
                   <div v-else-if="methodSupportsBody && temp.body_mode === 'binary'">
                     <el-alert
-                      title="Binary 当前支持填写 base64 或普通文本内容；暂不做本地文件上传"
-                      type="warning"
+                      title="Binary 支持直接选择本地文件自动转为 Base64，或手动填写 Base64 / 文本内容"
+                      type="info"
                       :closable="false"
                       class="section-gap"
                     />
+                    <el-form-item label="本地文件读取">
+                      <input type="file" @change="handleBinaryFileSelect" />
+                    </el-form-item>
                     <el-form-item label="文件名">
                       <el-input v-model="temp.binary_filename" placeholder="payload.bin" />
                     </el-form-item>
@@ -767,6 +787,19 @@
                       <pre class="response-pre">{{ formatDebugBody(debugResponse.response.body) }}</pre>
                     </el-tab-pane>
                     <el-tab-pane
+                      v-if="debugResponse.step_results?.length"
+                      :label="`场景步骤 (${debugResponse.step_results.length})`"
+                      name="steps"
+                    >
+                      <div class="debug-assertion-list">
+                        <div v-for="step in debugResponse.step_results" :key="'step-' + step.index" class="debug-assertion-item">
+                          <el-tag size="small" :type="step.status === 'SUCCESS' ? 'success' : 'danger'">{{ step.status }}</el-tag>
+                          <strong>#{{ step.index }} {{ step.name }}</strong>
+                          <span>{{ step.request?.method }} {{ step.request?.url }} ({{ step.duration_ms }} ms)</span>
+                        </div>
+                      </div>
+                    </el-tab-pane>
+                    <el-tab-pane
                       v-if="debugResponse.assertion_results?.length || debugResponse.extractor_results?.length"
                       label="断言/提取"
                       name="assertions"
@@ -874,7 +907,7 @@
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveData">确认</el-button>
+        <el-button type="primary" :loading="caseSavePending" :disabled="caseSavePending" @click="saveData">确认</el-button>
       </template>
     </el-dialog>
 
@@ -1055,8 +1088,10 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, nextTick, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { formatShortTime as formatShortTimeDefault } from '@/lib/formatTime'
 import {
   CircleCheck, Delete, DocumentCopy, Download, Edit, EditPen, Files, Finished, Plus,
   QuestionFilled, Refresh, Search, Tickets, TrendCharts, Upload, VideoPlay, View, Connection
@@ -1069,6 +1104,8 @@ import ReviewPanel from '../ui/components/ReviewPanel.vue'
 import { usePermissions } from '@/lib/permissions'
 import { useAuthStore } from '@/stores/auth'
 import { executionStatusTag, executionStatusText } from '@/lib/execution'
+import { useSubmitGuard } from '@/composables/useSubmitGuard'
+import { buildCaseBatchPatch } from '@/lib/caseBatch'
 
 const list = ref([])
 const projects = ref([])
@@ -1086,10 +1123,25 @@ const curlImportText = ref('')
 const debugLoading = ref(false)
 const debugResponse = ref(null)
 const debugResponseTab = ref('body')
-const editorMetaPanels = ref([])
+const editorMetaPanels = ref(['meta'])
+
+const handleBinaryFileSelect = (event) => {
+  const file = event?.target?.files?.[0]
+  if (!file) return
+  temp.binary_filename = file.name
+  const reader = new FileReader()
+  reader.onload = () => {
+    const dataUrl = String(reader.result || '')
+    const base64Part = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
+    temp.binary_content = base64Part
+    temp.binary_is_base64 = true
+  }
+  reader.readAsDataURL(file)
+}
 const { canAdmin, canTest } = usePermissions()
 const authStore = useAuthStore()
 const currentUserId = computed(() => authStore.user?.id || null)
+const { pending: caseSavePending, run: runCaseSave } = useSubmitGuard()
 
 const total = ref(0)
 const stats = reactive({ total: 0, active: 0, approved: 0, recent_success_rate: 0 })
@@ -1108,7 +1160,7 @@ const batchDrawerVisible = ref(false)
 const activeBatchId = ref(null)
 const batchEditVisible = ref(false)
 const batchEditSubmitting = ref(false)
-const batchEditForm = reactive({ folder_path: '', priority: '', status: '' })
+const batchEditForm = reactive({ folder_mode: 'keep', folder_path: '', tags_mode: 'keep', tags_json: [], priority_mode: 'keep', priority: '', status_mode: 'keep', status: '' })
 
 const detailVisible = ref(false)
 const detailTab = ref('definition')
@@ -1534,13 +1586,7 @@ const reviewText = (status) => ({ DRAFT: '草稿', IN_REVIEW: '评审中', APPRO
 const reviewTag = (status) => ({ DRAFT: 'info', IN_REVIEW: 'warning', APPROVED: 'success', REJECTED: 'danger' }[status] || 'info')
 const reviewTooltip = (row) => (row.reviewed_by ? `用户#${row.reviewed_by} · ${formatShortTime(row.reviewed_at)}` : '')
 
-const formatShortTime = (value) => {
-  if (!value) return '—'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '—'
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
+const formatShortTime = (value) => formatShortTimeDefault(value, '—')
 const formatDuration = (ms) => {
   if (ms === null || ms === undefined) return '—'
   if (ms < 1000) return `${ms}ms`
@@ -2134,17 +2180,12 @@ const handleOpenRunFromBatch = async (run) => {
 }
 
 const openBatchEdit = () => {
-  batchEditForm.folder_path = ''
-  batchEditForm.priority = ''
-  batchEditForm.status = ''
+  Object.assign(batchEditForm, { folder_mode: 'keep', folder_path: '', tags_mode: 'keep', tags_json: [], priority_mode: 'keep', priority: '', status_mode: 'keep', status: '' })
   batchEditVisible.value = true
 }
 
 const submitBatchEdit = async () => {
-  const patch = {}
-  if (batchEditForm.folder_path) patch.folder_path = batchEditForm.folder_path
-  if (batchEditForm.priority) patch.priority = batchEditForm.priority
-  if (batchEditForm.status) patch.status = batchEditForm.status
+  const patch = buildCaseBatchPatch(batchEditForm)
   if (!Object.keys(patch).length) {
     ElMessage.warning('请至少选择一个要修改的字段')
     return
@@ -2404,7 +2445,7 @@ const handleCreate = () => {
   temp.debug_timeout_seconds = 30
   debugResponse.value = null
   requestTab.value = 'params'
-  editorMetaPanels.value = []
+  editorMetaPanels.value = ['meta']
   isEditing.value = false
   editingCaseId.value = undefined
   dialogVisible.value = true
@@ -2439,7 +2480,7 @@ const handleEdit = (row) => {
   temp.debug_timeout_seconds = 30
   debugResponse.value = null
   requestTab.value = 'params'
-  editorMetaPanels.value = []
+  editorMetaPanels.value = ['meta']
   isEditing.value = true
   editingCaseId.value = row.id
   dialogVisible.value = true
@@ -2582,7 +2623,11 @@ const sendDebugRequest = () => {
         environment_id: temp.debug_environment_id || null,
         timeout_seconds: temp.debug_timeout_seconds
       })
-      debugResponseTab.value = debugResponse.value.assertion_passed === false ? 'assertions' : 'body'
+      if (debugResponse.value.step_results?.length) {
+        debugResponseTab.value = 'steps'
+      } else {
+        debugResponseTab.value = debugResponse.value.assertion_passed === false ? 'assertions' : 'body'
+      }
       ElMessage.success('调试请求完成')
     } catch (error) {
       ElMessage.error(error.message)
@@ -2594,7 +2639,7 @@ const sendDebugRequest = () => {
 
 const saveData = () => {
   dataFormRef.value?.validate(async (valid) => {
-    if (valid) {
+    if (valid) await runCaseSave(async () => {
       try {
         const payload = buildCasePayload()
         if (isEditing.value && editingCaseId.value) {
@@ -2608,7 +2653,7 @@ const saveData = () => {
       } catch (error) {
         ElMessage.error(error.message)
       }
-    }
+    })
   })
 }
 
@@ -2734,9 +2779,14 @@ watch(() => page.value, () => {
   getList()
 })
 
+const route = useRoute()
+
 onMounted(async () => {
+  if (route.query.project_id) filters.projectId = Number(route.query.project_id) || undefined
+  if (route.query.keyword) filters.keyword = String(route.query.keyword)
   await loadProjects()
   await refreshAll()
+  if (route.query.action === 'create' && canTest.value) handleCreate()
 })
 
 onUnmounted(() => {
@@ -3872,8 +3922,14 @@ onUnmounted(() => {
 
 .row-actions {
   display: flex;
+  min-width: 160px;
   gap: 6px;
+  flex-wrap: nowrap;
   justify-content: flex-end;
+}
+
+.row-actions :deep(.el-button) {
+  flex: 0 0 auto;
 }
 
 .review-readonly {

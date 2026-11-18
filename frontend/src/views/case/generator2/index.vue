@@ -27,6 +27,8 @@
         :saving-model-config="savingModelConfig"
         :uploaded-file-name="uploadedFileName"
         :uploaded-char-count="uploadedCharCount"
+        :effective-model-preview="effectiveModelPreview"
+        :model-config-dirty="modelConfigDirty"
         @load-model-config="loadModelConfig"
         @save-model-config="saveModelConfig"
         @file-change="handleFileChange"
@@ -56,6 +58,7 @@
           :can-cancel="canCancelCurrentJob"
           :rerunning="rerunning"
           :rerun-disabled="rerunDisabled"
+          :rerun-reason="rerunReason"
           :cancelling="cancelling"
           :rerunning-shard="rerunningShard"
           :scope-index-strategy-text="scopeIndexStrategyText"
@@ -64,6 +67,7 @@
           :metrics-comparison="metricsComparison"
           :trusted-metrics="trustedMetrics"
           :gate-issues="trustedGateIssues"
+          :recovery-actions="currentRecoveryActions"
           :sources="sourcesDetail || []"
           :progress-status-text="progressStatusText"
           :progress-percent="progressPercent"
@@ -75,11 +79,13 @@
           :final-xmind-artifact="finalXmindArtifact"
           :export-log-artifact="exportLogArtifact"
           :artifact-loading="artifactLoading"
+          :importing-cases="importingCases"
           @rerun-job="rerunJob"
           @cancel-job="cancelJob"
-          @refresh="refreshCurrentJob"
+          @refresh="refreshCurrentJob({ forceArtifactRefresh: true })"
           @rerun-source="rerunSourceShard"
           @download-artifact="downloadArtifact"
+          @import-cases="importGeneratedToLibrary"
         />
       </div>
     </div>
@@ -88,7 +94,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import GeneratorConfigForm from './components/GeneratorConfigForm.vue'
 import JobDetailPanel from './components/JobDetailPanel.vue'
@@ -117,11 +123,12 @@ import {
 } from '@/lib/caseGenerationUi'
 import {
   buildTrustedGateIssues,
-  canRerunSourceShard,
   filterVisibleArtifacts,
   formatDurationMs,
   formatScopeIndexStrategy,
   jobPipelineMode,
+  mergeArtifactPreviewContent,
+  resolveActiveArtifactType,
   resolveFinalDeliveryGatePassed
 } from './presentation'
 
@@ -131,15 +138,18 @@ const allJobs = ref([])
 const currentJob = ref(null)
 const currentArtifacts = ref([])
 const currentAttempts = ref([])
+const currentRecoveryActions = ref([])
 const metricsComparison = ref(null)
 const activeArtifactType = ref('')
 const artifactLoading = ref(false)
+const importingCases = ref(false)
 const submitting = ref(false)
 const rerunning = ref(false)
 const rerunningShard = ref('')
 const cancelling = ref(false)
 const savingModelConfig = ref(false)
 const hasSavedModelConfig = ref(false)
+const savedModelConfigValues = ref({ model: '', base_url: '' })
 const authStore = useAuthStore()
 
 const form = ref({
@@ -195,7 +205,7 @@ const finalDeliveryGatePassed = computed(() => resolveFinalDeliveryGatePassed(fi
 const sourcesDetail = computed(() => trustedReviewArtifact.value?.content_json?.sources_detail || null)
 const trustedGateIssues = computed(() =>
   isTrustedCurrentJob.value
-    ? buildTrustedGateIssues(currentArtifacts.value, progressStageLabels)
+    ? buildTrustedGateIssues(currentArtifacts.value, progressStageLabels, currentRecoveryActions.value)
     : []
 )
 const visibleArtifacts = computed(() => filterVisibleArtifacts(currentArtifacts.value, isTrustedCurrentJob.value))
@@ -204,8 +214,10 @@ const activeArtifact = computed(() =>
 )
 const finalXmindArtifact = computed(() => currentArtifacts.value.find((item) => item.artifact_type === 'xmind'))
 const exportLogArtifact = computed(() => currentArtifacts.value.find((item) => item.artifact_type === 'xmind_export_log'))
-const canRerunCurrentJob = computed(() => !!currentJob.value)
-const rerunDisabled = computed(() => rerunning.value || !currentJob.value || ['RUNNING', 'PENDING'].includes(currentJob.value.status))
+const rerunAction = computed(() => currentRecoveryActions.value.find((item) => item.action === 'rerun_job') || null)
+const canRerunCurrentJob = computed(() => !!rerunAction.value)
+const rerunDisabled = computed(() => rerunning.value || !rerunAction.value?.enabled)
+const rerunReason = computed(() => rerunAction.value?.reason || '')
 const currentUserId = computed(() => authStore.user?.id || null)
 const activeAttempt = computed(() => currentAttempts.value.find((item) => item.id === currentJob.value?.active_attempt_id) || currentAttempts.value[0] || null)
 
@@ -387,6 +399,28 @@ function resolveModelProvider(model) {
   return modelOptions.value.find((item) => item.value === model)?.provider || 'OPENAI'
 }
 
+const effectiveModelPreview = computed(() => {
+  const { model, baseUrl } = normalizeModelConfigInput()
+  const provider = resolveModelProvider(model)
+  let host = '默认官方端点'
+  if (baseUrl) {
+    try {
+      host = new URL(baseUrl).host
+    } catch {
+      host = baseUrl
+    }
+  }
+  return `${provider} · ${model || '未选择模型'} · ${host}`
+})
+
+const modelConfigDirty = computed(() => {
+  if (!hasSavedModelConfig.value) return false
+  return (
+    (modelConfig.value.model || '').trim() !== (savedModelConfigValues.value.model || '').trim()
+    || extractRawUrl(modelConfig.value.base_url) !== extractRawUrl(savedModelConfigValues.value.base_url)
+  )
+})
+
 function validateModelConfigInput() {
   const { model, apiKey, baseUrl } = normalizeModelConfigInput()
   if (!apiKey) {
@@ -448,12 +482,12 @@ function scheduleNextPoll() {
 watch(
   () => currentJob.value?.id,
   () => {
-    activeArtifactType.value = visibleArtifacts.value[0]?.artifact_type || ''
+    activeArtifactType.value = resolveActiveArtifactType(visibleArtifacts.value, activeArtifactType.value)
   }
 )
 
 watch(
-  () => activeArtifactType.value,
+  () => [activeArtifact.value?.id, activeArtifact.value?.revision],
   async () => {
     if (activeArtifact.value && !activeArtifact.value.content_json && activeArtifact.value.artifact_type !== 'xmind') {
       await loadArtifactContent(activeArtifact.value)
@@ -531,6 +565,7 @@ async function fetchJobs() {
     if (!jobs.value.length) {
       currentJob.value = null
       currentArtifacts.value = []
+      currentRecoveryActions.value = []
       return
     }
     if (!currentJob.value) {
@@ -573,7 +608,7 @@ async function loadArtifactContent(artifact) {
   if (!currentJob.value || !artifact || artifact.content_json || artifact.artifact_type === 'xmind') return
   artifactLoading.value = true
   try {
-    const hydrated = await getCaseGenerationV2Artifact(currentJob.value.id, artifact.id)
+    const hydrated = await getCaseGenerationV2Artifact(currentJob.value.id, artifact.id, artifact.revision)
     currentArtifacts.value = currentArtifacts.value.map((item) => item.id === hydrated.id ? hydrated : item)
   } finally {
     artifactLoading.value = false
@@ -597,18 +632,27 @@ async function hydrateSummaryArtifacts() {
 
 async function selectJob(job, options = {}) {
   try {
+    const sameJob = currentJob.value?.id === job.id
+    const preferredArtifactType = activeArtifactType.value
     const detail = await getCaseGenerationV2JobDetail(job.id)
-    const previousContent = new Map(currentArtifacts.value.map((item) => [item.id, item.content_json]))
     currentJob.value = detail.job
     metricsComparison.value = null
     currentAttempts.value = detail.attempts || []
-    currentArtifacts.value = (detail.artifacts || []).map((item) => ({
-      ...item,
-      content_json: previousContent.get(item.id) || item.content_json || null
-    }))
-    activeArtifactType.value = visibleArtifacts.value[0]?.artifact_type || ''
+    currentRecoveryActions.value = detail.recovery_actions || []
+    currentArtifacts.value = mergeArtifactPreviewContent(
+      detail.artifacts,
+      currentArtifacts.value,
+      sameJob && options.forceArtifactRefresh !== true
+    )
+    activeArtifactType.value = resolveActiveArtifactType(visibleArtifacts.value, preferredArtifactType)
     if (options.hydrate !== false && !['RUNNING', 'PENDING'].includes(currentJob.value.status)) {
       await hydrateSummaryArtifacts()
+    }
+    if (options.forceArtifactRefresh) {
+      const selectedArtifact = visibleArtifacts.value.find((item) => item.artifact_type === activeArtifactType.value) || visibleArtifacts.value[0]
+      if (selectedArtifact && selectedArtifact.artifact_type !== 'xmind' && !selectedArtifact.content_json) {
+        await loadArtifactContent(selectedArtifact)
+      }
     }
     if (!['RUNNING', 'PENDING'].includes(currentJob.value.status)) {
       try {
@@ -627,7 +671,10 @@ async function selectJob(job, options = {}) {
 async function refreshCurrentJob(options = {}) {
   if (!currentJob.value) return
   const wasRunning = ['RUNNING', 'PENDING'].includes(currentJob.value.status)
-  await selectJob(currentJob.value, { hydrate: false })
+  await selectJob(currentJob.value, {
+    hydrate: options.forceArtifactRefresh === true,
+    forceArtifactRefresh: options.forceArtifactRefresh === true
+  })
   const index = jobs.value.findIndex((item) => item.id === currentJob.value.id)
   if (index >= 0) jobs.value.splice(index, 1, currentJob.value)
   const allIndex = allJobs.value.findIndex((item) => item.id === currentJob.value.id)
@@ -661,6 +708,10 @@ async function loadModelConfig() {
     model: config.model || 'gpt-5.5',
     base_url: config.base_url || ''
   }
+  savedModelConfigValues.value = {
+    model: modelConfig.value.model,
+    base_url: modelConfig.value.base_url
+  }
 }
 
 async function loadModelOptions() {
@@ -688,6 +739,7 @@ async function persistModelConfig() {
   modelConfig.value.model = model
   modelConfig.value.base_url = baseUrl
   modelConfig.value.api_key = ''
+  savedModelConfigValues.value = { model, base_url: baseUrl }
 }
 
 async function saveModelConfig() {
@@ -729,13 +781,19 @@ async function submitJob() {
     } else if (!hasSavedModelConfig.value) {
       ElMessage.error('请先填写并保存模型配置，或在当前页输入 API Key 后直接开始生成')
       return
+    } else if (modelConfigDirty.value) {
+      ElMessage.error('模型名或 base_url 已修改但尚未保存，请先点击「保存模型配置」（需重新填写 API Key）后再提交')
+      return
     }
     const job = await createCaseGenerationV2Job({
       ...form.value,
       name: form.value.name.trim(),
       source_url: sourceUrl || null,
       markdown_text: sourceType === 'LINK' ? null : markdownText,
-      ...normalizeModelConfigInput()
+      model_provider: resolveModelProvider(normalizeModelConfigInput().model),
+      openai_model: normalizeModelConfigInput().model,
+      openai_base_url: normalizeModelConfigInput().baseUrl,
+      openai_api_key: normalizeModelConfigInput().apiKey || null
     })
     ElMessage.success('生成任务已提交')
     await fetchJobs()
@@ -774,7 +832,11 @@ function handleFileChange(uploadFile) {
 
 async function rerunJob() {
   if (!currentJob.value) return
-  if (rerunDisabled.value) return
+  if (rerunDisabled.value) {
+    if (rerunReason.value) ElMessage.warning(rerunReason.value)
+    return
+  }
+  if (!await confirmRecoveryAction(rerunAction.value)) return
   if (activeOwnJob.value && activeOwnJob.value.id !== currentJob.value.id) {
     ElMessage.error(`当前已有进行中的任务 #${activeOwnJob.value.id}`)
     return
@@ -792,7 +854,18 @@ async function rerunJob() {
 }
 
 async function rerunSourceShard(src) {
-  if (!canRerunSourceShard(currentJob.value, isTrustedCurrentJob.value, src)) return
+  const recoveryAction = currentRecoveryActions.value.find(
+    (item) => item.action === 'rerun_source' && item.source_id === src?.source_id
+  )
+  if (!recoveryAction) {
+    ElMessage.warning('当前产物不支持重跑该 source shard')
+    return
+  }
+  if (!recoveryAction.enabled) {
+    ElMessage.warning(recoveryAction.reason || '当前不可重跑该 source shard')
+    return
+  }
+  if (!await confirmRecoveryAction(recoveryAction)) return
   if (activeOwnJob.value && activeOwnJob.value.id !== currentJob.value.id) {
     ElMessage.error(`当前已有进行中的任务 #${activeOwnJob.value.id}`)
     return
@@ -806,6 +879,41 @@ async function rerunSourceShard(src) {
     ElMessage.error(error?.message || 'source shard 重跑失败')
   } finally {
     rerunningShard.value = ''
+  }
+}
+
+async function confirmRecoveryAction(action) {
+  if (!action?.enabled) return false
+  const artifactLabels = {
+    source_manifest: '范围清单',
+    evidence_trace: '证据追踪',
+    scope_index: '范围索引',
+    function_points: '功能点',
+    requirement_handoff: '需求交接',
+    testcase_base_package: '用例基线',
+    testcase_package: '用例包',
+    testcase_handoff: '用例门禁',
+    trusted_review_report: '可信复核',
+    markdown: 'Markdown',
+    xmindmark: 'XMindMark',
+    xmind: 'XMind'
+  }
+  const names = (items) => (items || []).map((item) => artifactLabels[item] || item).join('、')
+  const details = [
+    action.preserves?.length ? `保留：${names(action.preserves)}` : '不复用历史产物',
+    action.regenerates?.length ? `重新生成：${names(action.regenerates)}` : '',
+    action.calls_model ? '此操作会调用模型并产生耗时/Token 消耗' : '此操作不调用模型'
+  ].filter(Boolean).join('\n')
+  try {
+    await ElMessageBox.confirm(details, action.label || '确认重跑', {
+      confirmButtonText: '确认重跑',
+      cancelButtonText: '取消',
+      type: 'warning',
+      distinguishCancelAndClose: true
+    })
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -824,10 +932,26 @@ async function cancelJob() {
   }
 }
 
+async function importGeneratedToLibrary(importType = 'AUTO') {
+  if (!currentJob.value) return
+  importingCases.value = true
+  try {
+    const res = await api.post(`/case-generation-v2/jobs/${currentJob.value.id}/import-cases`, {
+      import_type: importType,
+      folder_path: `/AI生成V2/${currentJob.value.name}`
+    })
+    ElMessage.success(res.message || '导入成功')
+  } catch (error) {
+    ElMessage.error(error?.message || '导入失败')
+  } finally {
+    importingCases.value = false
+  }
+}
+
 async function downloadArtifact(artifact) {
   if (!currentJob.value) return
   try {
-    const blob = await downloadCaseGenerationV2Artifact(currentJob.value.id, artifact.id)
+    const blob = await downloadCaseGenerationV2Artifact(currentJob.value.id, artifact.id, artifact.revision)
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url

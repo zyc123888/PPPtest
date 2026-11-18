@@ -58,6 +58,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '@/lib/api'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
 import {
   executionErrorTypeTag as errorTypeTag,
   executionErrorTypeText as errorTypeText,
@@ -77,7 +78,6 @@ const report = reactive({
   defects: []
 })
 
-function formatTime(t) { return t ? String(t).replace('T', ' ').slice(0, 19) : '-' }
 function formatDuration(ms) {
   if (ms === null || ms === undefined) return '-'
   if (ms < 1000) return `${ms} ms`

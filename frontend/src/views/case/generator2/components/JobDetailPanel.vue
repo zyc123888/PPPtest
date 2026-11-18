@@ -4,7 +4,27 @@
       <div class="panel-title">结果详情</div>
       <div class="detail-actions">
         <div class="detail-actions__primary">
-          <el-button v-if="canRerun" size="small" :loading="rerunning" :disabled="rerunDisabled" @click="emit('rerun-job')">重跑</el-button>
+          <el-button
+            v-if="job && ['SUCCESS', 'CONDITIONAL'].includes(job.status)"
+            size="small"
+            type="success"
+            :loading="importingCases"
+            @click="emit('import-cases', 'AUTO')"
+          >一键导入用例库</el-button>
+          <el-button
+            v-if="job && ['SUCCESS', 'CONDITIONAL'].includes(job.status)"
+            size="small"
+            :loading="importingCases"
+            @click="emit('import-cases', 'REQUIREMENT')"
+          >转入需求池</el-button>
+          <el-button
+            v-if="canRerun"
+            size="small"
+            :loading="rerunning"
+            :disabled="rerunDisabled"
+            :title="rerunReason"
+            @click="emit('rerun-job')"
+          >重跑</el-button>
           <el-button
             v-if="canCancel"
             size="small"
@@ -47,6 +67,9 @@
           <div class="summary-line"><span>摘要</span><strong>{{ job.summary || '-' }}</strong></div>
           <div class="summary-line"><span>来源</span><span>{{ job.source_document_name || '-' }}</span></div>
           <div v-if="job.error_message" class="summary-line"><span>错误</span><span class="error-text">{{ job.error_message }}</span></div>
+          <div v-if="canRerun && rerunDisabled && rerunReason" class="summary-line">
+            <span>重跑限制</span><span class="error-text">{{ rerunReason }}</span>
+          </div>
         </div>
 
         <MetricsPanel
@@ -62,7 +85,6 @@
           :job-status="job.status"
           :rerunning-shard="rerunningShard"
           :rerunning="rerunning"
-          :rerun-disabled="rerunDisabled"
           @rerun-source="emit('rerun-source', $event)"
           @rerun-job="emit('rerun-job')"
         />
@@ -72,6 +94,7 @@
           :sources="sources"
           :job="job"
           :trusted="trusted"
+          :recovery-actions="recoveryActions"
           :rerunning-shard="rerunningShard"
           @rerun-source="emit('rerun-source', $event)"
         />
@@ -194,6 +217,7 @@ const props = defineProps({
   canCancel: { type: Boolean, default: false },
   rerunning: { type: Boolean, default: false },
   rerunDisabled: { type: Boolean, default: false },
+  rerunReason: { type: String, default: '' },
   cancelling: { type: Boolean, default: false },
   rerunningShard: { type: String, default: '' },
   scopeIndexStrategyText: { type: String, default: '' },
@@ -202,6 +226,7 @@ const props = defineProps({
   metricsComparison: { type: Object, default: null },
   trustedMetrics: { type: Object, default: null },
   gateIssues: { type: Array, default: () => [] },
+  recoveryActions: { type: Array, default: () => [] },
   sources: { type: Array, default: () => [] },
   progressStatusText: { type: String, default: '' },
   progressPercent: { type: Number, default: 0 },
@@ -212,7 +237,8 @@ const props = defineProps({
   activeArtifact: { type: Object, default: null },
   finalXmindArtifact: { type: Object, default: null },
   exportLogArtifact: { type: Object, default: null },
-  artifactLoading: { type: Boolean, default: false }
+  artifactLoading: { type: Boolean, default: false },
+  importingCases: { type: Boolean, default: false }
 })
 
 const emit = defineEmits([
@@ -220,7 +246,8 @@ const emit = defineEmits([
   'cancel-job',
   'refresh',
   'rerun-source',
-  'download-artifact'
+  'download-artifact',
+  'import-cases'
 ])
 
 const statusTagType = caseGenerationV2StatusTagType

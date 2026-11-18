@@ -36,7 +36,13 @@
 
     <div class="ws-content">
       <router-view v-if="currentProject" v-slot="{ Component }">
-        <component :is="Component" :project="currentProject" :my-role="myRole" @refresh-project="loadProjects" />
+        <component
+          :is="Component"
+          :key="currentProject.id"
+          :project="currentProject"
+          :my-role="myRole"
+          @refresh-project="loadProjects"
+        />
       </router-view>
       <el-empty v-else description="加载项目中..." />
     </div>

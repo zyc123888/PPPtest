@@ -266,12 +266,11 @@
 
     <el-dialog v-model="batchReviewVisible" title="批量评审用例" width="520px">
       <el-form label-position="top">
-        <el-form-item label="评审状态">
+        <el-form-item label="评审动作">
           <el-select v-model="batchReviewForm.review_status" style="width: 100%">
-            <el-option label="DRAFT" value="DRAFT" />
-            <el-option label="IN_REVIEW" value="IN_REVIEW" />
-            <el-option label="APPROVED" value="APPROVED" />
-            <el-option label="REJECTED" value="REJECTED" />
+            <el-option label="提交评审 (IN_REVIEW)" value="IN_REVIEW" />
+            <el-option label="评审通过 (APPROVED)" value="APPROVED" />
+            <el-option label="评审拒绝 (REJECTED)" value="REJECTED" />
           </el-select>
         </el-form-item>
         <el-form-item label="评审备注">
@@ -659,9 +658,10 @@ const applyPendingTypeFilter = (item) => {
 }
 
 const openDetail = (row) => {
-  if (row.case_type === 'API') router.push('/case/api')
-  else if (row.case_type === 'UI') router.push('/case/ui')
-  else router.push('/case/performance')
+  const query = { project_id: String(row.project_id), case_id: String(row.case_id), keyword: row.name }
+  if (row.case_type === 'API') router.push({ path: '/case/api', query })
+  else if (row.case_type === 'UI') router.push({ path: '/case/ui', query })
+  else router.push({ path: '/case/performance', query })
 }
 
 const formatDate = (value) => {
@@ -946,9 +946,10 @@ const focusDuplicateGroup = async (group) => {
 }
 
 const goCreate = (type) => {
-  if (type === 'API') router.push('/case/api')
-  else if (type === 'UI') router.push('/case/ui')
-  else router.push('/case/performance')
+  const query = { action: 'create', ...(filters.projectId ? { project_id: String(filters.projectId) } : {}) }
+  if (type === 'API') router.push({ path: '/case/api', query })
+  else if (type === 'UI') router.push({ path: '/case/ui', query })
+  else router.push({ path: '/case/performance', query })
 }
 
 onMounted(() => {

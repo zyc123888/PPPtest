@@ -79,14 +79,47 @@
     </el-card>
 
     <el-card class="page-card" shadow="never">
-      <template #header><span>项目信息</span></template>
+      <template #header>
+        <div class="card-head">
+          <span>项目信息</span>
+          <el-button v-if="canManage" size="small" type="primary" plain @click="openEditProject">编辑项目信息</el-button>
+        </div>
+      </template>
       <el-descriptions :column="2" border>
         <el-descriptions-item label="项目名称">{{ project.name }}</el-descriptions-item>
         <el-descriptions-item label="项目短码">{{ project.code || '-' }}</el-descriptions-item>
         <el-descriptions-item label="状态">{{ project.status || 'ACTIVE' }}</el-descriptions-item>
         <el-descriptions-item label="Base URL">{{ project.base_url || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="项目说明" :span="2">{{ project.description || '-' }}</el-descriptions-item>
       </el-descriptions>
     </el-card>
+
+    <el-dialog v-model="editProjectVisible" title="编辑项目信息" width="520px">
+      <el-form label-position="top">
+        <el-form-item label="项目名称" required>
+          <el-input v-model="projectForm.name" placeholder="至少 2 个字符" />
+        </el-form-item>
+        <el-form-item label="项目短码">
+          <el-input v-model="projectForm.code" placeholder="例如：ORD" />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="projectForm.status" style="width: 100%">
+            <el-option label="ACTIVE" value="ACTIVE" />
+            <el-option label="ARCHIVED" value="ARCHIVED" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="Base URL" required>
+          <el-input v-model="projectForm.base_url" placeholder="http://backend:8000" />
+        </el-form-item>
+        <el-form-item label="项目说明">
+          <el-input v-model="projectForm.description" type="textarea" :rows="3" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editProjectVisible = false">取消</el-button>
+        <el-button type="primary" :loading="projectSaving" @click="saveProjectInfo">保存</el-button>
+      </template>
+    </el-dialog>
 
     <el-card class="page-card" shadow="never">
       <template #header>
@@ -152,6 +185,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import { PROJECT_ROLE_LABELS } from './constants'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
 
 const props = defineProps({ project: { type: Object, required: true }, myRole: { type: String, default: '' } })
 
@@ -173,12 +207,48 @@ const notifyTesting = ref(false)
 const variableRows = ref([])
 const varSaving = ref(false)
 
+const editProjectVisible = ref(false)
+const projectSaving = ref(false)
+const projectForm = reactive({ name: '', code: '', status: 'ACTIVE', base_url: '', description: '' })
+
+function openEditProject() {
+  Object.assign(projectForm, {
+    name: props.project.name || '',
+    code: props.project.code || '',
+    status: props.project.status || 'ACTIVE',
+    base_url: props.project.base_url || '',
+    description: props.project.description || ''
+  })
+  editProjectVisible.value = true
+}
+
+async function saveProjectInfo() {
+  if (!projectForm.name.trim() || projectForm.name.trim().length < 2) {
+    ElMessage.warning('项目名称至少 2 个字符')
+    return
+  }
+  if (!projectForm.base_url.trim() || projectForm.base_url.trim().length < 5) {
+    ElMessage.warning('Base URL 至少 5 个字符')
+    return
+  }
+  projectSaving.value = true
+  try {
+    const updated = await api.put(`/projects/${props.project.id}`, { ...projectForm })
+    Object.assign(props.project, updated)
+    editProjectVisible.value = false
+    ElMessage.success('项目信息已更新')
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    projectSaving.value = false
+  }
+}
+
 const candidateUsers = computed(() => {
   const joined = new Set(members.value.map((m) => m.user_id))
   return allUsers.value.filter((u) => !joined.has(u.id))
 })
 
-function formatTime(t) { return t ? String(t).replace('T', ' ').slice(0, 19) : '-' }
 
 async function fetchMembers() {
   loading.value = true

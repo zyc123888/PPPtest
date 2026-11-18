@@ -1,7 +1,7 @@
 <template>
   <div class="header-root">
     <div class="header-left">
-      <el-button text @click="toggleSideBar">
+      <el-button text :aria-label="sidebar.opened ? '折叠侧边栏' : '展开侧边栏'" @click="toggleSideBar">
         <el-icon size="18">
           <Fold v-if="sidebar.opened" />
           <Expand v-else />
@@ -17,7 +17,9 @@
 
     <div class="header-right">
       <el-tag size="small" type="info" class="version-tag">v{{ appVersion }}</el-tag>
-      <el-tag size="small" type="success">前端在线</el-tag>
+      <el-tag size="small" :type="backendOnline ? 'success' : 'danger'">
+        {{ backendOnline ? '服务在线' : '服务离线' }}
+      </el-tag>
       <el-dropdown trigger="click">
         <el-button text>
           <el-icon><User /></el-icon>
@@ -112,13 +114,14 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { CaretBottom, Expand, Fold, User } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { api } from '@/lib/api'
+import { formatDateTime as formatTokenTime } from '@/lib/formatTime'
 import { version as appVersion } from '../../../package.json'
 
 const route = useRoute()
@@ -126,6 +129,20 @@ const router = useRouter()
 const appStore = useAppStore()
 const authStore = useAuthStore()
 const sidebar = computed(() => appStore.sidebar)
+const backendOnline = ref(true)
+
+const checkBackendAlive = async () => {
+  try {
+    await api.get('/system/health/live')
+    backendOnline.value = true
+  } catch {
+    backendOnline.value = false
+  }
+}
+
+onMounted(() => {
+  checkBackendAlive()
+})
 
 const breadcrumbs = computed(() => {
   return route.matched
@@ -205,12 +222,6 @@ const tokens = ref([])
 const tokenForm = reactive({ name: '', expires_days: 30 })
 const createdToken = ref('')
 const apiBaseHint = `${window.location.origin}/api/v1`
-
-function formatTokenTime(value) {
-  if (!value) return '-'
-  const normalized = /(Z|[+-]\d{2}:?\d{2})$/.test(value) ? value : `${value}Z`
-  return new Date(normalized).toLocaleString('zh-CN', { hour12: false })
-}
 
 async function fetchTokens() {
   tokenLoading.value = true

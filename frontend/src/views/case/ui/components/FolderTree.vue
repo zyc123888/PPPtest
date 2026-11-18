@@ -99,6 +99,11 @@ const promptRename = async (node) => {
 .folder-tree__tree { margin-top: 4px; background: none; }
 .folder-node { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; padding-right: 4px; font-size: 13px; }
 .folder-node__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.folder-node__rename { display: none; margin-left: 2px; }
-.folder-node:hover .folder-node__rename { display: inline-flex; }
+.folder-node__rename { opacity: 0.35; display: inline-flex; margin-left: 2px; transition: opacity 0.15s ease; }
+.folder-node:hover .folder-node__rename,
+.folder-node:focus-within .folder-node__rename,
+.el-tree-node.is-current > .el-tree-node__content .folder-node__rename { opacity: 1; }
+@media (hover: none) {
+  .folder-node__rename { opacity: 0.85; }
+}
 </style>

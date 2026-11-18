@@ -49,18 +49,7 @@
       <div class="toolbar section-gap">
         <div />
         <div class="toolbar-right">
-          <el-dropdown>
-            <el-button>
-              更多
-              <el-icon><ArrowDown /></el-icon>
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item disabled>导入</el-dropdown-item>
-                <el-dropdown-item disabled>导出</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+          <el-button @click="exportProjectsJson">导出配置</el-button>
           <el-button @click="getList">刷新</el-button>
         </div>
       </div>
@@ -80,9 +69,10 @@
         <el-table-column label="短码" prop="code" width="110" show-overflow-tooltip />
         <el-table-column label="基础地址" prop="base_url" min-width="200" show-overflow-tooltip />
         <el-table-column label="说明" prop="description" min-width="220" show-overflow-tooltip />
-        <el-table-column label="操作" align="center" width="200">
+        <el-table-column label="操作" align="center" width="260">
           <template #default="scope">
             <el-button size="small" type="primary" @click="enterWorkspace(scope.row)">进入工作台</el-button>
+            <el-button v-if="canTest" size="small" @click="handleEdit(scope.row)">编辑</el-button>
             <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
           </template>
         </el-table-column>
@@ -96,6 +86,7 @@
           <div class="mobile-card-desc">{{ item.description || '-' }}</div>
           <div class="mobile-card-actions">
             <el-button size="small" type="primary" @click="enterWorkspace(item)">进入工作台</el-button>
+            <el-button v-if="canTest" size="small" @click="handleEdit(item)">编辑</el-button>
             <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(item)">删除</el-button>
           </div>
         </div>
@@ -112,7 +103,7 @@
       </div>
     </el-card>
 
-    <el-dialog v-model="dialogVisible" title="新增项目" width="520px">
+    <el-dialog v-model="dialogVisible" :title="editingId ? '编辑项目' : '新增项目'" width="520px">
       <el-form ref="dataFormRef" :model="temp" :rules="rules" label-position="top">
         <el-form-item label="工作空间" prop="workspace_id">
           <el-select v-model="temp.workspace_id" placeholder="请选择工作空间" style="width: 100%">
@@ -121,6 +112,9 @@
         </el-form-item>
         <el-form-item label="项目名称" prop="name">
           <el-input v-model="temp.name" placeholder="例如：订单中心" />
+        </el-form-item>
+        <el-form-item label="项目短码" prop="code">
+          <el-input v-model="temp.code" placeholder="可选，例如：ORD" />
         </el-form-item>
         <el-form-item label="基础地址" prop="base_url">
           <el-input v-model="temp.base_url" placeholder="http://backend:8000" />
@@ -131,7 +125,7 @@
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="createData">确认</el-button>
+        <el-button type="primary" @click="saveData">确认</el-button>
       </template>
     </el-dialog>
   </div>
@@ -162,10 +156,12 @@ const filters = reactive({
 
 const page = ref(1)
 const pageSize = ref(10)
+const editingId = ref(null)
 
 const temp = reactive({
   workspace_id: undefined,
   name: '',
+  code: '',
   base_url: 'http://backend:8000',
   description: ''
 })
@@ -225,14 +221,40 @@ const baseUrlCoverage = computed(() => {
 })
 
 const handleCreate = () => {
+  editingId.value = null
   temp.workspace_id = workspaces.value.length > 0 ? workspaces.value[0].id : undefined
   temp.name = ''
+  temp.code = ''
   temp.base_url = 'http://backend:8000'
   temp.description = ''
   dialogVisible.value = true
   nextTick(() => {
     dataFormRef.value?.clearValidate()
   })
+}
+
+const handleEdit = (row) => {
+  editingId.value = row.id
+  temp.workspace_id = row.workspace_id
+  temp.name = row.name || ''
+  temp.code = row.code || ''
+  temp.base_url = row.base_url || 'http://backend:8000'
+  temp.description = row.description || ''
+  dialogVisible.value = true
+  nextTick(() => {
+    dataFormRef.value?.clearValidate()
+  })
+}
+
+const exportProjectsJson = () => {
+  const blob = new Blob([JSON.stringify(filteredList.value, null, 2)], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `omnitest-projects-${new Date().toISOString().slice(0, 10)}.json`
+  link.click()
+  URL.revokeObjectURL(url)
+  ElMessage.success(`已导出 ${filteredList.value.length} 个项目配置`)
 }
 
 const handleSearch = () => {
@@ -249,13 +271,18 @@ const handleReset = () => {
   page.value = 1
 }
 
-const createData = () => {
+const saveData = () => {
   dataFormRef.value?.validate(async (valid) => {
     if (valid) {
       try {
-        await api.post('/projects', temp)
+        if (editingId.value) {
+          await api.put(`/projects/${editingId.value}`, temp)
+          ElMessage.success('更新成功')
+        } else {
+          await api.post('/projects', temp)
+          ElMessage.success('创建成功')
+        }
         dialogVisible.value = false
-        ElMessage.success('创建成功')
         getList()
       } catch (error) {
         ElMessage.error(error.message)

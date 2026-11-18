@@ -31,6 +31,23 @@ export const UI_ASSERTION_OPTIONS = [
 const stepMap = new Map(UI_STEP_OPTIONS.map((item) => [item.value, item]))
 const assertionMap = new Map(UI_ASSERTION_OPTIONS.map((item) => [item.value, item]))
 
+// Midscene runner（backend/midscene/midscene_runner.js）仅显式映射这 5 类动作：
+// goto / click(aiTap) / fill(aiInput) / wait(aiWaitFor) / assert_text(aiAssert)；
+// 其余动作会落入通用 ai() 兜底分支，不作为一等候选提供。
+export const MIDSCENE_ACTIONS = UI_STEP_OPTIONS.filter((item) => ['goto', 'click', 'fill', 'wait', 'assert_text'].includes(item.value))
+export const NATIVE_ACTIONS = UI_STEP_OPTIONS
+
+const engineLabels = { native: '平台引擎', midscene: 'Midscene' }
+
+export const getStepOptions = (engine = 'native') => (engine === 'midscene' ? MIDSCENE_ACTIONS : NATIVE_ACTIONS)
+
+export const isStepActionSupported = (action, engine = 'native') => getStepOptions(engine).some((item) => item.value === action)
+
+export const findUnsupportedActions = (steps = [], engine = 'native') => steps
+  .filter((step) => !isStepActionSupported(step.action, engine))
+  .map((step) => step.action)
+
+
 export const getStepDefinition = (action) => stepMap.get(action) || UI_STEP_OPTIONS[0]
 export const getAssertionDefinition = (type) => assertionMap.get(type) || UI_ASSERTION_OPTIONS[0]
 
@@ -79,6 +96,25 @@ const compact = (value) => {
 
 export const normalizeUiStep = (step = {}) => ({ ...createUiStep(step.action), ...step })
 
+const semanticTargetKeys = ['target', 'test_id', 'role', 'accessible_name', 'label', 'placeholder', 'text', 'selector']
+
+export const hasResetUiInput = (previous, next) => {
+  const textKeys = [...semanticTargetKeys, 'value']
+  const optionKeys = ['duration_ms', 'state', 'wait_until', 'width', 'height']
+  return textKeys.some((key) => String(previous[key] ?? '').trim() && previous[key] !== next[key]) ||
+    optionKeys.some((key) => previous[key] != null && previous[key] !== next[key])
+}
+
+export const mergeUiStep = (step = {}, action = 'click') => {
+  const definition = getStepDefinition(action)
+  const next = createUiStep(action)
+  if (step.name) next.name = step.name
+  if (definition.selector || definition.optionalSelector) {
+    for (const key of semanticTargetKeys) next[key] = step[key] || ''
+  }
+  return next
+}
+
 export const normalizeUiAssertion = (assertion = {}) => {
   const normalizedType = assertion.type === 'text_present' ? 'text_visible' : assertion.type
   return {
@@ -87,6 +123,16 @@ export const normalizeUiAssertion = (assertion = {}) => {
     type: normalizedType,
     value: assertion.value ?? assertion.expected ?? ''
   }
+}
+
+export const mergeUiAssertion = (assertion = {}, type = 'text_visible') => {
+  const definition = getAssertionDefinition(type)
+  const next = createUiAssertion(type)
+  if (assertion.name) next.name = assertion.name
+  if (definition.selector || definition.optionalSelector || definition.semanticTarget) {
+    for (const key of semanticTargetKeys) next[key] = assertion[key] || ''
+  }
+  return next
 }
 
 export const serializeUiSteps = (steps = []) => steps.map((step) => {
@@ -120,11 +166,15 @@ export const serializeUiAssertions = (assertions = []) => assertions.map((assert
   return compact(payload)
 })
 
-export const validateUiWorkflow = (steps = [], assertions = []) => {
+export const validateUiWorkflow = (steps = [], assertions = [], engine = 'native') => {
   const errors = []
+  const engineLabel = engineLabels[engine] || engine
   const hasTarget = (item) => ['target', 'test_id', 'role', 'accessible_name', 'label', 'placeholder', 'text', 'selector']
     .some((key) => String(item?.[key] || '').trim())
   steps.forEach((step, index) => {
+    if (!isStepActionSupported(step.action, engine)) {
+      errors.push(`步骤 ${index + 1} 的动作 ${step.action} 不受 ${engineLabel} 引擎支持`)
+    }
     const definition = getStepDefinition(step.action)
     if (definition.selector && !hasTarget(step)) errors.push(`步骤 ${index + 1} 缺少语义目标或选择器`)
     if (definition.needsValue && String(step.value ?? '').trim() === '') errors.push(`步骤 ${index + 1} 缺少值`)

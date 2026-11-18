@@ -70,19 +70,20 @@
             <span v-else>—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" align="center" width="360">
+        <el-table-column label="操作" align="center" width="380">
           <template #default="scope">
             <el-button v-if="canTest" size="small" @click="openCaseDialog(scope.row)">用例配置</el-button>
             <el-button v-if="canTest" size="small" type="primary" @click="openRunDialog(scope.row)">执行计划</el-button>
             <el-button v-if="canTest" size="small" @click="openScheduleDialog(scope.row)">定时执行</el-button>
-            <el-dropdown v-if="canAdmin" @command="(cmd) => handlePlanCommand(cmd, scope.row)">
+            <el-dropdown v-if="canTest" @command="(cmd) => handlePlanCommand(cmd, scope.row)">
               <el-button size="small">
                 更多
                 <el-icon><ArrowDown /></el-icon>
               </el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                  <el-dropdown-item command="edit">编辑计划</el-dropdown-item>
+                  <el-dropdown-item v-if="canAdmin" command="delete" divided>删除</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -99,6 +100,7 @@
           <div class="mobile-card-actions">
             <el-button v-if="canTest" size="small" @click="openCaseDialog(item)">用例配置</el-button>
             <el-button v-if="canTest" size="small" type="primary" @click="openRunDialog(item)">执行计划</el-button>
+            <el-button v-if="canTest" size="small" @click="handleEdit(item)">编辑</el-button>
             <el-button v-if="canAdmin" size="small" type="danger" @click="handlePlanCommand('delete', item)">删除</el-button>
           </div>
         </div>
@@ -115,10 +117,10 @@
       </div>
     </el-card>
 
-    <el-dialog v-model="dialogVisible" title="新增测试计划" width="620px">
+    <el-dialog v-model="dialogVisible" :title="editingPlanId ? '编辑测试计划' : '新增测试计划'" width="620px">
       <el-form ref="dataFormRef" :model="temp" :rules="rules" label-position="top">
         <el-form-item label="所属项目" prop="project_id">
-          <el-select v-model="temp.project_id" placeholder="请选择项目" style="width: 100%">
+          <el-select v-model="temp.project_id" :disabled="!!editingPlanId" placeholder="请选择项目" style="width: 100%">
             <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
           </el-select>
         </el-form-item>
@@ -131,7 +133,7 @@
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="createData">确认</el-button>
+        <el-button type="primary" @click="saveData">确认</el-button>
       </template>
     </el-dialog>
 
@@ -158,6 +160,7 @@
               <el-select v-model="caseForm.case_type" placeholder="请选择" style="width: 160px">
                 <el-option label="API" value="API" />
                 <el-option label="UI" value="UI" />
+                <el-option label="PERF" value="PERF" />
               </el-select>
             </el-form-item>
             <el-form-item label="选择用例">
@@ -201,7 +204,7 @@
               type="warning"
               @click="moveFilteredPlanCases"
             >
-              转移到待评审计划
+              复制到待评审计划
             </el-button>
             <el-button
               v-if="canAdmin && filteredPlanCases.length && caseFilter.riskMode !== 'APPROVED_ONLY'"
@@ -262,7 +265,7 @@
               >
                 下移
               </el-button>
-              <el-button v-if="canAdmin" size="small" type="danger" @click="removePlanCase(scope.row)">移除</el-button>
+              <el-button v-if="canTest" size="small" type="danger" @click="removePlanCase(scope.row)">移除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -352,9 +355,11 @@ const list = ref([])
 const projects = ref([])
 const apiCases = ref([])
 const uiCases = ref([])
+const perfCases = ref([])
 const environments = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
+const editingPlanId = ref(null)
 const caseDialogVisible = ref(false)
 const runDialogVisible = ref(false)
 const caseLoading = ref(false)
@@ -444,7 +449,7 @@ const filteredPlanCases = computed(() => {
 })
 
 const selectableCases = computed(() => {
-  const source = caseForm.case_type === 'UI' ? uiCases.value : apiCases.value
+  const source = caseForm.case_type === 'UI' ? uiCases.value : (caseForm.case_type === 'PERF' ? perfCases.value : apiCases.value)
   if (canAdmin.value && caseForm.allow_unapproved) {
     return source
   }
@@ -487,9 +492,21 @@ const pagedList = computed(() => {
 const projectCount = computed(() => new Set(list.value.map((item) => item.project_id)).size)
 
 const handleCreate = () => {
+  editingPlanId.value = null
   temp.project_id = projects.value.length > 0 ? projects.value[0].id : undefined
   temp.name = ''
   temp.description = ''
+  dialogVisible.value = true
+  nextTick(() => {
+    dataFormRef.value?.clearValidate()
+  })
+}
+
+const handleEdit = (row) => {
+  editingPlanId.value = row.id
+  temp.project_id = row.project_id
+  temp.name = row.name || ''
+  temp.description = row.description || ''
   dialogVisible.value = true
   nextTick(() => {
     dataFormRef.value?.clearValidate()
@@ -506,13 +523,21 @@ const handleReset = () => {
   page.value = 1
 }
 
-const createData = () => {
+const saveData = () => {
   dataFormRef.value?.validate(async (valid) => {
     if (valid) {
       try {
-        await api.post('/test-plans', temp)
+        if (editingPlanId.value) {
+          await api.put(`/test-plans/${editingPlanId.value}`, {
+            name: temp.name,
+            description: temp.description
+          })
+          ElMessage.success('更新成功')
+        } else {
+          await api.post('/test-plans', temp)
+          ElMessage.success('创建成功')
+        }
         dialogVisible.value = false
-        ElMessage.success('创建成功')
         getList()
       } catch (error) {
         ElMessage.error(error.message)
@@ -534,13 +559,15 @@ const loadPlanCases = async (planId) => {
 }
 
 const loadCaseAssets = async (projectId) => {
-  const [apiData, uiData, envData] = await Promise.all([
+  const [apiData, uiData, perfData, envData] = await Promise.all([
     api.get(`/api-cases?project_id=${projectId}`),
     api.get(`/ui-cases?project_id=${projectId}`),
+    api.get(`/performance-cases?project_id=${projectId}`),
     api.get(`/environments?project_id=${projectId}`)
   ])
-  apiCases.value = apiData
-  uiCases.value = uiData
+  apiCases.value = Array.isArray(apiData) ? apiData : (apiData?.items || [])
+  uiCases.value = Array.isArray(uiData) ? uiData : (uiData?.items || [])
+  perfCases.value = Array.isArray(perfData) ? perfData : (perfData?.items || [])
   environments.value = envData
 }
 
@@ -743,10 +770,11 @@ const removeFilteredPlanCases = async () => {
       '批量移除确认',
       { type: 'warning', confirmButtonText: '移除', cancelButtonText: '取消' }
     )
-    for (const item of filteredPlanCases.value) {
-      await api.delete(`/test-plans/${currentPlan.value.id}/cases/${item.id}`)
-    }
-    ElMessage.success(`已移除 ${filteredPlanCases.value.length} 条计划用例`)
+    const ids = filteredPlanCases.value.map((item) => item.id)
+    await api.post(`/test-plans/${currentPlan.value.id}/cases/batch-delete`, {
+      plan_case_ids: ids
+    })
+    ElMessage.success(`已移除 ${ids.length} 条计划用例`)
     await loadPlanCases(currentPlan.value.id)
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
@@ -761,33 +789,20 @@ const moveFilteredPlanCases = async () => {
   }
   try {
     await ElMessageBox.confirm(
-      `确认把当前筛选结果中的 ${filteredPlanCases.value.length} 条用例转移到新建的待评审计划？`,
-      '转移确认',
-      { type: 'warning', confirmButtonText: '转移', cancelButtonText: '取消' }
+      `将把当前筛选结果中的 ${filteredPlanCases.value.length} 条用例复制到新建的待评审计划，原计划中的用例会保留。继续吗？`,
+      '复制确认',
+      { type: 'warning', confirmButtonText: '复制', cancelButtonText: '取消' }
     )
-    const createdPlan = await api.post('/test-plans', {
-      project_id: currentPlan.value.project_id,
-      name: `${currentPlan.value.name}-待评审-${new Date().toISOString().slice(0, 10)}`,
-      description: `由计划「${currentPlan.value.name}」转移出的待评审风险用例`,
+    const createdPlan = await api.post(`/test-plans/${currentPlan.value.id}/cases/copy-to-review`, {
+      item_ids: filteredPlanCases.value.map((item) => item.id),
     })
-    await api.post(`/test-plans/${createdPlan.id}/cases/batch`, {
-      items: filteredPlanCases.value.map((item) => ({
-        case_type: item.case_type,
-        case_id: item.case_id,
-      })),
-      order_start: 1,
-      allow_unapproved: true,
-    })
-    for (const item of filteredPlanCases.value) {
-      await api.delete(`/test-plans/${currentPlan.value.id}/cases/${item.id}`)
-    }
     moveResult.value = {
-      title: `已转移到待评审计划：${createdPlan.name}`,
-      description: `来源计划：${currentPlan.value.name}。新计划说明已写入来源信息，可在计划列表中继续跟踪。`,
+      title: `已复制到待评审计划：${createdPlan.name}`,
+      description: `来源计划：${currentPlan.value.name}。原计划用例已保留；新计划中的条目使用当前用例版本快照。`,
       plan_id: createdPlan.id,
       plan_name: createdPlan.name,
     }
-    ElMessage.success(`已转移 ${filteredPlanCases.value.length} 条用例到计划「${createdPlan.name}」`)
+    ElMessage.success(`已复制 ${filteredPlanCases.value.length} 条用例到计划「${createdPlan.name}」，原计划内容已保留`)
     await getList()
     await loadPlanCases(currentPlan.value.id)
   } catch (error) {
@@ -815,6 +830,10 @@ const openMovedPlanCaseDialog = async () => {
 }
 
 const handlePlanCommand = async (command, row) => {
+  if (command === 'edit') {
+    handleEdit(row)
+    return
+  }
   if (command !== 'delete') return
   try {
     await ElMessageBox.confirm(

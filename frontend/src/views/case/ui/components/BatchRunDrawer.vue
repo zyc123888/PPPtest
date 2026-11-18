@@ -74,6 +74,7 @@ import { ElMessage } from 'element-plus'
 import { Back, Refresh, RefreshRight } from '@element-plus/icons-vue'
 import { api } from '@/lib/api'
 import { executionStatusTag, executionStatusText } from '@/lib/execution'
+import { formatShortTime } from '@/lib/formatTime'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -103,7 +104,6 @@ const canRerun = computed(() => detail.value && !['PENDING', 'RUNNING'].includes
 
 const batchStatusText = (status) => ({ PENDING: '排队中', RUNNING: '执行中', SUCCESS: '全部通过', FAILED: '存在失败' }[status] || status)
 const batchStatusTag = (status) => ({ PENDING: 'info', RUNNING: 'warning', SUCCESS: 'success', FAILED: 'danger' }[status] || 'info')
-const formatShortTime = (value) => (value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-')
 const formatDuration = (value) => (value === null || value === undefined ? '-' : value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(1)}s`)
 
 const stopPolling = () => { if (pollTimer) window.clearInterval(pollTimer); pollTimer = null }

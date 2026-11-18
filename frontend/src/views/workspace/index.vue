@@ -55,9 +55,11 @@
             {{ formatTime(scope.row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column v-if="canAdmin" label="操作" width="140" align="center">
+        <el-table-column v-if="canAdmin" label="操作" width="240" align="center">
           <template #default="scope">
             <el-button size="small" @click="openMemberDialog(scope.row)">成员管理</el-button>
+            <el-button size="small" @click="handleEdit(scope.row)">编辑</el-button>
+            <el-button size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -69,6 +71,8 @@
           <div class="mobile-card-desc">{{ item.description || '-' }}</div>
           <div v-if="canAdmin" class="mobile-card-actions">
             <el-button size="small" @click="openMemberDialog(item)">成员管理</el-button>
+            <el-button size="small" @click="handleEdit(item)">编辑</el-button>
+            <el-button size="small" type="danger" @click="handleDelete(item)">删除</el-button>
           </div>
         </div>
       </div>
@@ -84,7 +88,7 @@
       </div>
     </el-card>
 
-    <el-dialog v-model="dialogVisible" title="新增工作空间" width="520px">
+    <el-dialog v-model="dialogVisible" :title="editingId ? '编辑工作空间' : '新增工作空间'" width="520px">
       <el-form ref="dataFormRef" :model="temp" :rules="rules" label-position="top">
         <el-form-item label="空间名称" prop="name">
           <el-input v-model="temp.name" placeholder="例如：核心业务" />
@@ -95,7 +99,7 @@
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="createData">确认</el-button>
+        <el-button type="primary" @click="saveData">确认</el-button>
       </template>
     </el-dialog>
 
@@ -186,6 +190,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
 import { useAuthStore } from '@/stores/auth'
 import { useRoute } from 'vue-router'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
 
 const list = ref([])
 const users = ref([])
@@ -208,6 +213,7 @@ const filters = reactive({
 
 const page = ref(1)
 const pageSize = ref(10)
+const editingId = ref(null)
 
 const temp = reactive({
   name: '',
@@ -246,11 +252,6 @@ const filteredMemberList = computed(() => {
   })
 })
 
-const formatTime = (val) => {
-  if (!val) return '-'
-  return new Date(val).toLocaleString()
-}
-
 const getList = async () => {
   listLoading.value = true
   try {
@@ -286,15 +287,42 @@ const pagedList = computed(() => {
   return filteredList.value.slice(start, start + pageSize.value)
 })
 
-const memberWorkspaces = computed(() => list.value.filter((item) => (item.member_count || 0) > 0).length)
+const memberWorkspaces = computed(() => list.value.length)
 
 const handleCreate = () => {
+  editingId.value = null
   temp.name = ''
   temp.description = ''
   dialogVisible.value = true
   nextTick(() => {
     dataFormRef.value?.clearValidate()
   })
+}
+
+const handleEdit = (row) => {
+  editingId.value = row.id
+  temp.name = row.name || ''
+  temp.description = row.description || ''
+  dialogVisible.value = true
+  nextTick(() => {
+    dataFormRef.value?.clearValidate()
+  })
+}
+
+const handleDelete = async (row) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除工作空间「${row.name}」？仅当空间下无关联项目时可删除。`,
+      '删除工作空间',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+    await api.delete(`/workspaces/${row.id}`)
+    ElMessage.success('删除成功')
+    getList()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.message)
+  }
 }
 
 const handleSearch = () => {
@@ -307,13 +335,18 @@ const handleReset = () => {
   page.value = 1
 }
 
-const createData = () => {
+const saveData = () => {
   dataFormRef.value?.validate(async (valid) => {
     if (valid) {
       try {
-        await api.post('/workspaces', temp)
+        if (editingId.value) {
+          await api.put(`/workspaces/${editingId.value}`, temp)
+          ElMessage.success('更新成功')
+        } else {
+          await api.post('/workspaces', temp)
+          ElMessage.success('创建成功')
+        }
         dialogVisible.value = false
-        ElMessage.success('创建成功')
         getList()
       } catch (error) {
         ElMessage.error(error.message)

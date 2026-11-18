@@ -6,7 +6,8 @@ export const REQUIREMENT_COLUMNS = [
   { key: 'IN_PROGRESS', label: '实现中' },
   { key: 'TESTING', label: '测试中' },
   { key: 'DONE', label: '已完成' },
-  { key: 'CLOSED', label: '已关闭' }
+  { key: 'CLOSED', label: '已关闭' },
+  { key: 'REJECTED', label: '已拒绝' }
 ]
 
 export const REQUIREMENT_STATUS_LABELS = {
@@ -39,7 +40,8 @@ export const DEFECT_COLUMNS = [
   { key: 'IN_PROGRESS', label: '处理中' },
   { key: 'RESOLVED', label: '已解决' },
   { key: 'VERIFYING', label: '验证中' },
-  { key: 'CLOSED', label: '已关闭' }
+  { key: 'REOPENED', label: '重新打开' },
+  { key: 'CLOSED', label: '已归档', statuses: ['CLOSED', 'WONTFIX'], dropStatus: 'CLOSED', collapsible: true, defaultCollapsed: true }
 ]
 
 export const DEFECT_STATUS_LABELS = {

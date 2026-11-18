@@ -36,15 +36,16 @@
             </td>
             <td class="src-action">
               <el-button
-                v-if="canRerun(source)"
+                v-if="recoveryAction(source.source_id)"
                 size="small"
                 type="primary"
                 plain
                 :loading="rerunningShard === source.source_id"
-                :disabled="!!rerunningShard"
+                :disabled="!recoveryAction(source.source_id).enabled || !!rerunningShard"
+                :title="recoveryAction(source.source_id).reason || ''"
                 @click="emit('rerun-source', source)"
               >
-                重跑
+                {{ recoveryAction(source.source_id).label }}
               </el-button>
               <span v-else>-</span>
             </td>
@@ -56,17 +57,20 @@
 </template>
 
 <script setup>
-import { canRerunSourceShard, hasSourceGap, sourceStatusTag } from '../presentation'
+import { hasSourceGap, sourceStatusTag } from '../presentation'
 
 const props = defineProps({
   sources: { type: Array, default: () => [] },
   job: { type: Object, default: null },
   trusted: { type: Boolean, default: false },
+  recoveryActions: { type: Array, default: () => [] },
   rerunningShard: { type: String, default: '' }
 })
 
 const emit = defineEmits(['rerun-source'])
-const canRerun = (source) => canRerunSourceShard(props.job, props.trusted, source)
+const recoveryAction = (sourceId) => props.recoveryActions.find(
+  (item) => item.action === 'rerun_source' && item.source_id === sourceId
+)
 </script>
 
 <style scoped>

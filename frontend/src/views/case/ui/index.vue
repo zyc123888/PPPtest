@@ -8,8 +8,8 @@
         <el-tooltip content="导入 UI 用例" placement="bottom">
           <el-button :icon="Upload" aria-label="导入 UI 用例" @click="openImportDialog" />
         </el-tooltip>
-        <el-tooltip content="导出当前结果" placement="bottom">
-          <el-button :icon="Download" aria-label="导出当前结果" @click="exportCurrentCases" />
+        <el-tooltip content="导出当前筛选结果" placement="bottom">
+          <el-button :icon="Download" aria-label="导出当前筛选结果" @click="exportCurrentCases" />
         </el-tooltip>
         <el-tooltip content="刷新" placement="bottom">
           <el-button :icon="Refresh" aria-label="刷新 UI 用例" :loading="listLoading" @click="refreshAll" />
@@ -23,28 +23,28 @@
       <div class="summary-item">
         <span class="summary-item__icon is-primary"><el-icon><DocumentCopy /></el-icon></span>
         <div>
-        <span class="summary-item__label">用例总数</span>
+        <span class="summary-item__label">用例总数 <small v-if="statsStale">未更新</small></span>
         <strong>{{ stats.total }}</strong>
         </div>
       </div>
       <div class="summary-item">
         <span class="summary-item__icon is-success"><el-icon><CircleCheck /></el-icon></span>
         <div>
-        <span class="summary-item__label">启用</span>
+        <span class="summary-item__label">启用 <small v-if="statsStale">未更新</small></span>
         <strong>{{ stats.active }}</strong>
         </div>
       </div>
       <div class="summary-item">
         <span class="summary-item__icon is-review"><el-icon><Finished /></el-icon></span>
         <div>
-        <span class="summary-item__label">已评审</span>
+        <span class="summary-item__label">已评审 <small v-if="statsStale">未更新</small></span>
         <strong>{{ stats.approved }}</strong>
         </div>
       </div>
       <div class="summary-item">
         <span class="summary-item__icon is-rate"><el-icon><TrendCharts /></el-icon></span>
         <div>
-        <span class="summary-item__label">最近成功率</span>
+        <span class="summary-item__label">最近成功率 <small v-if="statsStale">未更新</small></span>
         <strong>{{ recentSuccessRate }}</strong>
         </div>
       </div>
@@ -64,6 +64,9 @@
       </section>
 
       <section class="workspace-panel case-layout__main">
+        <el-alert v-if="listError" :title="listError" type="error" show-icon :closable="false">
+          <template #default><el-button link type="primary" @click="refreshAll">重新加载</el-button></template>
+        </el-alert>
         <div class="filter-bar">
           <el-button class="tree-drawer-trigger" :icon="Files" aria-label="打开用例目录" @click="treeDrawerVisible = true" />
           <el-select v-model="filters.projectId" clearable placeholder="全部项目" class="filter-control">
@@ -95,11 +98,13 @@
           :page-size="pageSize"
           :project-map="projectMap"
           :latest-run-map="latestRunMap"
+          :latest-run-state="latestRunState"
           :can-test="canTest"
           :can-admin="canAdmin"
           @update:page="page = $event"
           @update:page-size="pageSize = $event"
           @selection-change="selectedRows = $event"
+          @retry-latest-runs="loadLatestRuns(list.map((item) => item.id))"
           @detail="openCaseDetail"
           @edit="handleEdit"
           @run="handleRun"
@@ -143,10 +148,16 @@
     />
 
     <el-dialog v-model="batchEditVisible" title="批量修改用例" width="520px">
-      <p class="batch-edit-hint">将对已选的 <strong>{{ selectedRows.length }}</strong> 条用例应用以下修改；留空的字段不会变更。</p>
+      <p class="batch-edit-hint">将对已选的 <strong>{{ selectedRows.length }}</strong> 条用例应用以下修改。</p>
       <el-form label-position="top" :model="batchEditForm">
         <el-form-item label="移动到目录">
+          <el-radio-group v-model="batchEditForm.folder_mode">
+            <el-radio-button value="keep">不修改</el-radio-button>
+            <el-radio-button value="set">设置目录</el-radio-button>
+            <el-radio-button value="clear">移至未分组</el-radio-button>
+          </el-radio-group>
           <el-tree-select
+            v-if="batchEditForm.folder_mode === 'set'"
             v-model="batchEditForm.folder_path"
             :data="folderSelectOptions"
             check-strictly
@@ -158,13 +169,25 @@
             style="width: 100%"
           />
         </el-form-item>
+        <el-form-item label="标签">
+          <el-radio-group v-model="batchEditForm.tags_mode"><el-radio-button value="keep">不修改</el-radio-button><el-radio-button value="set">设置标签</el-radio-button><el-radio-button value="clear">清空标签</el-radio-button></el-radio-group>
+          <el-select v-if="batchEditForm.tags_mode === 'set'" v-model="batchEditForm.tags_json" multiple filterable allow-create default-first-option placeholder="选择或输入标签" style="width: 100%; margin-top: 8px"><el-option v-for="item in tagOptions" :key="item" :label="item" :value="item" /></el-select>
+        </el-form-item>
         <el-form-item label="优先级">
-          <el-select v-model="batchEditForm.priority" clearable placeholder="不修改" style="width: 100%">
+          <el-radio-group v-model="batchEditForm.priority_mode">
+            <el-radio-button value="keep">不修改</el-radio-button>
+            <el-radio-button value="set">设置</el-radio-button>
+          </el-radio-group>
+          <el-select v-if="batchEditForm.priority_mode === 'set'" v-model="batchEditForm.priority" placeholder="选择优先级" style="width: 100%; margin-top: 8px">
             <el-option v-for="item in ['P0', 'P1', 'P2', 'P3']" :key="item" :label="item" :value="item" />
           </el-select>
         </el-form-item>
         <el-form-item label="用例状态">
-          <el-select v-model="batchEditForm.status" clearable placeholder="不修改" style="width: 100%">
+          <el-radio-group v-model="batchEditForm.status_mode">
+            <el-radio-button value="keep">不修改</el-radio-button>
+            <el-radio-button value="set">设置</el-radio-button>
+          </el-radio-group>
+          <el-select v-if="batchEditForm.status_mode === 'set'" v-model="batchEditForm.status" placeholder="选择状态" style="width: 100%; margin-top: 8px">
             <el-option label="启用" value="ACTIVE" />
             <el-option label="停用" value="INACTIVE" />
           </el-select>
@@ -184,6 +207,8 @@
       :draft-ready="aiDraftReady"
       :draft="temp"
       :warnings="aiWarnings"
+      :saved-case-id="aiSavedCaseId"
+      :run-error="aiRunError"
       :generating="aiGenerating"
       :saving="saving"
       :running="aiSavingRun"
@@ -191,11 +216,19 @@
       @generate="generateAIDraft"
       @reset="resetAIDraft"
       @advanced-edit="openAIDraftInEditor"
+      @view-saved="viewSavedAICase"
       @save="saveAIDraft(false)"
       @save-run="saveAIDraft(true)"
     />
 
-    <el-dialog v-model="editorVisible" :title="isEditing ? '编辑 UI 用例' : '新增 UI 用例'" width="min(1080px, 96vw)" top="4vh" destroy-on-close>
+    <el-dialog
+      v-model="editorVisible"
+      :title="isEditing ? '编辑 UI 用例' : '新增 UI 用例'"
+      width="min(1080px, 96vw)"
+      top="4vh"
+      destroy-on-close
+      :before-close="confirmEditorClose"
+    >
       <el-form ref="editorFormRef" :model="temp" :rules="rules" label-position="top">
         <el-tabs v-model="editorTab" class="editor-tabs">
           <el-tab-pane label="基本信息" name="basic">
@@ -205,7 +238,7 @@
                 <span>{{ temp.skill_name }} · v{{ temp.skill_version }}</span>
               </div>
               <el-form-item label="所属项目" prop="project_id">
-                <el-select v-model="temp.project_id" placeholder="请选择项目" style="width: 100%">
+                <el-select v-model="temp.project_id" placeholder="请选择项目" style="width: 100%" @change="handleEditorProjectChange">
                   <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
                 </el-select>
               </el-form-item>
@@ -213,7 +246,7 @@
               <el-form-item label="目录/分组">
                 <el-tree-select
                   v-model="temp.folder_path"
-                  :data="folderSelectOptions"
+                  :data="editorFolderSelectOptions"
                   check-strictly
                   filterable
                   allow-create
@@ -274,11 +307,18 @@
                   </el-select>
                 </el-form-item>
                 </template>
-                <el-form-item v-else label="允许域名">
+                <template v-else>
+                <el-form-item label="允许域名">
                   <el-select v-model="temp.allowed_origins_json" multiple allow-create filterable default-first-option style="width: 100%" placeholder="默认仅目标地址和项目地址">
                     <el-option v-for="item in temp.allowed_origins_json" :key="item" :label="item" :value="item" />
                   </el-select>
                 </el-form-item>
+                <el-form-item label="禁止操作">
+                  <el-select v-model="temp.prohibited_actions_json" multiple allow-create filterable default-first-option style="width: 100%" placeholder="删除、支付、发布等（Midscene 执行前拦截）">
+                    <el-option v-for="item in defaultProhibitedActions" :key="item" :label="item" :value="item" />
+                  </el-select>
+                </el-form-item>
+                </template>
               </div>
             </div>
           </el-tab-pane>
@@ -288,20 +328,21 @@
               <span class="builder-count">{{ temp.steps.length }} 个步骤</span>
               <el-button type="primary" plain :icon="Plus" @click="addStep">添加步骤</el-button>
             </div>
+            <div v-if="removedStep" role="status">步骤已删除 <el-button link type="primary" @click="undoRemoveStep">撤销</el-button></div>
             <el-empty v-if="!temp.steps.length" description="暂无操作步骤；执行时会自动打开目标地址" :image-size="72" />
             <div v-else class="builder-list">
               <div v-for="(step, index) in temp.steps" :key="step._key" class="builder-row">
                 <div class="builder-row__head">
                   <span class="builder-index">{{ index + 1 }}</span>
                   <el-select v-model="step.action" class="builder-action" @change="changeStepAction(step, $event)">
-                    <el-option v-for="item in UI_STEP_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+                    <el-option v-for="item in stepOptions" :key="item.value" :label="item.label" :value="item.value" />
                   </el-select>
                   <el-input v-model="step.name" placeholder="步骤名称（可选）" />
                   <div class="builder-actions">
                     <el-tooltip content="上移"><el-button text :icon="Top" aria-label="上移步骤" :disabled="index === 0" @click="moveItem(temp.steps, index, -1)" /></el-tooltip>
                     <el-tooltip content="下移"><el-button text :icon="Bottom" aria-label="下移步骤" :disabled="index === temp.steps.length - 1" @click="moveItem(temp.steps, index, 1)" /></el-tooltip>
                     <el-tooltip content="复制"><el-button text :icon="CopyDocument" aria-label="复制步骤" @click="duplicateStep(index)" /></el-tooltip>
-                    <el-tooltip content="删除"><el-button text type="danger" :icon="Delete" aria-label="删除步骤" @click="temp.steps.splice(index, 1)" /></el-tooltip>
+                    <el-tooltip content="删除"><el-button text type="danger" :icon="Delete" aria-label="删除步骤" @click="removeStep(index)" /></el-tooltip>
                   </div>
                 </div>
                 <div class="builder-fields">
@@ -357,7 +398,7 @@
       </el-form>
       <template #footer>
         <span class="dialog-version">{{ isEditing ? `保存后自动升级版本（当前 ${temp.version_no}）` : '初始版本 1.0.0' }}</span>
-        <el-button @click="editorVisible = false">取消</el-button>
+        <el-button @click="requestEditorClose">取消</el-button>
         <el-button type="primary" :loading="saving" @click="saveData">保存用例</el-button>
       </template>
     </el-dialog>
@@ -374,7 +415,7 @@
       <template #footer><el-button :loading="prechecking" @click="handlePrecheck">执行前校验</el-button><el-button @click="runDialogVisible = false">取消</el-button><el-button type="primary" :loading="submittingRun" @click="submitRun">开始执行</el-button></template>
     </el-dialog>
 
-    <el-drawer v-model="detailVisible" size="min(780px, 94vw)" destroy-on-close @closed="stopPolling">
+    <el-drawer v-model="detailVisible" size="min(780px, 94vw)" destroy-on-close @closed="handleDetailClosed">
       <template #header>
         <div v-if="currentCase" class="drawer-title"><div><strong>{{ currentCase.name }}</strong><span>#{{ currentCase.id }} · v{{ currentCase.version_no }}</span></div><el-tag :type="currentCase.status === 'ACTIVE' ? 'success' : 'info'">{{ caseStatusText(currentCase.status) }}</el-tag></div>
       </template>
@@ -416,7 +457,7 @@
             </div>
             <div class="run-detail-grid">
               <div class="run-steps"><h4>步骤结果</h4><div v-for="(step, index) in selectedRunSteps" :key="index" class="run-step"><el-icon :class="step.status === 'SUCCESS' ? 'is-success' : 'is-failed'"><CircleCheck v-if="step.status === 'SUCCESS'" /><WarningFilled v-else /></el-icon><div><strong>{{ step.name || `步骤 ${index + 1}` }}</strong><p>{{ formatStepDetail(step.detail) }}</p></div><span>{{ formatDuration(step.duration_ms) }}</span></div></div>
-              <div class="run-artifacts"><h4>执行产物</h4><button v-for="(artifact, index) in selectedRunArtifacts" :key="`${artifact.name}-${index}`" type="button" class="artifact-item" @click="previewArtifact(index, artifact)"><el-icon><Picture v-if="isImageArtifact(artifact)" /><Document v-else /></el-icon><span>{{ artifact.name }}</span><el-button text :icon="Download" :aria-label="`下载 ${artifact.name}`" @click.stop="downloadArtifact(index, artifact)" /></button><div v-if="previewUrl" class="artifact-preview"><img :src="previewUrl" alt="UI 执行截图" /></div></div>
+              <div class="run-artifacts"><h4>执行产物</h4><div v-for="(artifact, index) in selectedRunArtifacts" :key="`${artifact.name}-${index}`" class="artifact-item" role="button" tabindex="0" @click="previewArtifact(index, artifact)" @keydown.enter.prevent="previewArtifact(index, artifact)" @keydown.space.prevent="previewArtifact(index, artifact)"><el-icon><Picture v-if="isImageArtifact(artifact)" /><Document v-else /></el-icon><span>{{ artifact.name }}</span><el-button text :icon="Download" :aria-label="`下载 ${artifact.name}`" @click.stop="downloadArtifact(index, artifact)" /></div><div v-if="previewUrl" class="artifact-preview"><img :src="previewUrl" alt="UI 执行截图" /></div></div>
             </div>
           </section>
         </el-tab-pane>
@@ -426,15 +467,17 @@
     <el-dialog v-model="importVisible" title="导入 UI 用例" width="680px">
       <el-upload :auto-upload="false" :show-file-list="false" accept="application/json,.json" :on-change="handleImportFile"><el-button :icon="Upload">选择 JSON 文件</el-button></el-upload>
       <el-input v-model="importText" type="textarea" :rows="14" class="import-editor" />
-      <template #footer><el-button @click="importVisible = false">取消</el-button><el-button type="primary" @click="submitImportCases">导入</el-button></template>
+      <template #footer><el-button @click="importVisible = false">取消</el-button><el-button type="primary" :loading="importPending" :disabled="importPending" @click="submitImportCases">导入</el-button></template>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { formatShortTime } from '@/lib/formatTime'
 import {
   Bottom, CircleCheck, CopyDocument, Delete, Document, DocumentCopy, Download, Files, Finished,
   MagicStick, Picture, Plus, Refresh, Search, Tickets, Top, TrendCharts, Upload, VideoPlay, WarningFilled
@@ -449,9 +492,13 @@ import ReviewPanel from './components/ReviewPanel.vue'
 import { usePermissions } from '@/lib/permissions'
 import { useAuthStore } from '@/stores/auth'
 import { executionStatusTag, executionStatusText } from '@/lib/execution'
+import { useSubmitGuard } from '@/composables/useSubmitGuard'
+import { buildCaseBatchPatch } from '@/lib/caseBatch'
 import {
   UI_ASSERTION_OPTIONS, UI_STEP_OPTIONS, createUiAssertion, createUiStep,
-  getAssertionDefinition, getStepDefinition, normalizeUiAssertion, normalizeUiStep,
+  findUnsupportedActions, getAssertionDefinition, getStepDefinition, getStepOptions,
+  normalizeUiAssertion, normalizeUiStep,
+  hasResetUiInput, mergeUiAssertion, mergeUiStep,
   serializeUiAssertions, serializeUiSteps, validateUiWorkflow
 } from '@/lib/uiCase'
 
@@ -466,6 +513,7 @@ const editorTab = ref('basic')
 const isEditing = ref(false)
 const editingCaseId = ref(null)
 const editorFormRef = ref(null)
+const editorInitialSnapshot = ref('')
 const runDialogVisible = ref(false)
 const precheckResult = ref(null)
 const prechecking = ref(false)
@@ -486,9 +534,16 @@ const aiGenerating = ref(false)
 const aiDraftReady = ref(false)
 const aiWarnings = ref([])
 const aiSavingRun = ref(false)
+const aiSavedCaseId = ref(null)
+const aiRunError = ref('')
+const latestRunState = ref('idle')
+const removedStep = ref(null)
+const statsStale = ref(false)
+const listError = ref('')
 const stats = reactive({ total: 0, active: 0, approved: 0, recent_success_rate: null })
 const folderTree = ref({ total: 0, ungrouped: 0, folders: [] })
 const selectedFolder = ref('')
+const editorFolderTree = ref({ folders: [] })
 const treeDrawerVisible = ref(false)
 const latestRunMap = ref({})
 const caseNameCache = reactive({})
@@ -501,13 +556,18 @@ const batchDrawerVisible = ref(false)
 const activeBatchId = ref(null)
 const batchEditVisible = ref(false)
 const batchEditSubmitting = ref(false)
-const batchEditForm = reactive({ folder_path: '', priority: '', status: '' })
+const batchEditForm = reactive({ folder_mode: 'keep', folder_path: '', tags_mode: 'keep', tags_json: [], priority_mode: 'keep', priority: '', status_mode: 'keep', status: '' })
 const { canAdmin, canTest } = usePermissions()
 const authStore = useAuthStore()
 const currentUserId = computed(() => authStore.user?.id || null)
+const { pending: importPending, run: runImport } = useSubmitGuard()
 let itemKey = 0
 let pollTimer = null
 let keywordTimer = null
+let detailRequestToken = 0
+let editorFolderRequestToken = 0
+let latestRunRequestToken = 0
+let removedStepTimer = null
 
 const filters = reactive({ projectId: undefined, status: '', priority: '', reviewStatus: '', keyword: '' })
 const page = ref(1)
@@ -531,6 +591,7 @@ const engineOptions = [
   { label: 'Midscene AI', value: 'midscene' }
 ]
 const defaultProhibitedActions = ['删除', '支付', '购买', '发布', '发送', '授权']
+const stepOptions = computed(() => getStepOptions(temp.engine))
 const rules = {
   project_id: [{ required: true, message: '请选择项目', trigger: 'change' }],
   name: [{ required: true, message: '请输入用例名称', trigger: 'blur' }, { min: 2, message: '名称至少 2 个字符', trigger: 'blur' }],
@@ -544,6 +605,7 @@ const runEnvironmentOptions = computed(() => environments.value.filter((item) =>
 const recentSuccessRate = computed(() => (stats.recent_success_rate == null ? '-' : `${Math.round(stats.recent_success_rate * 100)}%`))
 const mapFolderNode = (node) => ({ value: node.path, label: node.name, children: (node.children || []).map(mapFolderNode) })
 const folderSelectOptions = computed(() => (folderTree.value.folders || []).map(mapFolderNode))
+const editorFolderSelectOptions = computed(() => (editorFolderTree.value.folders || []).map(mapFolderNode))
 
 const buildListQuery = () => {
   const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value) })
@@ -557,17 +619,25 @@ const buildListQuery = () => {
 }
 
 const loadLatestRuns = async (caseIds) => {
-  if (!caseIds.length) { latestRunMap.value = {}; return }
+  const requestToken = ++latestRunRequestToken
+  latestRunMap.value = {}
+  if (!caseIds.length) { latestRunState.value = 'ready'; return }
+  latestRunState.value = 'loading'
   try {
     const rows = await api.get(`/executions/runs/latest?case_type=UI&case_ids=${caseIds.join(',')}`)
+    if (requestToken !== latestRunRequestToken) return
     latestRunMap.value = Object.fromEntries(rows.map((run) => [run.case_id, run]))
+    latestRunState.value = 'ready'
   } catch {
+    if (requestToken !== latestRunRequestToken) return
     latestRunMap.value = {}
+    latestRunState.value = 'error'
   }
 }
 
 const getList = async () => {
   listLoading.value = true
+  listError.value = ''
   try {
     const data = await api.get(`/ui-cases?${buildListQuery()}`)
     list.value = data.items
@@ -576,6 +646,9 @@ const getList = async () => {
     await loadLatestRuns(data.items.map((item) => item.id))
     if (currentCase.value) currentCase.value = data.items.find((item) => item.id === currentCase.value.id) || currentCase.value
   } catch (error) {
+    list.value = []
+    total.value = 0
+    listError.value = `用例列表加载失败：${error.message}`
     ElMessage.error(error.message)
   } finally {
     listLoading.value = false
@@ -586,8 +659,9 @@ const loadStats = async () => {
   try {
     const suffix = filters.projectId ? `?project_id=${filters.projectId}` : ''
     Object.assign(stats, await api.get(`/ui-cases/stats${suffix}`))
+    statsStale.value = false
   } catch {
-    /* 概览统计失败不阻塞列表 */
+    statsStale.value = true
   }
 }
 
@@ -597,6 +671,18 @@ const loadFolders = async () => {
     folderTree.value = await api.get(`/ui-cases/folders${suffix}`)
   } catch (error) {
     ElMessage.error(error.message)
+  }
+}
+
+const loadEditorFolders = async (projectId) => {
+  const requestToken = ++editorFolderRequestToken
+  editorFolderTree.value = { folders: [] }
+  if (!projectId) return
+  try {
+    const result = await api.get(`/ui-cases/folders?project_id=${projectId}`)
+    if (requestToken === editorFolderRequestToken && temp.project_id === projectId) editorFolderTree.value = result
+  } catch (error) {
+    if (requestToken === editorFolderRequestToken) ElMessage.error(error.message)
   }
 }
 
@@ -646,6 +732,13 @@ const openBatchRun = async () => {
   }
 }
 
+const validateBatchProjectScope = () => {
+  const projectIds = [...new Set(selectedRows.value.map((row) => row.project_id))]
+  if (projectIds.length <= 1) return true
+  ElMessage.warning('批量操作的用例必须属于同一项目，请重新选择')
+  return false
+}
+
 const submitBatchRun = async (payload) => {
   batchSubmitting.value = true
   try {
@@ -674,15 +767,13 @@ const handleOpenRunFromBatch = async (run) => {
 }
 
 const openBatchEdit = () => {
-  Object.assign(batchEditForm, { folder_path: '', priority: '', status: '' })
+  if (!validateBatchProjectScope()) return
+  Object.assign(batchEditForm, { folder_mode: 'keep', folder_path: '', tags_mode: 'keep', tags_json: [], priority_mode: 'keep', priority: '', status_mode: 'keep', status: '' })
   batchEditVisible.value = true
 }
 
 const submitBatchEdit = async () => {
-  const patch = {}
-  if (batchEditForm.folder_path && batchEditForm.folder_path.trim()) patch.folder_path = batchEditForm.folder_path.trim()
-  if (batchEditForm.priority) patch.priority = batchEditForm.priority
-  if (batchEditForm.status) patch.status = batchEditForm.status
+  const patch = buildCaseBatchPatch(batchEditForm)
   if (!Object.keys(patch).length) {
     ElMessage.warning('请至少填写一个要修改的字段')
     return
@@ -702,6 +793,7 @@ const submitBatchEdit = async () => {
 }
 
 const handleBatchDelete = async () => {
+  if (!validateBatchProjectScope()) return
   try {
     await ElMessageBox.confirm(`确认删除已选的 ${selectedRows.value.length} 条 UI 用例？该操作不可恢复。`, '批量删除确认', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
     const result = await api.delete('/ui-cases/batch', { case_ids: selectedRows.value.map((row) => row.id) })
@@ -718,14 +810,14 @@ const refreshCurrentCase = async () => {
   if (!currentCase.value) return
   try {
     currentCase.value = await api.get(`/ui-cases/${currentCase.value.id}`)
-    await getList()
+    await refreshAll()
   } catch (error) {
     ElMessage.error(error.message)
   }
 }
 
 const resetTemp = () => {
-  const project = projects.value[0]
+  const project = projects.value.find((item) => item.id === filters.projectId) || projects.value[0]
   Object.assign(temp, {
     project_id: project?.id, name: '', folder_path: '', target_url: project?.base_url || 'http://frontend:3000',
     priority: 'P1', status: 'ACTIVE', review_status: 'DRAFT', version_no: '1.0.0', review_note: '',
@@ -733,6 +825,12 @@ const resetTemp = () => {
     execution_mode: 'stable', engine: 'native', self_heal_enabled: false, max_agent_steps: 10, allowed_origins_json: [],
     prohibited_actions_json: [], skill_name: '', skill_version: '', generation_meta_json: null
   })
+}
+
+const handleEditorProjectChange = (projectId) => {
+  const project = projects.value.find((item) => item.id === projectId)
+  temp.folder_path = ''
+  if (project && !isEditing.value) temp.target_url = project.base_url || ''
 }
 
 const handleAIProjectChange = (projectId) => {
@@ -752,6 +850,8 @@ const openAIDialog = () => {
   })
   aiDraftReady.value = false
   aiWarnings.value = []
+  aiSavedCaseId.value = null
+  aiRunError.value = ''
   aiDialogVisible.value = true
 }
 
@@ -793,17 +893,28 @@ const generateAIDraft = async () => {
 }
 
 const resetAIDraft = () => {
+  if (aiSavedCaseId.value) return
   aiDraftReady.value = false
   aiWarnings.value = []
+  aiSavedCaseId.value = null
+  aiRunError.value = ''
 }
 
 const openAIDraftInEditor = () => {
+  if (aiSavedCaseId.value) return
   aiDialogVisible.value = false
   isEditing.value = false
   editingCaseId.value = null
   editorTab.value = 'steps'
   editorVisible.value = true
-  nextTick(() => editorFormRef.value?.clearValidate())
+  warnUnsupportedSteps(temp.steps, temp.engine)
+  nextTick(() => { editorFormRef.value?.clearValidate(); captureEditorSnapshot() })
+}
+
+const viewSavedAICase = async () => {
+  if (!aiSavedCaseId.value) return
+  aiDialogVisible.value = false
+  await openCaseDetail({ id: aiSavedCaseId.value })
 }
 
 const handleCreate = () => {
@@ -812,7 +923,7 @@ const handleCreate = () => {
   editingCaseId.value = null
   editorTab.value = 'basic'
   editorVisible.value = true
-  nextTick(() => editorFormRef.value?.clearValidate())
+  nextTick(() => { editorFormRef.value?.clearValidate(); captureEditorSnapshot() })
 }
 
 const handleEdit = (row) => {
@@ -829,19 +940,55 @@ const handleEdit = (row) => {
     prohibited_actions_json: [...(row.prohibited_actions_json || [])],
     skill_version: row.skill_version || '', generation_meta_json: row.generation_meta_json || null
   })
+  warnUnsupportedSteps(temp.steps, temp.engine)
   isEditing.value = true
   editingCaseId.value = row.id
   editorTab.value = 'basic'
   editorVisible.value = true
-  nextTick(() => editorFormRef.value?.clearValidate())
+  nextTick(() => { editorFormRef.value?.clearValidate(); captureEditorSnapshot() })
 }
 
 const stepDefinition = (step) => getStepDefinition(step.action)
 const assertionDefinition = (assertion) => getAssertionDefinition(assertion.type)
+const warnUnsupportedSteps = (steps, engine = temp.engine) => {
+  const unsupported = [...new Set(findUnsupportedActions(steps, engine))]
+  if (unsupported.length) ElMessage.warning(`以下动作不受${engineText(engine)}支持，保存前请调整：${unsupported.join('、')}`)
+}
 const addStep = () => temp.steps.push(withKey(createUiStep('click')))
+const clearRemovedStep = () => {
+  clearTimeout(removedStepTimer)
+  removedStepTimer = null
+  removedStep.value = null
+}
+const removeStep = (index) => {
+  clearRemovedStep()
+  const [step] = temp.steps.splice(index, 1)
+  if (!step) return
+  removedStep.value = { step, index }
+  removedStepTimer = setTimeout(clearRemovedStep, 8000)
+}
+const undoRemoveStep = () => {
+  if (!removedStep.value) return
+  temp.steps.splice(Math.min(removedStep.value.index, temp.steps.length), 0, removedStep.value.step)
+  clearRemovedStep()
+}
 const addAssertion = () => temp.assertions.push(withKey(createUiAssertion()))
-const changeStepAction = (step, action) => Object.assign(step, withKey(createUiStep(action)), { action })
-const changeAssertionType = (assertion, type) => Object.assign(assertion, withKey(createUiAssertion(type)), { type })
+const replaceReactiveItem = (item, next) => {
+  Object.keys(item).forEach((key) => delete item[key])
+  Object.assign(item, withKey(next))
+}
+const changeStepAction = (step, action) => {
+  const next = mergeUiStep(step, action)
+  const cleared = hasResetUiInput(step, next)
+  replaceReactiveItem(step, next)
+  if (cleared) ElMessage.info('动作已更改，部分定位或动作参数已重置，请检查步骤。')
+}
+const changeAssertionType = (assertion, type) => {
+  const next = mergeUiAssertion(assertion, type)
+  const cleared = hasResetUiInput(assertion, next)
+  replaceReactiveItem(assertion, next)
+  if (cleared) ElMessage.info('断言类型已更改，部分定位或断言参数已重置，请检查断言。')
+}
 const duplicateStep = (index) => temp.steps.splice(index + 1, 0, withKey({ ...temp.steps[index] }))
 const moveItem = (items, index, offset) => {
   const target = index + offset
@@ -877,12 +1024,35 @@ const buildTempPayload = () => ({
   generation_meta_json: temp.generation_meta_json
 })
 
+const editorSnapshot = () => JSON.stringify(buildTempPayload())
+const captureEditorSnapshot = () => { editorInitialSnapshot.value = editorSnapshot() }
+const hasUnsavedEditorChanges = () => Boolean(
+  editorVisible.value && editorInitialSnapshot.value && editorSnapshot() !== editorInitialSnapshot.value
+)
+const confirmDiscardEditorChanges = async () => {
+  if (!hasUnsavedEditorChanges()) return true
+  try {
+    await ElMessageBox.confirm('当前用例有未保存的修改，确定放弃吗？', '放弃未保存的修改', {
+      confirmButtonText: '放弃修改', cancelButtonText: '继续编辑', type: 'warning'
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+const confirmEditorClose = async (done) => {
+  if (await confirmDiscardEditorChanges()) done()
+}
+const requestEditorClose = async () => {
+  if (await confirmDiscardEditorChanges()) editorVisible.value = false
+}
+
 const validateTempWorkflow = () => {
   if (!temp.project_id || !temp.name.trim() || !temp.target_url.trim() || !temp.expect_text.trim()) {
     ElMessage.error('AI 草稿缺少名称、地址或通过条件，请返回修改后重新生成')
     return false
   }
-  const workflowErrors = validateUiWorkflow(temp.steps, temp.assertions)
+  const workflowErrors = validateUiWorkflow(temp.steps, temp.assertions, temp.engine)
   if (workflowErrors.length) {
     ElMessage.error(workflowErrors[0])
     return false
@@ -891,25 +1061,27 @@ const validateTempWorkflow = () => {
 }
 
 const saveData = async () => {
-  const valid = await editorFormRef.value?.validate().catch(() => false)
-  if (!valid) {
-    editorTab.value = temp.expect_text ? 'basic' : 'assertions'
-    return
-  }
-  const workflowErrors = validateUiWorkflow(temp.steps, temp.assertions)
-  if (workflowErrors.length) {
-    editorTab.value = workflowErrors[0].startsWith('步骤') ? 'steps' : 'assertions'
-    ElMessage.error(workflowErrors[0])
-    return
-  }
+  if (saving.value || aiSavingRun.value) return
   saving.value = true
   try {
+    const valid = await editorFormRef.value?.validate().catch(() => false)
+    if (!valid) {
+      editorTab.value = temp.expect_text ? 'basic' : 'assertions'
+      return
+    }
+    const workflowErrors = validateUiWorkflow(temp.steps, temp.assertions, temp.engine)
+    if (workflowErrors.length) {
+      editorTab.value = workflowErrors[0].startsWith('步骤') ? 'steps' : 'assertions'
+      ElMessage.error(workflowErrors[0])
+      return
+    }
     const payload = buildTempPayload()
     if (isEditing.value) await api.put(`/ui-cases/${editingCaseId.value}`, payload)
     else await api.post('/ui-cases', payload)
+    captureEditorSnapshot()
     editorVisible.value = false
     ElMessage.success(isEditing.value ? 'UI 用例已更新' : 'UI 用例已创建')
-    await getList()
+    await refreshAll()
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
@@ -918,22 +1090,28 @@ const saveData = async () => {
 }
 
 const saveAIDraft = async (runAfterSave) => {
+  if (saving.value || aiSavingRun.value) return
   if (!validateTempWorkflow()) return
   if (runAfterSave) aiSavingRun.value = true
   else saving.value = true
   let created = null
   try {
-    created = await api.post('/ui-cases', buildTempPayload())
-    await getList()
+    if (aiSavedCaseId.value) {
+      created = { id: aiSavedCaseId.value }
+    } else {
+      created = await api.post('/ui-cases', buildTempPayload())
+      aiSavedCaseId.value = created.id
+      aiRunError.value = ''
+      await refreshAll()
+    }
     if (!runAfterSave) {
       aiDialogVisible.value = false
-      ElMessage.success('UI 用例已保存')
+      ElMessage.success(`UI 用例 #${created.id} 已保存`)
       return
     }
 
     const precheck = await api.get(`/executions/ui/${created.id}/precheck`)
     if (!precheck.is_valid) {
-      aiDialogVisible.value = false
       throw new Error(`用例已保存，但试运行前校验未通过：${precheck.summary}`)
     }
     const run = await api.post(`/executions/ui/${created.id}/run`, {
@@ -942,11 +1120,13 @@ const saveAIDraft = async (runAfterSave) => {
       max_retries: 0
     })
     aiDialogVisible.value = false
+    aiRunError.value = ''
     ElMessage.success(`用例已保存，试运行 #${run.id} 已提交`)
     await openCaseDetail(created, 'runs')
     await selectRun(run)
     startPolling()
   } catch (error) {
+    if (aiSavedCaseId.value) aiRunError.value = error.message
     ElMessage.error(error.message)
   } finally {
     saving.value = false
@@ -959,7 +1139,7 @@ const handleDelete = async (row) => {
     await ElMessageBox.confirm(`确认删除 UI 用例「${row.name}」？`, '删除确认', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
     await api.delete(`/ui-cases/${row.id}`)
     ElMessage.success('UI 用例已删除')
-    await getList()
+    await refreshAll()
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     ElMessage.error(error.message)
@@ -998,9 +1178,17 @@ const submitRun = async () => {
 }
 
 const openCaseDetail = async (row, tab = 'definition') => {
+  const requestToken = ++detailRequestToken
+  resetRunDetail()
+  currentCase.value = null
   try {
-    currentCase.value = await api.get(`/ui-cases/${row.id}`)
-    caseRuns.value = await api.get(`/executions/runs?case_type=UI&case_id=${row.id}&limit=100`)
+    const [caseDetail, runs] = await Promise.all([
+      api.get(`/ui-cases/${row.id}`),
+      api.get(`/executions/runs?case_type=UI&case_id=${row.id}&limit=100`)
+    ])
+    if (requestToken !== detailRequestToken) return
+    currentCase.value = caseDetail
+    caseRuns.value = runs
     detailTab.value = tab
     detailVisible.value = true
     if (tab === 'runs' && caseRuns.value.length) await selectRun(caseRuns.value[0])
@@ -1013,12 +1201,15 @@ const normalizeRunSteps = (rows, fallback) => {
 }
 const selectRun = async (run) => {
   if (!run?.id) return
+  const expectedCaseId = currentCase.value?.id
+  if (!expectedCaseId || (run.case_id && run.case_id !== expectedCaseId)) return
   runDetailLoading.value = true
   revokePreview()
   try {
     const [detail, steps, artifacts] = await Promise.all([
       api.get(`/executions/runs/${run.id}`), api.get(`/executions/runs/${run.id}/steps`), api.get(`/executions/runs/${run.id}/artifacts`)
     ])
+    if (detail.case_id !== expectedCaseId || currentCase.value?.id !== expectedCaseId) return
     selectedRun.value = detail
     selectedRunSteps.value = normalizeRunSteps(steps, detail.step_results_json)
     selectedRunArtifacts.value = artifacts.artifacts || []
@@ -1034,18 +1225,32 @@ const startPolling = () => {
     if (!detailVisible.value || !selectedRun.value?.id) return stopPolling()
     try {
       const detail = await api.get(`/executions/runs/${selectedRun.value.id}`)
+      if (detail.case_id !== currentCase.value?.id) return stopPolling()
       selectedRun.value = detail
       if (!['PENDING', 'RUNNING'].includes(detail.status)) {
         stopPolling()
         caseRuns.value = await api.get(`/executions/runs?case_type=UI&case_id=${detail.case_id}&limit=100`)
         await selectRun(detail)
-        await getList()
+        await refreshAll()
       }
     } catch { stopPolling() }
   }, 2000)
 }
 const stopPolling = () => { if (pollTimer) window.clearInterval(pollTimer); pollTimer = null }
 const revokePreview = () => { if (previewUrl.value) URL.revokeObjectURL(previewUrl.value); previewUrl.value = '' }
+const resetRunDetail = () => {
+  stopPolling()
+  selectedRun.value = null
+  selectedRunSteps.value = []
+  selectedRunArtifacts.value = []
+  caseRuns.value = []
+  revokePreview()
+}
+const handleDetailClosed = () => {
+  detailRequestToken += 1
+  resetRunDetail()
+  currentCase.value = null
+}
 const isImageArtifact = (artifact) => /\.(png|jpe?g|webp)$/i.test(artifact?.name || '') || ['png', 'jpg', 'jpeg', 'webp'].includes(String(artifact?.type || '').toLowerCase())
 const previewArtifact = async (index, artifact) => {
   if (!selectedRun.value || !isImageArtifact(artifact)) return
@@ -1065,12 +1270,22 @@ const exportCurrentCases = async () => {
     if (filters.projectId) params.set('project_id', String(filters.projectId))
     if (filters.status) params.set('status', filters.status)
     if (filters.priority) params.set('priority', filters.priority)
+    if (filters.reviewStatus) params.set('review_status', filters.reviewStatus)
+    if (selectedFolder.value) params.set('folder_path', selectedFolder.value)
     if (filters.keyword.trim()) params.set('keyword', filters.keyword.trim())
+    await ElMessageBox.confirm(
+      `将导出当前筛选结果，共 ${total.value} 条。${selectedFolder.value ? `目录：${selectedFolder.value}。` : ''}${filters.reviewStatus ? `评审状态：${reviewText(filters.reviewStatus)}。` : ''}`,
+      '确认导出',
+      { confirmButtonText: '导出', cancelButtonText: '取消' }
+    )
     const payload = await api.get(`/cases/export?${params}`)
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' }))
     const link = document.createElement('a'); link.href = url; link.download = `ui-cases-${Date.now()}.json`; link.click(); URL.revokeObjectURL(url)
     ElMessage.success(`已导出 ${payload.count || 0} 条 UI 用例`)
-  } catch (error) { ElMessage.error(error.message) }
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.message)
+  }
 }
 const openImportDialog = () => {
   importText.value = JSON.stringify({ items: [{ case_type: 'UI', project_id: projects.value[0]?.id || 1, name: '示例 UI 用例', target_url: 'http://frontend:3000', steps_json: [], assertions_json: [], expect_text: '登录' }] }, null, 2)
@@ -1078,11 +1293,13 @@ const openImportDialog = () => {
 }
 const handleImportFile = async (file) => { try { importText.value = await file.raw.text() } catch { ElMessage.error('文件读取失败') } }
 const submitImportCases = async () => {
-  try {
-    const payload = JSON.parse(importText.value || '{}')
-    if (!Array.isArray(payload.items) || payload.items.some((item) => item.case_type !== 'UI')) throw new Error('导入文件只能包含 UI 用例')
-    await api.post('/cases/import', payload); importVisible.value = false; ElMessage.success('UI 用例导入成功'); await getList()
-  } catch (error) { ElMessage.error(error.message) }
+  await runImport(async () => {
+    try {
+      const payload = JSON.parse(importText.value || '{}')
+      if (!Array.isArray(payload.items) || payload.items.some((item) => item.case_type !== 'UI')) throw new Error('导入文件只能包含 UI 用例')
+      await api.post('/cases/import', payload); importVisible.value = false; ElMessage.success('UI 用例导入成功'); await refreshAll()
+    } catch (error) { ElMessage.error(error.message) }
+  })
 }
 
 const caseStatusText = (status) => ({ ACTIVE: '启用', INACTIVE: '停用' }[status] || status)
@@ -1096,7 +1313,6 @@ const engineDescription = (engine) => ({
   native: '平台内置 Playwright 引擎，支持四种执行模式，适合日常回归与发布门禁。',
   midscene: 'Midscene AI 引擎（Node + Playwright），将自然语言步骤交由多模态模型自主定位执行，需工作空间已配置模型。'
 }[engine] || '')
-const formatShortTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-'
 const formatDuration = (value) => value === null || value === undefined ? '-' : value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(1)}s`
 const formatStepDetail = (detail) => {
   if (!detail) return '-'
@@ -1110,9 +1326,28 @@ const formatStepDetail = (detail) => {
 }
 
 watch(() => filters.projectId, () => {
+  caseTableRef.value?.clearSelection()
+  selectedRows.value = []
   selectedFolder.value = ''
   page.value = 1
   refreshAll()
+})
+watch(() => temp.project_id, (projectId, previousProjectId) => {
+  if (!editorVisible.value) return
+  if (projectId !== previousProjectId) temp.folder_path = ''
+  loadEditorFolders(projectId)
+})
+watch(() => temp.engine, (engine, previousEngine) => {
+  if (!editorVisible.value || engine === previousEngine) return
+  warnUnsupportedSteps(temp.steps, engine)
+})
+watch(editorVisible, (visible) => {
+  if (visible) loadEditorFolders(temp.project_id)
+  else {
+    clearRemovedStep()
+    editorFolderRequestToken += 1
+    editorFolderTree.value = { folders: [] }
+  }
 })
 watch([() => filters.status, () => filters.priority, () => filters.reviewStatus], () => {
   page.value = 1
@@ -1135,11 +1370,30 @@ watch(pageSize, () => {
   getList()
 })
 
+const handleBeforeUnload = (event) => {
+  if (!hasUnsavedEditorChanges()) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+onBeforeRouteLeave(async () => (await confirmDiscardEditorChanges()) || false)
+
+const route = useRoute()
+
 onMounted(async () => {
+  window.addEventListener('beforeunload', handleBeforeUnload)
+  if (route.query.project_id) filters.projectId = Number(route.query.project_id) || undefined
+  if (route.query.keyword) filters.keyword = String(route.query.keyword)
   await loadProjects()
   await refreshAll()
+  if (route.query.action === 'create' && canTest.value) handleCreate()
 })
-onUnmounted(() => { stopPolling(); revokePreview() })
+onUnmounted(() => {
+  clearRemovedStep()
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+  stopPolling()
+  revokePreview()
+})
 </script>
 
 <style scoped>
@@ -1237,7 +1491,9 @@ onUnmounted(() => { stopPolling(); revokePreview() })
 .run-step strong { font-size: 12px; }
 .run-step p { margin: 3px 0 0; color: var(--color-text-secondary); font-size: 11px; overflow-wrap: anywhere; }
 .run-step > span { color: var(--color-text-secondary); font-size: 11px; }
-.artifact-item { width: 100%; display: grid; grid-template-columns: 20px minmax(0, 1fr) 30px; gap: 8px; align-items: center; padding: 6px 4px; border: 0; border-bottom: 1px solid var(--el-border-color-lighter); background: none; cursor: pointer; text-align: left; }
+.artifact-item { width: 100%; display: grid; grid-template-columns: 20px minmax(0, 1fr) 30px; gap: 8px; align-items: center; padding: 6px 4px; border: 0; border-bottom: 1px solid var(--el-border-color-lighter); border-radius: 6px; background: none; cursor: pointer; text-align: left; }
+.artifact-item:hover { background: rgba(99, 102, 241, 0.06); }
+.artifact-item:focus-visible { outline: 2px solid rgba(99, 102, 241, 0.6); outline-offset: 1px; }
 .artifact-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .artifact-preview { margin-top: 12px; border: 1px solid var(--el-border-color); background: #f7f8fa; min-height: 180px; display: grid; place-items: center; }
 .artifact-preview img { display: block; max-width: 100%; max-height: 360px; object-fit: contain; }

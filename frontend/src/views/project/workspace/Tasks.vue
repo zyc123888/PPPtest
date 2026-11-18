@@ -16,7 +16,7 @@
     </div>
 
     <el-card v-if="viewMode === 'board'" class="page-card" shadow="never">
-      <KanbanBoard :columns="columns" :items="items" :draggable="canEdit" @open="openDrawer" @move="handleMove">
+      <KanbanBoard :columns="columns" :items="items" :draggable="canEdit" :transitions="taskTransitions" @open="openDrawer" @move="handleMove">
         <template #card="{ card }">
           <div class="kc-title">{{ card.title }}</div>
           <div class="kc-meta">
@@ -25,6 +25,9 @@
           </div>
         </template>
       </KanbanBoard>
+      <div v-if="total > pageSize" class="table-pagination">
+        <el-pagination layout="total, prev, pager, next" :total="total" :page-size="pageSize" v-model:current-page="page" @current-change="fetchList" />
+      </div>
     </el-card>
 
     <el-card v-else class="page-card" shadow="never">
@@ -40,6 +43,7 @@
           <template #default="{ row }"><el-tag :type="priorityType[row.priority]" size="small" effect="plain">{{ row.priority }}</el-tag></template>
         </el-table-column>
         <el-table-column label="预估(h)" prop="estimate_hours" width="90" align="center" />
+        <el-table-column label="实际(h)" prop="spent_hours" width="90" align="center" />
       </el-table>
       <div class="table-pagination">
         <el-pagination layout="total, prev, pager, next" :total="total" :page-size="pageSize" v-model:current-page="page" @current-change="fetchList" />
@@ -89,14 +93,40 @@
 
     <el-drawer v-model="drawerVisible" :title="current?.title || '任务详情'" size="480px">
       <div v-if="current" class="drawer-body">
+        <div v-if="canEdit" class="ds-row" style="justify-content: flex-end">
+          <el-popconfirm title="确认删除该任务？" @confirm="removeTask">
+            <template #reference>
+              <el-button size="small" type="danger" plain>删除任务</el-button>
+            </template>
+          </el-popconfirm>
+        </div>
+        <div class="ds-row">
+          <span class="ds-label">标题</span>
+          <el-input v-model="current.title" :disabled="!canEdit" size="small" @change="(val) => updateField('title', val)" />
+        </div>
         <div class="ds-row">
           <span class="ds-label">状态流转</span>
           <el-select v-model="current.status" :disabled="!canEdit" size="small" style="width: 160px" @change="changeStatus">
-            <el-option v-for="c in columns" :key="c.key" :label="c.label" :value="c.key" />
+            <el-option
+              v-for="c in columns"
+              :key="c.key"
+              :label="c.label"
+              :value="c.key"
+              :disabled="c.key !== current.status && !(taskTransitions[current.status] || []).includes(c.key)"
+            />
           </el-select>
         </div>
-        <div class="ds-row"><span class="ds-label">优先级</span><el-tag :type="priorityType[current.priority]" effect="plain">{{ current.priority }}</el-tag></div>
-        <div class="ds-row"><span class="ds-label">迭代</span><span>{{ iterationMap[current.iteration_id] || '未规划' }}</span></div>
+        <div class="ds-row">
+          <span class="ds-label">优先级</span>
+          <el-select v-model="current.priority" :disabled="!canEdit" size="small" style="width: 120px" @change="(val) => updateField('priority', val)">
+            <el-option v-for="p in priorityOptions" :key="p" :label="p" :value="p" />
+          </el-select>
+        </div>
+        <div class="ds-row"><span class="ds-label">迭代</span>
+          <el-select v-model="current.iteration_id" :disabled="!canEdit" clearable size="small" style="width: 200px" placeholder="未规划" @change="(val) => updateField('iteration_id', val)">
+            <el-option v-for="it in iterations" :key="it.id" :label="it.name" :value="it.id" />
+          </el-select>
+        </div>
         <div class="ds-row">
           <span class="ds-label">处理人</span>
           <el-select v-model="current.assignee_id" :disabled="!canEdit" clearable filterable size="small" style="width: 200px" placeholder="选择处理人" @change="(val) => updateField('assignee_id', val)">
@@ -113,10 +143,17 @@
           <span class="ds-label">截止时间</span>
           <el-date-picker v-model="current.due_date" :disabled="!canEdit" type="date" value-format="YYYY-MM-DD" size="small" style="width: 200px" placeholder="选择日期" @change="(val) => updateField('due_date', val)" />
         </div>
-        <div class="ds-row"><span class="ds-label">预估/实际</span><span>{{ current.estimate_hours || 0 }}h / {{ current.spent_hours || 0 }}h</span></div>
+        <div class="ds-row"><span class="ds-label">预估工时</span><el-input-number v-model="current.estimate_hours" :disabled="!canEdit" :min="0" :precision="1" size="small" @change="(val) => updateField('estimate_hours', val)" /></div>
+        <div class="ds-row"><span class="ds-label">实际工时</span><el-input-number v-model="current.spent_hours" :disabled="!canEdit" :min="0" :precision="1" size="small" @change="(val) => updateField('spent_hours', val)" /></div>
         <div class="ds-row"><span class="ds-label">创建人</span><span>{{ memberLabel(current.reporter_id) }}</span></div>
-        <div class="ds-row"><span class="ds-label">描述</span><span>{{ current.description || '-' }}</span></div>
+        <div class="ds-row">
+          <span class="ds-label">描述</span>
+          <el-input v-model="current.description" :disabled="!canEdit" type="textarea" :rows="3" @change="(val) => updateField('description', val)" />
+        </div>
         <el-divider content-position="left">评论</el-divider>
+        <el-alert v-if="commentsError" :title="commentsError" type="error" :closable="false" show-icon>
+          <template #default><el-button link type="primary" @click="loadComments(current.id)">重试</el-button></template>
+        </el-alert>
         <div class="comment-add">
           <el-input v-model="commentText" type="textarea" :rows="2" placeholder="写下评论..." />
           <el-button size="small" type="primary" style="margin-top: 6px" @click="addComment">发表</el-button>
@@ -136,6 +173,7 @@ import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import KanbanBoard from './components/KanbanBoard.vue'
 import { TASK_COLUMNS, TASK_STATUS_LABELS, STATUS_TAG_TYPE, PRIORITY_OPTIONS, PRIORITY_TAG_TYPE } from './constants'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
 
 const props = defineProps({ project: { type: Object, required: true }, myRole: { type: String, default: '' } })
 
@@ -145,6 +183,24 @@ const statusType = STATUS_TAG_TYPE
 const priorityOptions = PRIORITY_OPTIONS
 const priorityType = PRIORITY_TAG_TYPE
 const canEdit = computed(() => ['owner', 'manager', 'member'].includes(props.myRole))
+const taskTransitions = {
+  TODO: ['DOING'],
+  DOING: ['REVIEW', 'TODO'],
+  REVIEW: ['DONE', 'DOING'],
+  DONE: ['REVIEW']
+}
+
+async function removeTask() {
+  if (!current.value) return
+  try {
+    await api.delete(`/tasks/${current.value.id}`)
+    drawerVisible.value = false
+    ElMessage.success('任务已删除')
+    fetchList()
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
 
 const loading = ref(false)
 const viewMode = ref('board')
@@ -166,6 +222,8 @@ const current = ref(null)
 const currentSnapshot = ref(null)
 const comments = ref([])
 const commentText = ref('')
+const commentsError = ref('')
+let drawerRequestToken = 0
 
 const iterationMap = computed(() => {
   const m = {}
@@ -181,7 +239,6 @@ const memberMap = computed(() => {
 
 function memberLabel(id) { return id ? (memberMap.value[id] || ('#' + id)) : '未指派' }
 
-function formatTime(t) { return t ? String(t).replace('T', ' ').slice(0, 19) : '' }
 function cloneValue(value) { return value == null ? value : JSON.parse(JSON.stringify(value)) }
 
 async function fetchList() {
@@ -224,10 +281,24 @@ function submitCreate() {
 }
 
 async function openDrawer(row) {
+  const token = ++drawerRequestToken
   current.value = cloneValue(row)
   currentSnapshot.value = cloneValue(row)
+  commentText.value = ''
+  comments.value = []
+  commentsError.value = ''
   drawerVisible.value = true
-  try { comments.value = await api.get(`/task/${row.id}/comments`) } catch { comments.value = [] }
+  await loadComments(row.id, token)
+}
+
+async function loadComments(taskId, token = drawerRequestToken) {
+  commentsError.value = ''
+  try {
+    const rows = await api.get(`/task/${taskId}/comments`)
+    if (token === drawerRequestToken && current.value?.id === taskId) comments.value = rows
+  } catch (error) {
+    if (token === drawerRequestToken) commentsError.value = `评论加载失败：${error.message}`
+  }
 }
 
 async function changeStatus(status) {
@@ -263,10 +334,15 @@ async function handleMove({ card, toStatus, orderIndex }) {
 
 async function addComment() {
   if (!commentText.value.trim()) return
+  const taskId = current.value.id
+  const token = drawerRequestToken
+  const content = commentText.value
   try {
-    await api.post(`/task/${current.value.id}/comments`, { content: commentText.value })
-    commentText.value = ''
-    comments.value = await api.get(`/task/${current.value.id}/comments`)
+    await api.post(`/task/${taskId}/comments`, { content })
+    if (token === drawerRequestToken && current.value?.id === taskId) {
+      if (commentText.value === content) commentText.value = ''
+      await loadComments(taskId, token)
+    }
   } catch (error) { ElMessage.error(error.message) }
 }
 

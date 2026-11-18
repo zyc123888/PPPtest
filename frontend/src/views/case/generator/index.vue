@@ -259,10 +259,14 @@
 
               <div v-if="finalXmindArtifact" class="xmind-download-card">
                 <div>
-                  <div class="xmind-download-card__title">最终 XMind 用例</div>
+                  <div class="xmind-download-card__title">最终 XMind 用例与一键入库</div>
                   <div class="xmind-download-card__desc">{{ finalXmindArtifact.file_name }}</div>
                 </div>
-                <el-button type="primary" @click="downloadArtifact(finalXmindArtifact)">下载 .xmind</el-button>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap">
+                  <el-button size="small" type="success" :loading="importingCases" @click="importGeneratedToLibrary('AUTO')">一键导入用例库</el-button>
+                  <el-button size="small" :loading="importingCases" @click="importGeneratedToLibrary('REQUIREMENT')">转入需求池</el-button>
+                  <el-button size="small" type="primary" @click="downloadArtifact(finalXmindArtifact)">下载 .xmind</el-button>
+                </div>
               </div>
               <el-alert
                 v-else-if="['SUCCESS', 'CONDITIONAL'].includes(currentJob.status)"
@@ -333,6 +337,7 @@ const currentAttempts = ref([])
 const activeArtifactType = ref('')
 const submitting = ref(false)
 const rerunning = ref(false)
+const importingCases = ref(false)
 const savingModelConfig = ref(false)
 const hasSavedModelConfig = ref(false)
 const authStore = useAuthStore()
@@ -886,6 +891,22 @@ async function cancelJob() {
     await refreshCurrentJob()
   } catch (error) {
     ElMessage.error(error?.message || '停止失败')
+  }
+}
+
+async function importGeneratedToLibrary(importType = 'AUTO') {
+  if (!currentJob.value) return
+  importingCases.value = true
+  try {
+    const res = await api.post(`/case-generation/jobs/${currentJob.value.id}/import-cases`, {
+      import_type: importType,
+      folder_path: `/AI生成/${currentJob.value.name}`
+    })
+    ElMessage.success(res.message || '导入成功')
+  } catch (error) {
+    ElMessage.error(error?.message || '导入失败')
+  } finally {
+    importingCases.value = false
   }
 }
 

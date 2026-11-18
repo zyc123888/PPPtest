@@ -3,7 +3,8 @@
     <PageHeader title="工作台" subtitle="运行状态、资源规模、风险趋势集中监控">
       <template #actions>
         <div class="header-actions">
-          <el-button :loading="loading" @click="loadAll">刷新</el-button>
+          <el-switch v-model="autoRefresh" active-text="自动刷新" style="margin-right: 8px" />
+          <el-button :loading="loading" @click="loadAll(false)">刷新</el-button>
           <el-button v-for="link in quickLinks" :key="link.path" text @click="$router.push(link.path)">
             {{ link.title }}
           </el-button>
@@ -164,6 +165,7 @@ import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import TrendChart from '@/components/TrendChart.vue'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
 
 const summary = ref({
   workspace_count: 0,
@@ -186,6 +188,7 @@ const health = ref({
 
 const runs = ref([])
 const loading = ref(false)
+const autoRefresh = ref(true)
 const page = ref(1)
 const pageSize = ref(8)
 const filters = reactive({
@@ -251,11 +254,6 @@ const statusType = (status) => {
   if (['healthy', 'SUCCESS'].includes(status)) return 'success'
   if (['RUNNING', 'PENDING', 'degraded', 'loading'].includes(status)) return 'warning'
   return 'danger'
-}
-
-const formatTime = (val) => {
-  if (!val) return '-'
-  return new Date(val).toLocaleString()
 }
 
 const statusItems = computed(() => ([
@@ -357,21 +355,28 @@ const successTrendText = computed(() => {
 
 let timer = null
 
-const loadAll = async () => {
-  loading.value = true
+const loadAll = async (silent = false) => {
+  if (silent && (typeof document !== 'undefined' && document.visibilityState === 'hidden')) {
+    return
+  }
+  if (!silent) loading.value = true
   try {
-    const [summaryData, healthData, runData] = await Promise.all([
+    const [summaryData, runData] = await Promise.all([
       api.get('/dashboard/summary'),
-      api.get('/system/health'),
       api.get('/executions/runs')
     ])
     summary.value = summaryData
-    health.value = healthData
-    runs.value = runData
+    runs.value = Array.isArray(runData) ? runData : (runData?.items || [])
+    // 依赖不可用时 /system/health 返回 503，不能让它拖垮整个仪表盘加载。
+    try {
+      health.value = await api.get('/system/health')
+    } catch {
+      health.value = { app_status: 'degraded', database: 'unknown', redis: 'unknown', checked_at: '' }
+    }
   } catch (error) {
-    ElMessage.error(error.message)
+    if (!silent) ElMessage.error(error.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -390,8 +395,10 @@ const pagedRuns = computed(() => {
 })
 
 onMounted(() => {
-  loadAll()
-  timer = setInterval(loadAll, 5000)
+  loadAll(false)
+  timer = setInterval(() => {
+    if (autoRefresh.value) loadAll(true)
+  }, 10000)
 })
 
 onBeforeUnmount(() => {

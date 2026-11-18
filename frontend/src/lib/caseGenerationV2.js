@@ -51,12 +51,15 @@ export function cancelCaseGenerationV2Job(jobId) {
   return api.post(`/case-generation-v2/jobs/${jobId}/cancel`, {})
 }
 
-export function downloadCaseGenerationV2Artifact(jobId, artifactId) {
-  return api.getBlob(`/case-generation-v2/jobs/${jobId}/artifacts/${artifactId}/download?_=${Date.now()}`)
+export function downloadCaseGenerationV2Artifact(jobId, artifactId, revision = '') {
+  const params = new URLSearchParams({ _: String(Date.now()) })
+  if (revision) params.set('revision', revision)
+  return api.getBlob(`/case-generation-v2/jobs/${jobId}/artifacts/${artifactId}/download?${params}`)
 }
 
-export function getCaseGenerationV2Artifact(jobId, artifactId) {
-  return api.get(`/case-generation-v2/jobs/${jobId}/artifacts/${artifactId}`)
+export function getCaseGenerationV2Artifact(jobId, artifactId, revision = '') {
+  const query = revision ? `?revision=${encodeURIComponent(revision)}` : ''
+  return api.get(`/case-generation-v2/jobs/${jobId}/artifacts/${artifactId}${query}`)
 }
 
 export function caseGenerationV2StatusTagType(status) {

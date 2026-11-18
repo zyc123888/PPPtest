@@ -140,6 +140,7 @@ import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
 
 const list = ref([])
 const projects = ref([])
@@ -201,11 +202,6 @@ const rules = {
       }
     }, trigger: 'blur'
   }]
-}
-
-const formatTime = (val) => {
-  if (!val) return '-'
-  return new Date(val).toLocaleString()
 }
 
 const projectMap = computed(() => {

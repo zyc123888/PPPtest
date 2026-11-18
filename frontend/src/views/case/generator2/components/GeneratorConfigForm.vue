@@ -70,6 +70,12 @@
           </el-option-group>
         </el-select>
         <el-input v-model="modelConfig.base_url" placeholder="可选：自定义 OpenAI 兼容 base_url；不填则使用预设" />
+        <div class="model-config-effective">
+          <span>本次生效：{{ effectiveModelPreview }}</span>
+          <span v-if="modelConfigDirty" class="model-config-dirty-warning">
+            模型名或 base_url 已修改但尚未保存，提交前需先保存一次模型配置
+          </span>
+        </div>
         <div class="model-config-actions">
           <el-button size="small" @click="emit('load-model-config')">读取已保存配置</el-button>
           <el-button size="small" type="primary" :loading="savingModelConfig" @click="emit('save-model-config')">保存模型配置</el-button>
@@ -143,7 +149,9 @@ defineProps({
   groupedModelOptions: { type: Array, default: () => [] },
   savingModelConfig: { type: Boolean, default: false },
   uploadedFileName: { type: String, default: '' },
-  uploadedCharCount: { type: Number, default: 0 }
+  uploadedCharCount: { type: Number, default: 0 },
+  effectiveModelPreview: { type: String, default: '' },
+  modelConfigDirty: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['load-model-config', 'save-model-config', 'file-change'])
@@ -249,6 +257,19 @@ const selectedGenerationDensityHint = computed(() =>
 
 .model-config-actions {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.model-config-effective {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.model-config-dirty-warning {
+  color: var(--el-color-warning, #e6a23c);
 }
 
 .model-select {

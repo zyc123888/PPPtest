@@ -6,6 +6,8 @@ export const EXECUTION_ERROR_TYPE_OPTIONS = [
   { label: '已取消', value: 'CANCELLED', tagType: 'info' }
 ]
 
+export const isValidRunId = (value) => typeof value === 'string' && /^[1-9]\d*$/.test(value)
+
 const EXECUTION_STATUS_MAP = {
   healthy: { label: '正常', tagType: 'success' },
   degraded: { label: '降级', tagType: 'warning' },

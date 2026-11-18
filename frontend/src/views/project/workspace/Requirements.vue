@@ -14,12 +14,14 @@
           <el-option v-for="it in iterations" :key="it.id" :label="it.name" :value="it.id" />
         </el-select>
         <el-button @click="reload">查询</el-button>
+        <el-button v-if="canEdit" :disabled="!selectedRows.length" @click="openBatchIteration">规划到迭代</el-button>
       </div>
       <el-button v-if="canEdit" type="primary" @click="openCreate">新增需求</el-button>
     </div>
 
     <el-card v-if="viewMode === 'list'" class="page-card" shadow="never">
-      <el-table :data="items" border @row-click="openDrawer">
+      <el-table :data="items" border @row-click="openDrawer" @selection-change="onSelectionChange">
+        <el-table-column type="selection" width="42" :selectable="() => canEdit" />
         <el-table-column label="ID" prop="id" width="70" align="center" />
         <el-table-column label="标题" prop="title" min-width="220" show-overflow-tooltip />
         <el-table-column label="状态" width="110">
@@ -49,7 +51,8 @@
     </el-card>
 
     <el-card v-else class="page-card" shadow="never">
-      <KanbanBoard :columns="columns" :items="items" :draggable="canEdit" @open="openDrawer" @move="handleMove">
+      <div class="board-scope">当前页已加载 {{ items.length }} 条需求，共 {{ total }} 条（仅允许按状态机合法流转的列高亮投递）</div>
+      <KanbanBoard :columns="columns" :items="items" :draggable="canEdit" :transitions="requirementTransitions" @open="openDrawer" @move="handleMove">
         <template #card="{ card }">
           <div class="kc-title">{{ card.title }}</div>
           <div class="kc-meta">
@@ -58,7 +61,28 @@
           </div>
         </template>
       </KanbanBoard>
+      <div class="table-pagination">
+        <el-pagination layout="total, prev, pager, next" :total="total" :page-size="pageSize" v-model:current-page="page" @current-change="fetchList" />
+      </div>
     </el-card>
+
+    <!-- batch iteration dialog -->
+    <el-dialog v-model="batchIterationVisible" title="批量规划到迭代" width="420px">
+      <el-form label-position="top">
+        <el-form-item label="已选需求">
+          <span>共 {{ selectedRows.length }} 条</span>
+        </el-form-item>
+        <el-form-item label="目标迭代">
+          <el-select v-model="batchIterationId" clearable placeholder="选择迭代（清空并确认表示移出迭代）" style="width: 100%">
+            <el-option v-for="it in iterations" :key="it.id" :label="it.name" :value="it.id" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="batchIterationVisible = false">取消</el-button>
+        <el-button type="primary" :loading="batchSubmitting" @click="submitBatchIteration">确认</el-button>
+      </template>
+    </el-dialog>
 
     <!-- create dialog -->
     <el-dialog v-model="createVisible" title="新增需求" width="560px">
@@ -114,14 +138,44 @@
     <el-drawer v-model="drawerVisible" :title="current?.title || '需求详情'" size="560px">
       <div v-if="current" class="drawer-body">
         <div class="drawer-section">
+          <div v-if="canEdit" class="ds-row" style="justify-content: flex-end">
+            <el-popconfirm title="确认删除该需求？关联用例关系将一并解除" @confirm="removeRequirement">
+              <template #reference>
+                <el-button size="small" type="danger" plain>删除需求</el-button>
+              </template>
+            </el-popconfirm>
+          </div>
+          <div class="ds-row">
+            <span class="ds-label">标题</span>
+            <el-input v-model="current.title" :disabled="!canEdit" size="small" @change="(val) => updateField('title', val)" />
+          </div>
           <div class="ds-row">
             <span class="ds-label">状态流转</span>
             <el-select v-model="current.status" :disabled="!canEdit" size="small" style="width: 160px" @change="changeStatus">
-              <el-option v-for="c in columns" :key="c.key" :label="c.label" :value="c.key" />
+              <el-option
+                v-for="c in columns"
+                :key="c.key"
+                :label="c.label"
+                :value="c.key"
+                :disabled="c.key !== current.status && !(requirementTransitions[current.status] || []).includes(c.key)"
+              />
             </el-select>
           </div>
-          <div class="ds-row"><span class="ds-label">优先级</span><el-tag :type="priorityType[current.priority]" effect="plain">{{ current.priority }}</el-tag></div>
-          <div class="ds-row"><span class="ds-label">迭代</span><span>{{ iterationMap[current.iteration_id] || '未规划' }}</span></div>
+          <div class="ds-row">
+            <span class="ds-label">优先级</span>
+            <el-select v-model="current.priority" :disabled="!canEdit" size="small" style="width: 120px" @change="(val) => updateField('priority', val)">
+              <el-option v-for="p in priorityOptions" :key="p" :label="p" :value="p" />
+            </el-select>
+          </div>
+          <div class="ds-row">
+            <span class="ds-label">故事点</span>
+            <el-input-number v-model="current.story_points" :disabled="!canEdit" :min="0" :step="1" size="small" @change="(val) => updateField('story_points', val)" />
+          </div>
+          <div class="ds-row"><span class="ds-label">迭代</span>
+            <el-select v-model="current.iteration_id" :disabled="!canEdit" clearable size="small" style="width: 200px" placeholder="未规划" @change="(val) => updateField('iteration_id', val)">
+              <el-option v-for="it in iterations" :key="it.id" :label="it.name" :value="it.id" />
+            </el-select>
+          </div>
           <div class="ds-row">
             <span class="ds-label">负责人</span>
             <el-select v-model="current.owner_id" :disabled="!canEdit" clearable filterable size="small" style="width: 200px" placeholder="选择负责人" @change="(val) => updateField('owner_id', val)">
@@ -146,17 +200,22 @@
               <span v-if="!current.tags_json?.length">-</span>
             </div>
           </div>
-          <div class="ds-row"><span class="ds-label">描述</span><span>{{ current.description || '-' }}</span></div>
+          <div class="ds-row">
+            <span class="ds-label">描述</span>
+            <el-input v-model="current.description" :disabled="!canEdit" type="textarea" :rows="3" @change="(val) => updateField('description', val)" />
+          </div>
         </div>
 
         <el-divider content-position="left">关联用例（追溯）</el-divider>
+        <el-alert v-if="linkedCasesError" :title="linkedCasesError" type="error" :closable="false" show-icon>
+          <template #default><el-button link type="primary" @click="loadLinkedCases(current.id)">重试</el-button></template>
+        </el-alert>
         <div class="link-add">
-          <el-select v-model="linkForm.case_type" size="small" style="width: 100px">
-            <el-option label="API" value="API" />
-            <el-option label="UI" value="UI" />
-            <el-option label="PERF" value="PERF" />
+          <el-select v-model="linkForm.case_key" filterable remote reserve-keyword clearable :remote-method="searchCases" :loading="caseSearchLoading" size="small" style="width: 300px" placeholder="搜索当前项目用例">
+            <el-option v-for="item in caseOptions" :key="`${item.case_type}:${item.case_id}`" :label="`${item.case_type} · ${item.name} · v${item.version_no}`" :value="`${item.case_type}:${item.case_id}`">
+              <span>{{ item.case_type }} · {{ item.name }} · v{{ item.version_no }}</span>
+            </el-option>
           </el-select>
-          <el-input-number v-model="linkForm.case_id" :min="1" size="small" controls-position="right" style="width: 130px" />
           <el-button size="small" type="primary" :disabled="!canEdit" @click="linkCase">关联</el-button>
         </div>
         <el-table :data="linkedCases" size="small" border style="margin-top: 8px">
@@ -172,6 +231,9 @@
         </el-table>
 
         <el-divider content-position="left">评论</el-divider>
+        <el-alert v-if="commentsError" :title="commentsError" type="error" :closable="false" show-icon>
+          <template #default><el-button link type="primary" @click="loadComments(current.id)">重试</el-button></template>
+        </el-alert>
         <div class="comment-add">
           <el-input v-model="commentText" type="textarea" :rows="2" placeholder="写下评论..." />
           <el-button size="small" type="primary" style="margin-top: 6px" @click="addComment">发表</el-button>
@@ -195,6 +257,7 @@ import {
   REQUIREMENT_COLUMNS, REQUIREMENT_STATUS_LABELS, STATUS_TAG_TYPE,
   PRIORITY_OPTIONS, PRIORITY_TAG_TYPE, REQUIREMENT_TYPE_OPTIONS
 } from './constants'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
 
 const props = defineProps({ project: { type: Object, required: true }, myRole: { type: String, default: '' } })
 
@@ -204,6 +267,27 @@ const statusType = STATUS_TAG_TYPE
 const priorityOptions = PRIORITY_OPTIONS
 const priorityType = PRIORITY_TAG_TYPE
 const typeOptions = REQUIREMENT_TYPE_OPTIONS
+const requirementTransitions = {
+  PENDING: ['PLANNING', 'REJECTED', 'CLOSED'],
+  PLANNING: ['IN_PROGRESS', 'PENDING', 'REJECTED'],
+  IN_PROGRESS: ['TESTING', 'PLANNING'],
+  TESTING: ['DONE', 'IN_PROGRESS'],
+  DONE: ['CLOSED', 'TESTING'],
+  CLOSED: ['PENDING'],
+  REJECTED: ['PENDING']
+}
+
+async function removeRequirement() {
+  if (!current.value) return
+  try {
+    await api.delete(`/requirements/${current.value.id}`)
+    drawerVisible.value = false
+    ElMessage.success('需求已删除')
+    fetchList()
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
 
 const canEdit = computed(() => ['owner', 'manager', 'member'].includes(props.myRole))
 
@@ -234,8 +318,14 @@ const current = ref(null)
 const currentSnapshot = ref(null)
 const linkedCases = ref([])
 const comments = ref([])
-const linkForm = reactive({ case_type: 'API', case_id: 1 })
+const linkForm = reactive({ case_key: null })
+const caseOptions = ref([])
+const caseSearchLoading = ref(false)
 const commentText = ref('')
+const linkedCasesError = ref('')
+const commentsError = ref('')
+let drawerRequestToken = 0
+let caseSearchToken = 0
 
 const iterationMap = computed(() => {
   const m = {}
@@ -243,7 +333,6 @@ const iterationMap = computed(() => {
   return m
 })
 
-function formatTime(t) { return t ? String(t).replace('T', ' ').slice(0, 19) : '' }
 function cloneValue(value) { return value == null ? value : JSON.parse(JSON.stringify(value)) }
 
 async function fetchList() {
@@ -273,6 +362,36 @@ async function loadMembers() {
 
 function reload() { page.value = 1; fetchList() }
 
+const selectedRows = ref([])
+const batchIterationVisible = ref(false)
+const batchIterationId = ref(null)
+const batchSubmitting = ref(false)
+
+function onSelectionChange(rows) { selectedRows.value = rows }
+
+function openBatchIteration() {
+  if (!selectedRows.value.length) return
+  batchIterationId.value = null
+  batchIterationVisible.value = true
+}
+
+async function submitBatchIteration() {
+  batchSubmitting.value = true
+  try {
+    await api.put('/requirements/batch-iteration', {
+      requirement_ids: selectedRows.value.map((row) => row.id),
+      iteration_id: batchIterationId.value || null
+    })
+    batchIterationVisible.value = false
+    ElMessage.success('已更新所选需求的迭代归属')
+    fetchList()
+  } catch (error) {
+    ElMessage.error(error.message)
+  } finally {
+    batchSubmitting.value = false
+  }
+}
+
 function openCreate() {
   Object.assign(form, { title: '', description: '', priority: 'P2', type: 'FEATURE', iteration_id: null, story_points: 0, owner_id: null, assignees_json: [], due_date: null, tags_json: [] })
   createVisible.value = true
@@ -291,13 +410,39 @@ function submitCreate() {
 }
 
 async function openDrawer(row) {
+  const token = ++drawerRequestToken
   current.value = cloneValue(row)
   currentSnapshot.value = cloneValue(row)
+  commentText.value = ''
+  linkedCases.value = []
+  comments.value = []
+  linkedCasesError.value = ''
+  commentsError.value = ''
+  linkForm.case_key = null
+  caseOptions.value = []
+  caseSearchToken += 1
   drawerVisible.value = true
+  await Promise.all([loadLinkedCases(row.id, token), loadComments(row.id, token)])
+}
+
+async function loadLinkedCases(requirementId, token = drawerRequestToken) {
+  linkedCasesError.value = ''
   try {
-    linkedCases.value = await api.get(`/requirements/${row.id}/cases`)
-    comments.value = await api.get(`/requirement/${row.id}/comments`)
-  } catch { /* noop */ }
+    const rows = await api.get(`/requirements/${requirementId}/cases`)
+    if (token === drawerRequestToken && current.value?.id === requirementId) linkedCases.value = rows
+  } catch (error) {
+    if (token === drawerRequestToken) linkedCasesError.value = `关联用例加载失败：${error.message}`
+  }
+}
+
+async function loadComments(requirementId, token = drawerRequestToken) {
+  commentsError.value = ''
+  try {
+    const rows = await api.get(`/requirement/${requirementId}/comments`)
+    if (token === drawerRequestToken && current.value?.id === requirementId) comments.value = rows
+  } catch (error) {
+    if (token === drawerRequestToken) commentsError.value = `评论加载失败：${error.message}`
+  }
 }
 
 async function changeStatus(status) {
@@ -332,26 +477,53 @@ async function handleMove({ card, toStatus, orderIndex }) {
 }
 
 async function linkCase() {
+  const selected = caseOptions.value.find((item) => `${item.case_type}:${item.case_id}` === linkForm.case_key)
+  if (!selected) { ElMessage.warning('请先搜索并选择一个用例'); return }
+  const requirementId = current.value.id
+  const token = drawerRequestToken
   try {
-    await api.post(`/requirements/${current.value.id}/cases`, { case_type: linkForm.case_type, case_id: linkForm.case_id })
-    linkedCases.value = await api.get(`/requirements/${current.value.id}/cases`)
+    await api.post(`/requirements/${requirementId}/cases`, { case_type: selected.case_type, case_id: selected.case_id })
+    if (token === drawerRequestToken && current.value?.id === requirementId) {
+      linkForm.case_key = null
+      await loadLinkedCases(requirementId, token)
+    }
     ElMessage.success('已关联')
   } catch (error) { ElMessage.error(error.message) }
 }
 
-async function unlinkCase(linkId) {
+async function searchCases(keyword) {
+  const token = ++caseSearchToken
+  const query = String(keyword || '').trim()
+  if (query.length < 2) { caseOptions.value = []; caseSearchLoading.value = false; return }
+  caseSearchLoading.value = true
   try {
-    await api.delete(`/requirements/${current.value.id}/cases/${linkId}`)
-    linkedCases.value = await api.get(`/requirements/${current.value.id}/cases`)
+    const results = await api.get(`/cases?project_id=${props.project.id}&keyword=${encodeURIComponent(query)}`)
+    if (token === caseSearchToken) caseOptions.value = results
+  } catch (error) {
+    if (token === caseSearchToken) ElMessage.error(`用例搜索失败：${error.message}`)
+  } finally { if (token === caseSearchToken) caseSearchLoading.value = false }
+}
+
+async function unlinkCase(linkId) {
+  const requirementId = current.value.id
+  const token = drawerRequestToken
+  try {
+    await api.delete(`/requirements/${requirementId}/cases/${linkId}`)
+    if (token === drawerRequestToken && current.value?.id === requirementId) await loadLinkedCases(requirementId, token)
   } catch (error) { ElMessage.error(error.message) }
 }
 
 async function addComment() {
   if (!commentText.value.trim()) return
+  const requirementId = current.value.id
+  const token = drawerRequestToken
+  const content = commentText.value
   try {
-    await api.post(`/requirement/${current.value.id}/comments`, { content: commentText.value })
-    commentText.value = ''
-    comments.value = await api.get(`/requirement/${current.value.id}/comments`)
+    await api.post(`/requirement/${requirementId}/comments`, { content })
+    if (token === drawerRequestToken && current.value?.id === requirementId) {
+      if (commentText.value === content) commentText.value = ''
+      await loadComments(requirementId, token)
+    }
   } catch (error) { ElMessage.error(error.message) }
 }
 
@@ -382,4 +554,5 @@ onMounted(() => { loadIterations(); loadMembers(); fetchList() })
 .comment-item { padding: 8px 0; border-bottom: 1px solid rgba(148,163,184,0.15); font-size: 13px; }
 .comment-time { color: #94a3b8; font-size: 12px; margin-left: 8px; }
 .table-pagination { margin-top: 12px; display: flex; justify-content: flex-end; }
+.board-scope { margin-bottom: 10px; color: var(--el-text-color-secondary); font-size: 13px; }
 </style>

@@ -41,7 +41,8 @@
     </el-card>
 
     <el-card v-else class="page-card" shadow="never">
-      <KanbanBoard :columns="columns" :items="items" :draggable="canEdit" @open="openDrawer" @move="handleMove">
+      <div class="board-scope">当前页已加载 {{ items.length }} 条缺陷，共 {{ total }} 条（仅允许按状态机合法流转的列高亮投递）</div>
+      <KanbanBoard :columns="columns" :items="items" :draggable="canEdit" :transitions="defectTransitions" @open="openDrawer" @move="handleMove">
         <template #card="{ card }">
           <div class="kc-title">{{ card.title }}</div>
           <div class="kc-meta">
@@ -50,6 +51,9 @@
           </div>
         </template>
       </KanbanBoard>
+      <div class="table-pagination">
+        <el-pagination layout="total, prev, pager, next" :total="total" :page-size="pageSize" v-model:current-page="page" @current-change="fetchList" />
+      </div>
     </el-card>
 
     <el-dialog v-model="createVisible" title="新建缺陷" width="640px">
@@ -108,7 +112,7 @@
       </el-form>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitCreate">创建</el-button>
+        <el-button type="primary" :loading="createPending" :disabled="createPending" @click="submitCreate">创建</el-button>
       </template>
     </el-dialog>
 
@@ -117,6 +121,11 @@
         <div v-if="canEdit" class="ds-actions">
           <template v-if="!editing">
             <el-button size="small" type="primary" plain :icon="Edit" @click="startEdit">编辑缺陷</el-button>
+            <el-popconfirm title="确认删除该缺陷？" @confirm="removeDefect">
+              <template #reference>
+                <el-button size="small" type="danger" plain>删除缺陷</el-button>
+              </template>
+            </el-popconfirm>
           </template>
           <template v-else>
             <el-button size="small" @click="cancelEdit">取消</el-button>
@@ -126,7 +135,13 @@
         <div class="ds-row">
           <span class="ds-label">状态流转</span>
           <el-select v-model="nextStatus" :disabled="!canEdit || editing" size="small" style="width: 160px" placeholder="选择目标状态" @change="changeStatus">
-            <el-option v-for="s in allStatuses" :key="s" :label="statusLabels[s]" :value="s" />
+            <el-option
+              v-for="s in allStatuses"
+              :key="s"
+              :label="statusLabels[s]"
+              :value="s"
+              :disabled="s !== current.status && !(defectTransitions[current.status] || []).includes(s)"
+            />
           </el-select>
         </div>
         <div class="ds-row"><span class="ds-label">当前状态</span><el-tag :type="statusType[current.status]">{{ statusLabels[current.status] }}</el-tag></div>
@@ -224,6 +239,9 @@
           <span v-else class="ds-empty">-</span>
         </div>
         <el-divider content-position="left">关联执行 / 用例</el-divider>
+        <el-alert v-if="linksError" :title="linksError" type="error" :closable="false" show-icon>
+          <template #default><el-button link type="primary" @click="loadLinks(current.id)">重试</el-button></template>
+        </el-alert>
         <div v-if="links.runs?.length" class="link-block">
           <div class="link-head">触发执行</div>
           <div v-for="r in links.runs" :key="r.link_id" class="link-item">#{{ r.test_run_id }} {{ r.case_name }} · {{ r.status }}</div>
@@ -245,6 +263,7 @@ import { ElMessage } from 'element-plus'
 import KanbanBoard from './components/KanbanBoard.vue'
 import RichTextEditor from './components/RichTextEditor.vue'
 import { Edit } from '@element-plus/icons-vue'
+import { useSubmitGuard } from '@/composables/useSubmitGuard'
 import {
   DEFECT_COLUMNS, DEFECT_STATUS_LABELS, STATUS_TAG_TYPE, PRIORITY_OPTIONS, PRIORITY_TAG_TYPE,
   SEVERITY_OPTIONS, SEVERITY_LABELS, SEVERITY_TAG_TYPE,
@@ -267,6 +286,28 @@ const reproducibilityOptions = REPRODUCIBILITY_OPTIONS
 const reproducibilityLabels = REPRODUCIBILITY_LABELS
 const allStatuses = Object.keys(DEFECT_STATUS_LABELS)
 const canEdit = computed(() => ['owner', 'manager', 'member'].includes(props.myRole))
+const defectTransitions = {
+  NEW: ['CONFIRMED', 'WONTFIX'],
+  CONFIRMED: ['IN_PROGRESS', 'WONTFIX'],
+  IN_PROGRESS: ['RESOLVED'],
+  RESOLVED: ['VERIFYING', 'REOPENED'],
+  VERIFYING: ['CLOSED', 'REOPENED'],
+  CLOSED: ['REOPENED'],
+  REOPENED: ['CONFIRMED', 'IN_PROGRESS'],
+  WONTFIX: ['REOPENED']
+}
+
+async function removeDefect() {
+  if (!current.value) return
+  try {
+    await api.delete(`/project-defects/${current.value.id}`)
+    drawerVisible.value = false
+    ElMessage.success('缺陷已删除')
+    fetchList()
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+}
 
 const members = ref([])
 const memberMap = computed(() => {
@@ -297,6 +338,7 @@ const filters = reactive({ keyword: '', severity: '' })
 
 const createVisible = ref(false)
 const createFormRef = ref(null)
+const { pending: createPending, run: runCreate } = useSubmitGuard()
 const form = reactive({ ...DEFECT_FORM_DEFAULT })
 const rules = { title: [{ required: true, message: '标题必填', trigger: 'blur' }] }
 
@@ -304,6 +346,8 @@ const drawerVisible = ref(false)
 const current = ref(null)
 const nextStatus = ref('')
 const links = ref({ runs: [], cases: [] })
+const linksError = ref('')
+let drawerRequestToken = 0
 const editing = ref(false)
 const saving = ref(false)
 const editForm = reactive({
@@ -338,21 +382,36 @@ function openCreate() {
 function submitCreate() {
   createFormRef.value?.validate(async (valid) => {
     if (!valid) return
-    try {
-      await api.post(`/projects/${props.project.id}/defects`, { ...form })
-      createVisible.value = false
-      ElMessage.success('创建成功')
-      fetchList()
-    } catch (error) { ElMessage.error(error.message) }
+    await runCreate(async () => {
+      try {
+        await api.post(`/projects/${props.project.id}/defects`, { ...form })
+        createVisible.value = false
+        ElMessage.success('创建成功')
+        fetchList()
+      } catch (error) { ElMessage.error(error.message) }
+    })
   })
 }
 
 async function openDrawer(row) {
+  const token = ++drawerRequestToken
   current.value = { ...row }
   nextStatus.value = ''
   editing.value = false
+  links.value = { runs: [], cases: [] }
+  linksError.value = ''
   drawerVisible.value = true
-  try { links.value = await api.get(`/project-defects/${row.id}/links`) } catch { links.value = { runs: [], cases: [] } }
+  await loadLinks(row.id, token)
+}
+
+async function loadLinks(defectId, token = drawerRequestToken) {
+  linksError.value = ''
+  try {
+    const result = await api.get(`/project-defects/${defectId}/links`)
+    if (token === drawerRequestToken && current.value?.id === defectId) links.value = result
+  } catch (error) {
+    if (token === drawerRequestToken) linksError.value = `关联数据加载失败：${error.message}`
+  }
 }
 
 function startEdit() {
@@ -379,6 +438,7 @@ function startEdit() {
 function cancelEdit() { editing.value = false }
 
 async function saveEdit() {
+  if (saving.value) return
   if (!editForm.title?.trim()) { ElMessage.warning('标题不能为空'); return }
   saving.value = true
   try {
@@ -432,4 +492,5 @@ onMounted(() => { loadMembers(); fetchList() })
 .link-head { font-size: 12px; color: #64748b; margin-bottom: 4px; }
 .link-item { font-size: 13px; padding: 4px 0; }
 .table-pagination { margin-top: 12px; display: flex; justify-content: flex-end; }
+.board-scope { margin-bottom: 10px; color: var(--el-text-color-secondary); font-size: 13px; }
 </style>

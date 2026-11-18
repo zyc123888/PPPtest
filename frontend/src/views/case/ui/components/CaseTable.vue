@@ -1,7 +1,10 @@
 <template>
   <div class="case-table-wrap">
     <div v-if="selection.length" class="batch-bar">
-      <span class="batch-bar__count">已选 {{ selection.length }} 条</span>
+      <span class="batch-bar__count">
+        已选 {{ visibleSelectionCount }} 条当前页
+        <span v-if="hiddenSelectionCount">· {{ hiddenSelectionCount }} 条来自其他页或筛选范围</span>
+      </span>
       <el-button v-if="canTest" type="primary" size="small" :icon="VideoPlay" @click="$emit('batch-run')">批量执行</el-button>
       <el-button v-if="canTest" size="small" :icon="EditPen" @click="$emit('batch-edit')">批量修改</el-button>
       <el-button v-if="canAdmin" type="danger" plain size="small" :icon="Delete" @click="$emit('batch-delete')">批量删除</el-button>
@@ -18,9 +21,7 @@
       @selection-change="handleSelectionChange"
     >
       <el-table-column type="selection" width="42" :reserve-selection="true" />
-      <el-table-column label="序号" width="60" align="center">
-        <template #default="scope">{{ caseSequence(scope.$index) }}</template>
-      </el-table-column>
+      <el-table-column label="编号" prop="id" width="75" align="center" />
       <el-table-column label="用例" min-width="235">
         <template #default="scope">
           <button class="case-name" type="button" @click="$emit('detail', scope.row)">{{ scope.row.name }}</button>
@@ -55,6 +56,11 @@
             <el-tag size="small" :type="executionStatusTag(latestRunMap[scope.row.id].status)">{{ executionStatusText(latestRunMap[scope.row.id].status) }}</el-tag>
             <span>{{ formatShortTime(latestRunMap[scope.row.id].created_at) }}</span>
           </div>
+          <span v-else-if="latestRunState === 'error'" class="last-run-error">
+            <span class="muted is-error">状态未知</span>
+            <el-button link type="primary" size="small" @click="$emit('retry-latest-runs')">重试</el-button>
+          </span>
+          <span v-else-if="latestRunState === 'loading'" class="muted">加载中...</span>
           <span v-else class="muted">未执行</span>
         </template>
       </el-table-column>
@@ -71,9 +77,9 @@
     </el-table>
 
     <div class="mobile-cards">
-      <article v-for="(item, index) in rows" :key="item.id" class="mobile-case">
+      <article v-for="item in rows" :key="item.id" class="mobile-case">
         <div class="mobile-case__title">
-          <span class="case-sequence">#{{ caseSequence(index) }}</span>
+          <span class="case-sequence">#{{ item.id }}</span>
           <button class="case-name" type="button" @click="$emit('detail', item)">{{ item.name }}</button>
         </div>
         <div class="mobile-case__tags">
@@ -105,9 +111,10 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { Delete, Edit, EditPen, VideoPlay, View } from '@element-plus/icons-vue'
 import { executionStatusTag, executionStatusText } from '@/lib/execution'
+import { formatShortTime } from '@/lib/formatTime'
 
 const props = defineProps({
   rows: { type: Array, default: () => [] },
@@ -117,13 +124,19 @@ const props = defineProps({
   pageSize: { type: Number, default: 20 },
   projectMap: { type: Object, default: () => ({}) },
   latestRunMap: { type: Object, default: () => ({}) },
+  latestRunState: { type: String, default: 'idle' },
   canTest: { type: Boolean, default: false },
   canAdmin: { type: Boolean, default: false }
 })
-const emit = defineEmits(['update:page', 'update:pageSize', 'selection-change', 'detail', 'edit', 'run', 'delete', 'batch-run', 'batch-edit', 'batch-delete'])
+const emit = defineEmits(['update:page', 'update:pageSize', 'selection-change', 'detail', 'edit', 'run', 'delete', 'batch-run', 'batch-edit', 'batch-delete', 'retry-latest-runs'])
 
 const tableRef = ref(null)
 const selection = ref([])
+const visibleSelectionCount = computed(() => {
+  const visibleIds = new Set(props.rows.map((row) => String(row.id)))
+  return selection.value.filter((row) => visibleIds.has(String(row.id))).length
+})
+const hiddenSelectionCount = computed(() => Math.max(0, selection.value.length - visibleSelectionCount.value))
 
 const handleSelectionChange = (rows) => {
   selection.value = rows
@@ -132,12 +145,10 @@ const handleSelectionChange = (rows) => {
 const clearSelection = () => tableRef.value?.clearSelection()
 defineExpose({ clearSelection })
 
-const caseSequence = (pageIndex) => props.total - ((props.page - 1) * props.pageSize + pageIndex)
 const priorityTag = (priority) => ({ P0: 'danger', P1: 'warning', P2: '', P3: 'info' }[priority] || 'info')
 const caseStatusText = (status) => ({ ACTIVE: '启用', INACTIVE: '停用' }[status] || status)
 const reviewText = (status) => ({ DRAFT: '草稿', IN_REVIEW: '评审中', APPROVED: '已通过', REJECTED: '已拒绝' }[status] || status)
 const reviewTag = (status) => ({ APPROVED: 'success', IN_REVIEW: 'warning', REJECTED: 'danger', DRAFT: 'info' }[status] || 'info')
-const formatShortTime = (value) => (value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-')
 const reviewTooltip = (row) => `评审人：用户 #${row.reviewed_by} · ${row.reviewed_at ? new Date(row.reviewed_at).toLocaleString('zh-CN') : '-'}`
 </script>
 
@@ -150,7 +161,9 @@ const reviewTooltip = (row) => `评审人：用户 #${row.reviewed_by} · ${row.
 .case-name:hover { text-decoration: underline; }
 .case-meta { margin-top: 5px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--color-text-secondary); font-size: 11px; line-height: 1.4; }
 .last-run { display: flex; align-items: center; gap: 8px; color: var(--color-text-secondary); font-size: 12px; }
+.last-run-error { display: inline-flex; align-items: center; gap: 4px; }
 .muted { color: var(--color-text-secondary); }
+.muted.is-error { color: var(--el-color-danger); }
 .row-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .mobile-cards { display: none; }
 .table-pagination { display: flex; justify-content: flex-end; padding: 12px 16px; }

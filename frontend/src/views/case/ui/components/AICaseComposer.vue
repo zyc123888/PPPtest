@@ -15,7 +15,7 @@
           <strong>AI 创建 UI 用例</strong>
           <span>{{ draftReady ? '检查生成步骤，确认后保存或直接试运行' : '描述测试目标，AI 将生成可执行步骤和断言' }}</span>
         </div>
-        <el-tag effect="plain" type="success">ui-case-designer · v2.0.1</el-tag>
+        <el-tag v-if="draft?.skill_name && draft?.skill_version" effect="plain" type="success">{{ draft.skill_name }} · v{{ draft.skill_version }}</el-tag>
       </div>
     </template>
 
@@ -108,7 +108,24 @@
 
       <div v-if="warnings.length" class="draft-notice">
         <el-icon><WarningFilled /></el-icon>
-        <div><strong>{{ warnings.length }} 项需要留意</strong><span>{{ warnings[0] }}</span></div>
+        <div>
+          <strong>共 {{ warnings.length }} 项需要留意</strong>
+          <template v-if="warningsExpanded">
+            <span v-for="(warning, index) in warnings" :key="index">{{ index + 1 }}. {{ warning }}</span>
+          </template>
+          <span v-else>{{ warnings[0] }}</span>
+          <button v-if="warnings.length > 1" type="button" class="draft-notice__toggle" @click="warningsExpanded = !warningsExpanded">
+            {{ warningsExpanded ? '收起' : `展开全部 ${warnings.length} 项` }}
+          </button>
+        </div>
+      </div>
+      <div v-if="savedCaseId" class="draft-save-state" :class="{ 'has-error': runError }">
+        <el-icon><CircleCheck /></el-icon>
+        <div>
+          <strong>用例已创建（#{{ savedCaseId }}）</strong>
+          <span v-if="runError">试运行未提交：{{ runError }}</span>
+          <span v-else>后续重试不会重复创建用例</span>
+        </div>
       </div>
 
       <section class="draft-section">
@@ -129,10 +146,11 @@
       <section class="draft-section draft-section--assertions">
         <div class="draft-section__head"><h4>通过条件</h4><span>{{ (draft.assertions?.length || 0) + 1 }} 项</span></div>
         <div class="assertion-list">
-          <div class="assertion-item"><el-icon><CircleCheck /></el-icon><span>页面显示“{{ draft.expect_text }}”</span></div>
+          <div class="assertion-item"><el-icon><InfoFilled /></el-icon><span>页面显示“{{ draft.expect_text }}”</span><em class="assertion-item__state">待验证</em></div>
           <div v-for="(assertion, index) in draft.assertions || []" :key="assertion._key || index" class="assertion-item">
-            <el-icon><CircleCheck /></el-icon>
+            <el-icon><InfoFilled /></el-icon>
             <span>{{ assertion.name || assertionText(assertion) }}</span>
+            <em class="assertion-item__state">待验证</em>
           </div>
         </div>
       </section>
@@ -146,11 +164,12 @@
           <el-button type="primary" :icon="MagicStick" :loading="generating" @click="requestGenerate">生成测试步骤</el-button>
         </template>
         <template v-else>
-          <el-button :icon="ArrowLeft" @click="emit('reset')">返回修改</el-button>
+          <el-button :icon="ArrowLeft" :disabled="Boolean(savedCaseId) || saving || running" @click="emit('reset')">返回修改</el-button>
           <span class="composer-footer__spacer" />
-          <el-button :icon="EditPen" :disabled="saving || running" @click="emit('advanced-edit')">高级编辑</el-button>
-          <el-button :loading="saving" :disabled="running" @click="emit('save')">仅保存</el-button>
-          <el-button type="primary" :icon="VideoPlay" :loading="running" :disabled="saving" @click="emit('save-run')">保存并试运行</el-button>
+          <el-button v-if="savedCaseId" :disabled="saving || running" @click="emit('view-saved')">查看已保存用例</el-button>
+          <el-button v-else :icon="EditPen" :disabled="saving || running" @click="emit('advanced-edit')">高级编辑</el-button>
+          <el-button :loading="saving" :disabled="running" @click="emit('save')">{{ savedCaseId ? '关闭' : '仅保存' }}</el-button>
+          <el-button type="primary" :icon="VideoPlay" :loading="running" :disabled="saving" @click="emit('save-run')">{{ savedCaseId ? '重试运行' : '保存并试运行' }}</el-button>
         </template>
       </div>
     </template>
@@ -160,7 +179,7 @@
 <script setup>
 import { nextTick, reactive, ref, watch } from 'vue'
 import {
-  ArrowDown, ArrowLeft, CircleCheck, DocumentCopy, EditPen, Link, List, MagicStick,
+  ArrowDown, ArrowLeft, CircleCheck, DocumentCopy, EditPen, InfoFilled, Link, List, MagicStick,
   Mouse, Position, Promotion, Search, Setting, VideoPlay, WarningFilled
 } from '@element-plus/icons-vue'
 
@@ -171,17 +190,25 @@ const props = defineProps({
   draftReady: { type: Boolean, default: false },
   draft: { type: Object, default: null },
   warnings: { type: Array, default: () => [] },
+  savedCaseId: { type: Number, default: null },
+  runError: { type: String, default: '' },
   generating: { type: Boolean, default: false },
   saving: { type: Boolean, default: false },
   running: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['update:modelValue', 'update:form', 'project-change', 'generate', 'reset', 'advanced-edit', 'save', 'save-run'])
+const emit = defineEmits(['update:modelValue', 'update:form', 'project-change', 'generate', 'reset', 'advanced-edit', 'view-saved', 'save', 'save-run'])
 const formRef = ref(null)
 const advancedPanelRef = ref(null)
 const advancedVisible = ref(false)
 const localForm = reactive({})
+const warningsExpanded = ref(false)
 let syncingFromParent = false
+
+watch(
+  () => props.warnings,
+  () => { warningsExpanded.value = false }
+)
 
 watch(
   () => props.form,
@@ -303,6 +330,13 @@ const requestGenerate = async () => {
 .draft-notice div { display: flex; flex-direction: column; gap: 3px; }
 .draft-notice strong { font-size: 12px; }
 .draft-notice span { color: #9a3412; font-size: 11px; }
+.draft-notice__toggle { align-self: flex-start; border: 0; padding: 0; background: transparent; color: #c2410c; font-size: 11px; font-weight: 600; cursor: pointer; }
+.draft-notice__toggle:hover { text-decoration: underline; }
+.draft-save-state { display: flex; align-items: flex-start; gap: 10px; margin-top: 12px; border: 1px solid #bbebd4; padding: 11px 12px; background: #effaf5; color: #15805d; }
+.draft-save-state.has-error { border-color: #fecaca; background: #fff5f5; color: #c24141; }
+.draft-save-state div { display: flex; flex-direction: column; gap: 3px; }
+.draft-save-state strong { font-size: 12px; }
+.draft-save-state span { font-size: 11px; }
 .draft-section { margin-top: 20px; }
 .draft-section__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .draft-section__head h4 { margin: 0; color: #172033; font-size: 13px; }
@@ -319,7 +353,8 @@ const requestGenerate = async () => {
 .assertion-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid #bbebd4; background: #f2fbf7; }
 .assertion-item { min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #d9f3e6; color: #166534; font-size: 12px; }
 .assertion-item:nth-child(odd) { border-right: 1px solid #d9f3e6; }
-.assertion-item .el-icon { flex: 0 0 auto; color: #16a34a; }
+.assertion-item .el-icon { flex: 0 0 auto; color: #64748b; }
+.assertion-item__state { margin-left: auto; flex: 0 0 auto; font-style: normal; font-size: 10px; line-height: 1; padding: 3px 6px; border: 1px solid #cbd5e1; border-radius: 999px; color: #64748b; background: #f8fafc; }
 .composer-footer { width: 100%; display: flex; align-items: center; gap: 10px; }
 .composer-footer__note { margin-right: auto; color: #98a2b3; font-size: 11px; }
 .composer-footer__spacer { flex: 1; }

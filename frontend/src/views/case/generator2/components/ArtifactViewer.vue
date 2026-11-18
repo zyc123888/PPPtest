@@ -28,6 +28,15 @@
       </el-radio-group>
       <el-button v-if="activeArtifact" size="small" @click="emit('download', activeArtifact)">下载</el-button>
     </div>
+    <el-alert
+      v-if="activeArtifact?.parent_attempt_id"
+      :title="`来自尝试 #${activeArtifact.parent_attempt_id} · 本次未验证`"
+      description="这是为恢复流程继承的数据产物；本次门禁仍需重新通过。"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="artifact-provenance-alert"
+    />
     <pre v-if="activeArtifact" v-loading="loading" class="artifact-preview">{{ formatArtifactContent(activeArtifact) }}</pre>
   </div>
 </template>
@@ -79,6 +88,10 @@ const formatArtifactContent = formatCaseGenerationV2ArtifactContent
 
 .export-log-alert {
   margin-top: 12px;
+}
+
+.artifact-provenance-alert {
+  margin-bottom: 10px;
 }
 
 .artifact-toolbar {

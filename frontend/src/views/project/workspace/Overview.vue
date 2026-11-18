@@ -70,6 +70,7 @@ import { h, onMounted, ref } from 'vue'
 import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import { REQUIREMENT_STATUS_LABELS, TASK_STATUS_LABELS, DEFECT_STATUS_LABELS } from './constants'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
 
 const props = defineProps({ project: { type: Object, required: true } })
 
@@ -84,7 +85,6 @@ const ENTITIES = { requirement: '需求', task: '任务', defect: '缺陷', iter
 
 function actionLabel(a) { return ACTIONS[a] || a }
 function entityLabel(e) { return ENTITIES[e] || e }
-function formatTime(t) { return t ? String(t).replace('T', ' ').slice(0, 19) : '' }
 
 // StatusBars: simple inline functional component (CSS bar chart, no chart lib)
 const StatusBars = {

@@ -190,6 +190,7 @@ import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import { useAuthStore } from '@/stores/auth'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
 
 const list = ref([])
 const listLoading = ref(false)
@@ -261,11 +262,6 @@ const dialogTitle = computed(() => (isEdit.value ? '编辑用户' : '新增用�
 const passwordLabel = computed(() => (isEdit.value ? '重置密码（可选）' : '密码'))
 const adminCount = computed(() => list.value.filter((item) => item.role === 'admin').length)
 const workspaceBoundCount = computed(() => list.value.filter((item) => getWorkspaceMemberships(item).length > 0).length)
-
-const formatTime = (val) => {
-  if (!val) return '-'
-  return new Date(val).toLocaleString()
-}
 
 const getWorkspaceMemberships = (user) => {
   if (Array.isArray(user?.workspace_memberships) && user.workspace_memberships.length > 0) {

@@ -390,8 +390,10 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { formatShortTime } from '@/lib/formatTime'
 import {
   CircleCheck, Delete, DocumentCopy, Download, Edit, EditPen, Files, Finished,
   Plus, Refresh, Search, Tickets, TrendCharts, Upload, VideoPlay, View, WarningFilled
@@ -485,7 +487,6 @@ const caseStatusText = (status) => ({ ACTIVE: '启用', DISABLED: '停用' }[sta
 const reviewText = (status) => ({ DRAFT: '草稿', IN_REVIEW: '评审中', APPROVED: '已通过', REJECTED: '已拒绝' }[status] || status)
 const reviewTag = (status) => ({ APPROVED: 'success', IN_REVIEW: 'warning', REJECTED: 'danger', DRAFT: 'info' }[status] || 'info')
 const reviewTooltip = (row) => `评审人：用户 #${row.reviewed_by} · ${row.reviewed_at ? new Date(row.reviewed_at).toLocaleString('zh-CN') : '-'}`
-const formatShortTime = (value) => (value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-')
 const formatDuration = (value) => (value === null || value === undefined ? '-' : value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(1)}s`)
 const formatJson = (value) => { try { return JSON.stringify(value, null, 2) } catch { return String(value) } }
 const thresholdSummary = (item) => [
@@ -809,9 +810,14 @@ watch(selectedFolder, () => { page.value = 1; getList() })
 watch(page, () => getList())
 watch(pageSize, () => { page.value = 1; getList() })
 
+const route = useRoute()
+
 onMounted(async () => {
+  if (route.query.project_id) filters.projectId = Number(route.query.project_id) || undefined
+  if (route.query.keyword) filters.keyword = String(route.query.keyword)
   await loadProjects()
   await refreshAll()
+  if (route.query.action === 'create' && canTest.value) handleCreate()
 })
 onUnmounted(() => { stopPolling() })
 </script>

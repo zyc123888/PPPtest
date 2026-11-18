@@ -20,7 +20,7 @@
     "pinia": "^3.0.4",
     "sass": "^1.98.0",
     "vue": "^3.5.18",
-    "vue-router": "^5.0.3"
+    "vue-router": "^4.5.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",

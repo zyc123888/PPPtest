@@ -51,6 +51,7 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { api } from '@/lib/api'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
 
 const props = defineProps({
   caseData: { type: Object, required: true },
@@ -75,7 +76,6 @@ const canDecide = computed(() => props.canTest && props.caseData.review_status =
 
 const reviewText = (status) => ({ DRAFT: '草稿', IN_REVIEW: '评审中', APPROVED: '已通过', REJECTED: '已拒绝' }[status] || status || '-')
 const reviewTag = (status) => ({ APPROVED: 'success', IN_REVIEW: 'warning', REJECTED: 'danger', DRAFT: 'info' }[status] || 'info')
-const formatTime = (value) => (value ? new Date(value).toLocaleString('zh-CN') : '-')
 
 const loadHistory = async () => {
   historyLoading.value = true

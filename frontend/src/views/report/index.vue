@@ -364,10 +364,32 @@
 
       <div class="defect-panel section-gap">
         <div class="defect-panel__header">
-          <span class="failure-reason-summary__label">关联缺陷</span>
+          <span class="failure-reason-summary__label">项目缺陷</span>
           <el-button size="small" type="primary" @click="openDefectDialog">提缺陷</el-button>
         </div>
-        <el-empty v-if="!report.defects?.length" description="当前报告暂无关联缺陷" />
+        <el-empty v-if="!report.internal_defects?.length" description="当前报告暂无关联的项目缺陷" />
+        <el-table v-else :data="report.internal_defects" border>
+          <el-table-column label="标题" prop="title" min-width="180" show-overflow-tooltip />
+          <el-table-column label="状态" width="110" align="center">
+            <template #default="scope">
+              <el-tag size="small">{{ defectStatusLabels[scope.row.status] || scope.row.status }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="严重度" width="110" align="center">
+            <template #default="scope">{{ severityLabels[scope.row.severity] || scope.row.severity }}</template>
+          </el-table-column>
+          <el-table-column label="优先级" prop="priority" width="100" align="center" />
+          <el-table-column label="创建时间" width="180" align="center">
+            <template #default="scope">{{ formatTime(scope.row.created_at) }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <div class="defect-panel section-gap">
+        <div class="defect-panel__header">
+          <span class="failure-reason-summary__label">外部缺陷登记</span>
+        </div>
+        <el-empty v-if="!report.defects?.length" description="暂无外部缺陷登记" />
         <el-table v-else :data="report.defects" border>
           <el-table-column label="标题" prop="title" min-width="180" show-overflow-tooltip />
           <el-table-column label="平台" prop="platform" width="110" align="center" />
@@ -547,46 +569,85 @@
 
     <el-dialog v-model="defectDialogVisible" title="提缺陷" width="560px">
       <el-form label-position="top" :model="defectForm">
+        <el-form-item label="缺陷类型">
+          <el-radio-group v-model="defectForm.mode">
+            <el-radio value="internal">创建项目缺陷</el-radio>
+            <el-radio value="external">登记外部缺陷</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item :label="defectForm.mode === 'internal' ? '关联失败执行（必选）' : '关联失败执行（可选）'">
+          <el-select v-model="defectForm.run_id" :clearable="defectForm.mode === 'external'" :placeholder="defectForm.mode === 'internal' ? '选择失败执行' : '选择失败执行（可选）'" style="width: 100%">
+            <el-option v-for="run in report.test_runs.filter((item) => ['FAILED', 'ERROR', 'TIMEOUT'].includes(item.status))" :key="run.id" :label="`#${run.id} · ${run.case_name}`" :value="run.id" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="标题">
           <el-input v-model="defectForm.title" placeholder="例如：首页登录按钮点击失败" />
         </el-form-item>
-        <el-row :gutter="12">
-          <el-col :span="8">
-            <el-form-item label="平台">
-              <el-select v-model="defectForm.platform" style="width: 100%">
-                <el-option label="JIRA" value="JIRA" />
-                <el-option label="禅道" value="ZENTAO" />
-                <el-option label="飞书" value="LARK" />
-                <el-option label="通用" value="GENERIC" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="外部单号">
-              <el-input v-model="defectForm.external_key" placeholder="QA-123" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="严重级别">
-              <el-select v-model="defectForm.severity" style="width: 100%">
-                <el-option label="P0" value="P0" />
-                <el-option label="P1" value="P1" />
-                <el-option label="P2" value="P2" />
-                <el-option label="P3" value="P3" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-form-item label="外部链接">
-          <el-input v-model="defectForm.external_url" placeholder="https://jira.example.com/browse/QA-123" />
-        </el-form-item>
-        <el-form-item label="摘要">
-          <el-input v-model="defectForm.summary" type="textarea" :rows="4" />
-        </el-form-item>
+        <template v-if="defectForm.mode === 'internal'">
+          <el-row :gutter="12">
+            <el-col :span="12">
+              <el-form-item label="严重度">
+                <el-select v-model="defectForm.defectSeverity" style="width: 100%">
+                  <el-option v-for="s in severityOptions" :key="s" :label="severityLabels[s]" :value="s" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="优先级">
+                <el-select v-model="defectForm.priority" style="width: 100%">
+                  <el-option label="P0" value="P0" />
+                  <el-option label="P1" value="P1" />
+                  <el-option label="P2" value="P2" />
+                  <el-option label="P3" value="P3" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-form-item label="描述">
+            <el-input v-model="defectForm.summary" type="textarea" :rows="4" placeholder="补充复现说明（可选，默认使用执行摘要）" />
+          </el-form-item>
+        </template>
+        <template v-else>
+          <el-row :gutter="12">
+            <el-col :span="8">
+              <el-form-item label="平台">
+                <el-select v-model="defectForm.platform" style="width: 100%">
+                  <el-option label="JIRA" value="JIRA" />
+                  <el-option label="禅道" value="ZENTAO" />
+                  <el-option label="飞书" value="LARK" />
+                  <el-option label="通用" value="GENERIC" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="外部单号">
+                <el-input v-model="defectForm.external_key" placeholder="QA-123" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="严重级别">
+                <el-select v-model="defectForm.severity" style="width: 100%">
+                  <el-option label="P0" value="P0" />
+                  <el-option label="P1" value="P1" />
+                  <el-option label="P2" value="P2" />
+                  <el-option label="P3" value="P3" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-form-item label="外部链接">
+            <el-input v-model="defectForm.external_url" placeholder="https://jira.example.com/browse/QA-123" />
+          </el-form-item>
+          <el-form-item label="摘要">
+            <el-input v-model="defectForm.summary" type="textarea" :rows="4" />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="defectDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitDefect">确认</el-button>
+        <el-button type="primary" :loading="defectSubmitting" @click="submitDefect">
+          {{ defectForm.mode === 'internal' ? '创建缺陷' : '确认登记' }}
+        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -599,6 +660,12 @@ import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import TrendChart from '@/components/TrendChart.vue'
+import { formatDateTime as formatTime } from '@/lib/formatTime'
+import {
+  DEFECT_STATUS_LABELS,
+  SEVERITY_LABELS,
+  SEVERITY_OPTIONS
+} from '@/views/project/workspace/constants'
 import {
   EXECUTION_ERROR_TYPE_OPTIONS,
   executionErrorTypeTag,
@@ -606,6 +673,10 @@ import {
   executionStatusTag,
   executionStatusText
 } from '@/lib/execution'
+
+const defectStatusLabels = DEFECT_STATUS_LABELS
+const severityLabels = SEVERITY_LABELS
+const severityOptions = SEVERITY_OPTIONS
 
 const router = useRouter()
 const list = ref([])
@@ -644,16 +715,22 @@ const report = reactive({
   plan_run: {},
   test_runs: [],
   recent_history: [],
-  defects: []
+  defects: [],
+  internal_defects: []
 })
 const defectForm = reactive({
+  mode: 'internal',
+  run_id: null,
   title: '',
   platform: 'GENERIC',
   external_key: '',
   external_url: '',
   severity: 'P2',
+  defectSeverity: 'MAJOR',
+  priority: 'P2',
   summary: ''
 })
+const defectSubmitting = ref(false)
 
 const statusText = executionStatusText
 const statusType = executionStatusTag
@@ -770,11 +847,6 @@ const failureReasonSummary = computed(() =>
 )
 const failureDialogReasonSummary = computed(() => summarizeErrorTypes(failureRuns.value))
 
-const formatTime = (val) => {
-  if (!val) return '-'
-  return new Date(val).toLocaleString()
-}
-
 const formatDuration = (ms) => {
   const value = Number(ms)
   if (!value || Number.isNaN(value)) return '-'
@@ -854,6 +926,7 @@ const openDetail = async (row) => {
     report.test_runs = data.test_runs
     report.recent_history = data.recent_history || []
     report.defects = data.defects || []
+    report.internal_defects = data.internal_defects || []
     shareUrl.value = data.plan_run?.share_token ? buildShareUrl(`/shared-report/${data.plan_run.share_token}`) : ''
     detailVisible.value = true
   } catch (error) {
@@ -900,36 +973,62 @@ const copyShareUrl = async () => {
 }
 
 const openDefectDialog = () => {
-  const firstFailure = report.test_runs.find((item) => item.status !== 'SUCCESS')
+  const firstFailure = report.test_runs.find((item) => ['FAILED', 'ERROR', 'TIMEOUT'].includes(item.status))
+  defectForm.mode = 'internal'
+  defectForm.run_id = firstFailure?.id || null
   defectForm.title = firstFailure ? `${report.plan_name || '测试计划'} - ${firstFailure.case_name}` : `${report.plan_name || '测试计划'} 缺陷`
   defectForm.platform = 'GENERIC'
   defectForm.external_key = ''
   defectForm.external_url = ''
   defectForm.severity = 'P2'
+  defectForm.defectSeverity = 'MAJOR'
+  defectForm.priority = 'P2'
   defectForm.summary = firstFailure?.summary || report.plan_run.summary || ''
   defectDialogVisible.value = true
 }
 
 const submitDefect = async () => {
+  if (defectSubmitting.value) return
+  if (!defectForm.title.trim()) {
+    ElMessage.warning('请填写缺陷标题')
+    return
+  }
+  if (defectForm.mode === 'internal' && !defectForm.run_id) {
+    ElMessage.warning('创建项目缺陷需选择一条失败执行')
+    return
+  }
+  defectSubmitting.value = true
   try {
-    await api.post('/defects', {
-      project_id: report.plan_run.project_id,
-      plan_run_id: report.plan_run.id,
-      run_id: report.test_runs.find((item) => item.status !== 'SUCCESS')?.id,
-      title: defectForm.title,
-      platform: defectForm.platform,
-      external_key: defectForm.external_key || null,
-      external_url: defectForm.external_url || null,
-      status: 'OPEN',
-      severity: defectForm.severity,
-      summary: defectForm.summary || null
-    })
+    if (defectForm.mode === 'internal') {
+      await api.post(`/project-defects/from-run/${defectForm.run_id}`, {
+        title: defectForm.title.trim(),
+        severity: defectForm.defectSeverity,
+        priority: defectForm.priority,
+        description: defectForm.summary || null
+      })
+    } else {
+      await api.post('/defects', {
+        project_id: report.plan_run.project_id,
+        plan_run_id: report.plan_run.id,
+        run_id: defectForm.run_id,
+        title: defectForm.title,
+        platform: defectForm.platform,
+        external_key: defectForm.external_key || null,
+        external_url: defectForm.external_url || null,
+        status: 'OPEN',
+        severity: defectForm.severity,
+        summary: defectForm.summary || null
+      })
+    }
     defectDialogVisible.value = false
     const refreshed = await api.get(`/reports/${report.plan_run.id}`)
     report.defects = refreshed.defects || []
-    ElMessage.success('缺陷记录已创建')
+    report.internal_defects = refreshed.internal_defects || []
+    ElMessage.success(defectForm.mode === 'internal' ? '项目缺陷已创建，可在项目缺陷页跟进' : '缺陷记录已创建')
   } catch (error) {
     ElMessage.error(error.message)
+  } finally {
+    defectSubmitting.value = false
   }
 }
 
