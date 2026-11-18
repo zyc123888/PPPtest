@@ -6,8 +6,25 @@ cd "${ROOT_DIR}"
 
 CURRENT_STEP="bootstrap"
 
+# 默认保留数据卷（docker compose down），避免误删本地开发数据；
+# 显式传入 --purge 时才连同卷一起删除（down -v）。
+PURGE_VOLUMES=false
+for arg in "$@"; do
+  case "${arg}" in
+    --purge) PURGE_VOLUMES=true ;;
+    *)
+      echo "未知参数：${arg}（支持：--purge）" >&2
+      exit 2
+      ;;
+  esac
+done
+
 cleanup() {
-  compose_cmd down -v >/dev/null 2>&1 || true
+  if [[ "${PURGE_VOLUMES}" == "true" ]]; then
+    compose_cmd down -v >/dev/null 2>&1 || true
+  else
+    compose_cmd down >/dev/null 2>&1 || true
+  fi
 }
 
 dump_diagnostics() {

@@ -124,6 +124,7 @@ services:
       BACKEND_PUBLIC_URL: http://127.0.0.1:8000
       FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
       APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
+      INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD}"
       MIDSCENE_NODE_BIN: /usr/local/bin/node
       MIDSCENE_RUNNER_PATH: /app/midscene/midscene_runner.js
       CASE_GENERATION_RULES_DIR: claw_5skill_final
@@ -182,6 +183,7 @@ services:
       BACKEND_PUBLIC_URL: http://127.0.0.1:8000
       FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
       APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
+      INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD}"
       CASE_GENERATION_RULES_DIR: claw_5skill_final
       CASE_GENERATION_UNIFIED_RULES_DIR: claw_5skill_unified
       CASE_GEN_REQUIREMENT_MAX_TOKENS: "8000"
@@ -233,6 +235,7 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
       APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
+      INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD}"
     depends_on:
       mysql:
         condition: service_healthy

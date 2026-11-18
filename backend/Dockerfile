@@ -34,6 +34,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY app ./app
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 COPY claw_5skill_final ./claw_5skill_final
 COPY claw_5skill_unified ./claw_5skill_unified
 COPY ui_case_skills ./ui_case_skills
@@ -48,7 +50,7 @@ EXPOSE 8000
 
 FROM base AS runtime
 
-CMD ["sh", "-c", "umask 0002 && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "umask 0002 && python -m app.db_migrate upgrade && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
 FROM base AS execution
 
