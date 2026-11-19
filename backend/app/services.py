@@ -371,6 +371,20 @@ def seed_demo_data(db: Session) -> list[str]:
             seeded_resources.append("plan_case:演示回归计划/UI")
 
     db.commit()
+
+    from app.demo_seed import seed_rich_demo_workspace
+
+    admin_user, _ = ensure_default_admin(db)
+    seeded_resources.extend(
+        seed_rich_demo_workspace(
+            db,
+            admin_user=admin_user,
+            backend_url=backend_url,
+            frontend_url=frontend_url,
+            hash_password_fn=hash_password,
+            ensure_workspace_member_fn=ensure_workspace_member,
+        )
+    )
     return seeded_resources
 
 
@@ -599,9 +613,34 @@ def reset_login_rate_limiter() -> None:
         _LOGIN_LOCKED_UNTIL.clear()
 
 
+def _get_rate_limit_redis_client():
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return None
+    try:
+        return redis.Redis.from_url(
+            settings.redis_url,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+            decode_responses=True,
+        )
+    except Exception:
+        return None
+
+
 def check_login_rate_limit(key: str) -> None:
     if not settings.login_rate_limit_enabled:
         return
+    r = _get_rate_limit_redis_client()
+    if r is not None:
+        try:
+            ttl = r.ttl(f"login_rl:lock:{key}")
+            if ttl and ttl > 0:
+                raise LoginRateLimitError(int(ttl))
+            return
+        except LoginRateLimitError:
+            raise
+        except Exception:
+            pass
     now = __import__("time").monotonic()
     with _LOGIN_RATE_LOCK:
         locked_until = _LOGIN_LOCKED_UNTIL.get(key)
@@ -614,20 +653,41 @@ def check_login_rate_limit(key: str) -> None:
 def record_login_failure(key: str) -> None:
     if not settings.login_rate_limit_enabled:
         return
-    now = __import__("time").monotonic()
     window = max(settings.login_window_seconds, 1)
     max_attempts = max(settings.login_max_failed_attempts, 1)
+    lockout = max(settings.login_lockout_seconds, 1)
+    r = _get_rate_limit_redis_client()
+    if r is not None:
+        try:
+            fail_key = f"login_rl:fail:{key}"
+            lock_key = f"login_rl:lock:{key}"
+            count = r.incr(fail_key)
+            if count == 1:
+                r.expire(fail_key, window)
+            if count >= max_attempts:
+                r.setex(lock_key, lockout, "1")
+                r.delete(fail_key)
+            return
+        except Exception:
+            pass
+    now = __import__("time").monotonic()
     with _LOGIN_RATE_LOCK:
         timestamps = [ts for ts in _LOGIN_FAILURE_TIMESTAMPS.get(key, []) if now - ts <= window]
         timestamps.append(now)
         if len(timestamps) >= max_attempts:
-            _LOGIN_LOCKED_UNTIL[key] = now + max(settings.login_lockout_seconds, 1)
+            _LOGIN_LOCKED_UNTIL[key] = now + lockout
             _LOGIN_FAILURE_TIMESTAMPS.pop(key, None)
         else:
             _LOGIN_FAILURE_TIMESTAMPS[key] = timestamps
 
 
 def clear_login_failures(key: str) -> None:
+    r = _get_rate_limit_redis_client()
+    if r is not None:
+        try:
+            r.delete(f"login_rl:fail:{key}", f"login_rl:lock:{key}")
+        except Exception:
+            pass
     with _LOGIN_RATE_LOCK:
         _LOGIN_FAILURE_TIMESTAMPS.pop(key, None)
         _LOGIN_LOCKED_UNTIL.pop(key, None)

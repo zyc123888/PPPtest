@@ -2360,8 +2360,63 @@ def run_performance_case(run_id: int) -> dict:
         db.close()
 
 
+def _execute_single_plan_api_run(run_id: int) -> bool:
+    worker_db = _open_db()
+    case_started_at = time.perf_counter()
+    try:
+        run = worker_db.get(TestRun, run_id)
+        if run is None or run.status == "CANCELLED":
+            return False
+        project = worker_db.get(Project, run.project_id)
+        case = worker_db.get(APICase, run.case_id)
+        if project is None or case is None:
+            finalize_run(worker_db, run, status="FAILED", summary="关联项目或接口用例不存在", error_type="SYSTEM")
+            return False
+        if not mark_run_started(worker_db, run):
+            return False
+        result = _execute_case_with_retries(
+            worker_db, run, lambda deadline: _execute_api_case(worker_db, run, case, project, deadline=deadline)
+        )
+        duration_ms = int((time.perf_counter() - case_started_at) * 1000)
+        finalize_run(
+            worker_db,
+            run,
+            status=result["status"],
+            summary=result["summary"],
+            error_type=result.get("error_type"),
+            exit_code=result.get("exit_code"),
+            timeout_seconds=result.get("timeout_seconds"),
+            stdout_text=result.get("stdout_text"),
+            stderr_text=result.get("stderr_text"),
+            artifacts_json=result.get("artifacts_json"),
+            step_results_json=result.get("step_results_json"),
+            duration_ms=duration_ms,
+            request_payload=result.get("request_payload"),
+            response_payload=result.get("response_payload"),
+        )
+        return result["status"] == "SUCCESS"
+    except Exception as exc:
+        try:
+            worker_db.rollback()
+        except Exception:
+            pass
+        run = worker_db.get(TestRun, run_id)
+        if run is not None:
+            finalize_run(
+                worker_db,
+                run,
+                status="FAILED",
+                summary=f"并发执行异常: {exc}",
+                error_type="SYSTEM",
+                duration_ms=int((time.perf_counter() - case_started_at) * 1000),
+            )
+        return False
+    finally:
+        worker_db.close()
+
+
 @celery_app.task(name="app.tasks.run_test_plan")
-def run_test_plan(plan_run_id: int) -> dict:
+def run_test_plan(plan_run_id: int, concurrency: int = 1) -> dict:
     db = _open_db()
     started_at = time.perf_counter()
     try:
@@ -2369,16 +2424,31 @@ def run_test_plan(plan_run_id: int) -> dict:
         if plan_run is None:
             return {"status": "FAILED", "summary": f"测试计划执行 {plan_run_id} 不存在"}
 
+        effective_concurrency = max(1, min(int(concurrency or 1), 5))
         plan_run.status = "RUNNING"
-        plan_run.summary = "测试计划执行中"
+        plan_run.summary = f"测试计划执行中（并发度 {effective_concurrency}）" if effective_concurrency > 1 else "测试计划执行中"
         plan_run.started_at = utc_now_naive()
         db.commit()
         db.refresh(plan_run)
 
-        runs = db.query(TestRun).filter(TestRun.plan_run_id == plan_run.id).order_by(TestRun.id.asc()).all()
-        total = len(runs)
+        all_runs = db.query(TestRun).filter(TestRun.plan_run_id == plan_run.id).order_by(TestRun.id.asc()).all()
+        runs = list(all_runs)
+        total = len(all_runs)
         pass_count = 0
         fail_count = 0
+
+        if effective_concurrency > 1:
+            api_run_ids = [r.id for r in runs if r.case_type == "API"]
+            runs = [r for r in runs if r.case_type != "API"]
+            db.commit()
+            if api_run_ids:
+                with ThreadPoolExecutor(max_workers=effective_concurrency) as pool:
+                    futures = [pool.submit(_execute_single_plan_api_run, rid) for rid in api_run_ids]
+                    for fut in as_completed(futures):
+                        if fut.result():
+                            pass_count += 1
+                        else:
+                            fail_count += 1
 
         for run in runs:
             case_started_at = time.perf_counter()
@@ -2476,7 +2546,10 @@ def run_test_plan(plan_run_id: int) -> dict:
         plan_run.fail_count = fail_count
         plan_run.finished_at = utc_now_naive()
         plan_run.duration_ms = int((time.perf_counter() - started_at) * 1000)
-        summary_path, junit_path = _write_plan_report_files(plan_run, runs)
+        refreshed_runs = (
+            db.query(TestRun).filter(TestRun.plan_run_id == plan_run.id).order_by(TestRun.id.asc()).all()
+        )
+        summary_path, junit_path = _write_plan_report_files(plan_run, refreshed_runs)
         plan_run.report_json_path = summary_path
         plan_run.report_junit_path = junit_path
         plan_run.report_generated_at = utc_now_naive()

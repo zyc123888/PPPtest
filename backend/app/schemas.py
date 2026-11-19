@@ -1286,6 +1286,7 @@ class TestPlanRunCreate(BaseModel):
     environment_id: int | None = None
     timeout_seconds: int | None = Field(default=None, ge=1, le=600)
     max_retries: int = Field(default=0, ge=0, le=3)
+    concurrency: int = Field(default=1, ge=1, le=5)
 
 
 class TestPlanRunRead(ORMBaseModel):

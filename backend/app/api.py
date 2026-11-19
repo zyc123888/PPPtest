@@ -12,7 +12,7 @@ from xml.etree import ElementTree as ET
 
 import httpx
 from fastapi import APIRouter, Body, Cookie, Depends, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import String, cast, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -6088,6 +6088,7 @@ def trigger_test_plan(
     environment_id = payload.environment_id if payload else None
     timeout_seconds = payload.timeout_seconds if payload else None
     max_retries = payload.max_retries if payload else 0
+    concurrency = payload.concurrency if payload else 1
     if environment_id is not None:
         env = db.get(Environment, environment_id)
         if env is None or env.project_id != plan.project_id:
@@ -6109,7 +6110,21 @@ def trigger_test_plan(
         max_retries=max_retries,
     )
 
-    task_id, ran_inline = _dispatch_task_or_run_inline(run_test_plan, plan_run.id)
+    try:
+        task_id, ran_inline = _dispatch_task_or_run_inline(run_test_plan, plan_run.id, concurrency)
+    except HTTPException as exc:
+        now = utc_now_naive()
+        plan_run.status = "FAILED"
+        plan_run.error_type = "SYSTEM"
+        plan_run.summary = f"任务派发失败：{exc.detail}"[:255]
+        plan_run.finished_at = now
+        db.execute(
+            update(TestRun)
+            .where(TestRun.plan_run_id == plan_run.id, TestRun.status == "PENDING")
+            .values(status="FAILED", error_type="SYSTEM", summary="测试计划派发失败", finished_at=now)
+        )
+        db.commit()
+        raise
     if ran_inline:
         db.refresh(plan_run)
     else:
@@ -6963,6 +6978,57 @@ def rerun_execution(
         db.commit()
         db.refresh(rerun)
     return rerun
+
+
+@protected_router.get("/executions/runs/{run_id}/stream")
+async def stream_execution_run(
+    run_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    """SSE 实时推送执行状态与步骤进度，直到执行到达终态或客户端断开。"""
+    run = db.get(TestRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="执行记录不存在")
+    _require_project_access(db, current_user, db.get(Project, run.project_id))
+
+    async def event_generator():
+        from app.core.database import SessionLocal
+
+        last_sig = None
+        for _ in range(180):
+            if await request.is_disconnected():
+                break
+            poll_db = SessionLocal()
+            try:
+                current = poll_db.get(TestRun, run_id)
+                if current is None:
+                    break
+                payload = {
+                    "id": current.id,
+                    "status": current.status,
+                    "summary": current.summary,
+                    "error_type": current.error_type,
+                    "duration_ms": current.duration_ms,
+                    "step_count": len(current.step_results_json or []),
+                    "finished_at": current.finished_at.isoformat() if current.finished_at else None,
+                }
+                sig = (payload["status"], payload["summary"], payload["step_count"])
+                if sig != last_sig:
+                    last_sig = sig
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                if current.status in {"SUCCESS", "FAILED", "ERROR", "TIMEOUT", "CANCELLED"}:
+                    break
+            finally:
+                poll_db.close()
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @protected_router.post(
