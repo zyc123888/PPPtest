@@ -367,9 +367,13 @@
             <div class="run-detail__head"><div><h3>执行 #{{ selectedRun.id }}</h3><p>{{ selectedRun.summary || '-' }}</p></div><el-tag :type="executionStatusTag(selectedRun.status)">{{ executionStatusText(selectedRun.status) }}</el-tag></div>
             <div v-if="runMetrics" class="runtime-evidence">
               <span>平均 <strong>{{ runMetrics.avg_response_ms }}ms</strong></span>
+              <span v-if="runMetrics.p50_response_ms !== undefined">P50 <strong>{{ runMetrics.p50_response_ms }}ms</strong></span>
+              <span v-if="runMetrics.p90_response_ms !== undefined">P90 <strong>{{ runMetrics.p90_response_ms }}ms</strong></span>
               <span>P95 <strong>{{ runMetrics.p95_response_ms }}ms</strong></span>
+              <span v-if="runMetrics.p99_response_ms !== undefined">P99 <strong>{{ runMetrics.p99_response_ms }}ms</strong></span>
               <span>错误率 <strong>{{ Math.round((runMetrics.error_rate || 0) * 100) }}%</strong></span>
-              <span>吞吐 <strong>{{ runMetrics.throughput_rps }} rps</strong></span>
+              <span>QPS <strong>{{ runMetrics.qps ?? runMetrics.throughput_rps }} req/s</strong></span>
+              <span v-if="runMetrics.tps !== undefined">TPS <strong>{{ runMetrics.tps }} ok/s</strong></span>
               <span>成功 <strong>{{ runMetrics.success_count }}/{{ runMetrics.success_count + runMetrics.failure_count }}</strong></span>
             </div>
             <el-collapse v-if="selectedRun.stderr_text" class="run-technical">
@@ -392,6 +396,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '@/lib/api'
+import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { formatShortTime } from '@/lib/formatTime'
 import {
@@ -547,7 +552,13 @@ const loadFolders = async () => {
 }
 
 const loadProjects = async () => {
-  try { projects.value = await api.get('/projects') } catch (error) { ElMessage.error(error.message) }
+  try {
+    projects.value = await api.get('/projects')
+    if (!filters.projectId) {
+      const saved = getSavedProjectId(projects.value)
+      if (saved) filters.projectId = saved
+    }
+  } catch (error) { ElMessage.error(error.message) }
 }
 
 const refreshAll = () => Promise.all([getList(), loadStats(), loadFolders()])
@@ -803,7 +814,7 @@ const submitImportCases = async () => {
   } catch (error) { ElMessage.error(error.message) }
 }
 
-watch(() => filters.projectId, () => { selectedFolder.value = ''; page.value = 1; refreshAll() })
+watch(() => filters.projectId, (val) => { saveActiveProjectId(val); selectedFolder.value = ''; page.value = 1; refreshAll() })
 watch([() => filters.status, () => filters.priority, () => filters.reviewStatus, () => filters.method], () => { page.value = 1; getList() })
 watch(() => filters.keyword, () => { clearTimeout(keywordTimer); keywordTimer = setTimeout(() => { page.value = 1; getList() }, 300) })
 watch(selectedFolder, () => { page.value = 1; getList() })

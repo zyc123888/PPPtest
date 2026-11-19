@@ -217,10 +217,10 @@ function burndownChart(id) {
 async function fetchList() {
   loading.value = true
   try {
-    iterations.value = await api.get(`/projects/${props.project.id}/iterations`)
-    await Promise.all(iterations.value.map(async (it) => {
-      try { burndowns[it.id] = await api.get(`/iterations/${it.id}/burndown`) } catch { /* noop */ }
-    }))
+    iterations.value = await api.get(`/projects/${props.project.id}/iterations?include_burndown=true`)
+    iterations.value.forEach((it) => {
+      if (it.burndown) burndowns[it.id] = it.burndown
+    })
   } catch (error) { ElMessage.error(error.message) } finally { loading.value = false }
 }
 

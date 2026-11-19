@@ -346,6 +346,7 @@
 <script setup>
 import { computed, onMounted, nextTick, reactive, ref, watch } from 'vue'
 import { api } from '@/lib/api'
+import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -465,12 +466,20 @@ const getList = async () => {
     ])
     list.value = planData
     projects.value = projectData
+    if (!filters.projectId) {
+      const saved = getSavedProjectId(projectData)
+      if (saved) filters.projectId = saved
+    }
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
     listLoading.value = false
   }
 }
+
+watch(() => filters.projectId, (val) => {
+  saveActiveProjectId(val)
+})
 
 const filteredList = computed(() => {
   const keyword = filters.keyword.trim().toLowerCase()

@@ -257,11 +257,11 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, defineAsyncComponent } from 'vue'
 import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import KanbanBoard from './components/KanbanBoard.vue'
-import RichTextEditor from './components/RichTextEditor.vue'
+const RichTextEditor = defineAsyncComponent(() => import('./components/RichTextEditor.vue'))
 import { Edit } from '@element-plus/icons-vue'
 import { useSubmitGuard } from '@/composables/useSubmitGuard'
 import {

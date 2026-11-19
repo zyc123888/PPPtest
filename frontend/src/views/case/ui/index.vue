@@ -476,6 +476,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { api } from '@/lib/api'
+import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { formatShortTime } from '@/lib/formatTime'
 import {
@@ -689,6 +690,10 @@ const loadEditorFolders = async (projectId) => {
 const loadProjects = async () => {
   try {
     projects.value = await api.get('/projects')
+    if (!filters.projectId) {
+      const saved = getSavedProjectId(projects.value)
+      if (saved) filters.projectId = saved
+    }
   } catch (error) {
     ElMessage.error(error.message)
   }
@@ -1325,7 +1330,8 @@ const formatStepDetail = (detail) => {
   return parts.join(' · ') || JSON.stringify(detail)
 }
 
-watch(() => filters.projectId, () => {
+watch(() => filters.projectId, (val) => {
+  saveActiveProjectId(val)
   caseTableRef.value?.clearSelection()
   selectedRows.value = []
   selectedFolder.value = ''

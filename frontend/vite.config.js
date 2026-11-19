@@ -32,9 +32,10 @@ export default defineConfig(({ mode }) => {
           // 避免数组形式强制打包整包导致 tree-shaking 失效
           manualChunks(id) {
             if (!id.includes('node_modules')) return
-            if (/[\\/]node_modules[\\/]@tiptap[\\/]/.test(id)) return 'tiptap'
+            if (/[\\/]node_modules[\\/](@tiptap|prosemirror-|orderedmap|rope-sequence|w3c-keyname|linkifyjs)[\\/]/.test(id)) return 'tiptap'
             if (id.includes('node_modules/@element-plus/icons-vue')) return 'element-plus-icons'
             if (id.includes('node_modules/element-plus')) return 'element-plus'
+            if (/[\\/]node_modules[\\/](dayjs|lodash-es|marked|dompurify)[\\/]/.test(id)) return 'vendor-utils'
             if (/[\\/]node_modules[\\/](vue|@vue|vue-router|pinia)[\\/]/.test(id)) return 'vue'
           }
         }

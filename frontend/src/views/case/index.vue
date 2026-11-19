@@ -404,10 +404,11 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api } from '@/lib/api'
+import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
 
@@ -618,6 +619,10 @@ const getList = async () => {
     ])
     list.value = caseData
     projects.value = projectData
+    if (!filters.projectId) {
+      const saved = getSavedProjectId(projectData)
+      if (saved) filters.projectId = saved
+    }
     plans.value = planData
     folderTree.value = folderData
     page.value = 1
@@ -952,7 +957,13 @@ const goCreate = (type) => {
   else router.push({ path: '/case/performance', query })
 }
 
+watch(() => filters.projectId, (val) => {
+  saveActiveProjectId(val)
+})
+
 onMounted(() => {
+  const saved = getSavedProjectId()
+  if (saved && !filters.projectId) filters.projectId = saved
   getList()
 })
 </script>

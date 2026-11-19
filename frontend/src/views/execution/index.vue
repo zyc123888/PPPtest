@@ -69,12 +69,31 @@
         <el-form-item label=" " class="query-actions">
           <el-button type="primary" @click="handleSearch">查询</el-button>
           <el-button @click="handleReset">重置</el-button>
+        <el-button
+          v-if="canTest"
+          type="warning"
+          plain
+          :disabled="!selectedRuns.length"
+          @click="handleBatchRerun"
+        >
+          批量重跑 ({{ selectedRuns.length }})
+        </el-button>
+        <el-button
+          v-if="canTest"
+          type="danger"
+          plain
+          :disabled="!cancellableSelectedRuns.length"
+          @click="handleBatchCancel"
+        >
+          批量取消 ({{ cancellableSelectedRuns.length }})
+        </el-button>
         </el-form-item>
       </el-form>
     </el-card>
 
     <el-card class="page-card" shadow="never">
-      <el-table v-loading="listLoading" :data="list" border>
+      <el-table v-loading="listLoading" :data="list" border @selection-change="handleSelectionChange">
+        <el-table-column type="selection" width="44" align="center" />
         <el-table-column label="ID" prop="id" align="center" width="80" />
         <el-table-column label="类型" prop="case_type" width="90" align="center" />
         <el-table-column label="项目" min-width="130" show-overflow-tooltip>
@@ -260,6 +279,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/lib/api'
+import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
@@ -277,6 +297,9 @@ const list = ref([])
 const total = ref(0)
 const stats = reactive({ running: 0, failed: 0, retryable: 0 })
 const projects = ref([])
+const selectedRuns = ref([])
+const cancellableSelectedRuns = computed(() => selectedRuns.value.filter((item) => ['PENDING', 'RUNNING'].includes(item.status)))
+const handleSelectionChange = (rows) => { selectedRuns.value = rows || [] }
 const listLoading = ref(true)
 const dialogVisible = ref(false)
 const logDialogVisible = ref(false)
@@ -380,10 +403,18 @@ const getList = async () => {
 const fetchProjects = async () => {
   try {
     projects.value = await api.get('/projects')
+    if (!filters.projectId) {
+      const saved = getSavedProjectId(projects.value)
+      if (saved) filters.projectId = saved
+    }
   } catch (error) {
     projects.value = []
   }
 }
+
+watch(() => filters.projectId, (val) => {
+  saveActiveProjectId(val)
+})
 
 const hasActiveRuns = computed(() => list.value.some((item) => ['PENDING', 'RUNNING'].includes(item.status)))
 
@@ -497,6 +528,46 @@ const handleCancel = async (row) => {
   }
 }
 
+const handleBatchRerun = async () => {
+  if (!selectedRuns.value.length) return
+  try {
+    await ElMessageBox.confirm(`确认批量重跑选中的 ${selectedRuns.value.length} 条执行记录？`, '批量重跑', {
+      type: 'warning',
+      confirmButtonText: '确认重跑',
+      cancelButtonText: '取消'
+    })
+    const res = await api.post('/executions/runs/batch-rerun', {
+      run_ids: selectedRuns.value.map((r) => r.id)
+    })
+    ElMessage.success(res.message || '批量重跑已提交')
+    selectedRuns.value = []
+    getList()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.message)
+  }
+}
+
+const handleBatchCancel = async () => {
+  if (!cancellableSelectedRuns.value.length) return
+  try {
+    await ElMessageBox.confirm(`确认批量取消选中的 ${cancellableSelectedRuns.value.length} 条进行中任务？`, '批量取消', {
+      type: 'warning',
+      confirmButtonText: '确认取消',
+      cancelButtonText: '关闭'
+    })
+    const res = await api.post('/executions/runs/batch-cancel', {
+      run_ids: cancellableSelectedRuns.value.map((r) => r.id)
+    })
+    ElMessage.success(res.message || '批量取消成功')
+    selectedRuns.value = []
+    getList()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.message)
+  }
+}
+
 const copyText = async (text) => {
   if (!text) {
     ElMessage.info('无可复制内容')
@@ -546,9 +617,9 @@ const downloadArtifact = async (artifactIndex, artifact) => {
   }
 }
 
-onMounted(() => {
-  fetchProjects()
-  getList()
+onMounted(async () => {
+  await fetchProjects()
+  await getList()
   openRunFromQuery(route.query.run_id)
   restartTimer()
 })
