@@ -67,11 +67,13 @@
             {{ formatTime(scope.row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column v-if="canTest || canAdmin" label="操作" align="center" width="220">
+        <el-table-column v-if="canTest || canAdmin" label="操作" align="center" width="210" fixed="right">
           <template #default="scope">
-            <el-button v-if="canTest" size="small" @click="handleValidate(scope.row)">校验</el-button>
-            <el-button v-if="canTest" size="small" @click="handleEdit(scope.row)">编辑</el-button>
-            <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
+            <div class="table-action-group">
+              <el-button v-if="canTest" size="small" @click="handleValidate(scope.row)">校验</el-button>
+              <el-button v-if="canTest" size="small" @click="handleEdit(scope.row)">编辑</el-button>
+              <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>

@@ -70,23 +70,25 @@
             <span v-else>—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" align="center" width="380">
+        <el-table-column label="操作" align="center" width="340" fixed="right">
           <template #default="scope">
-            <el-button v-if="canTest" size="small" @click="openCaseDialog(scope.row)">用例配置</el-button>
-            <el-button v-if="canTest" size="small" type="primary" @click="openRunDialog(scope.row)">执行计划</el-button>
-            <el-button v-if="canTest" size="small" @click="openScheduleDialog(scope.row)">定时执行</el-button>
-            <el-dropdown v-if="canTest" @command="(cmd) => handlePlanCommand(cmd, scope.row)">
-              <el-button size="small">
-                更多
-                <el-icon><ArrowDown /></el-icon>
-              </el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="edit">编辑计划</el-dropdown-item>
-                  <el-dropdown-item v-if="canAdmin" command="delete" divided>删除</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
+            <div class="table-action-group">
+              <el-button v-if="canTest" size="small" @click="openCaseDialog(scope.row)">用例配置</el-button>
+              <el-button v-if="canTest" size="small" type="primary" @click="openRunDialog(scope.row)">执行计划</el-button>
+              <el-button v-if="canTest" size="small" @click="openScheduleDialog(scope.row)">定时执行</el-button>
+              <el-dropdown v-if="canTest" @command="(cmd) => handlePlanCommand(cmd, scope.row)">
+                <el-button size="small">
+                  更多
+                  <el-icon><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="edit">编辑计划</el-dropdown-item>
+                    <el-dropdown-item v-if="canAdmin" command="delete" divided>删除</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -247,25 +249,27 @@
               {{ scope.row.case_snapshot_json?.review_status === 'APPROVED' ? '-' : (scope.row.case_snapshot_json?.review_note || '带风险加入计划') }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="220" align="center">
+          <el-table-column label="操作" width="200" align="center">
             <template #default="scope">
-              <el-button
-                v-if="canTest"
-                size="small"
-                :disabled="caseFilter.riskMode !== 'ALL'"
-                @click="movePlanCase(scope.row, 'up')"
-              >
-                上移
-              </el-button>
-              <el-button
-                v-if="canTest"
-                size="small"
-                :disabled="caseFilter.riskMode !== 'ALL'"
-                @click="movePlanCase(scope.row, 'down')"
-              >
-                下移
-              </el-button>
-              <el-button v-if="canTest" size="small" type="danger" @click="removePlanCase(scope.row)">移除</el-button>
+              <div class="table-action-group">
+                <el-button
+                  v-if="canTest"
+                  size="small"
+                  :disabled="caseFilter.riskMode !== 'ALL'"
+                  @click="movePlanCase(scope.row, 'up')"
+                >
+                  上移
+                </el-button>
+                <el-button
+                  v-if="canTest"
+                  size="small"
+                  :disabled="caseFilter.riskMode !== 'ALL'"
+                  @click="movePlanCase(scope.row, 'down')"
+                >
+                  下移
+                </el-button>
+                <el-button v-if="canTest" size="small" type="danger" @click="removePlanCase(scope.row)">移除</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>

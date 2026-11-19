@@ -55,11 +55,13 @@
             {{ formatTime(scope.row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column v-if="canAdmin" label="操作" width="240" align="center">
+        <el-table-column v-if="canAdmin" label="操作" width="230" align="center" fixed="right">
           <template #default="scope">
-            <el-button size="small" @click="openMemberDialog(scope.row)">成员管理</el-button>
-            <el-button size="small" @click="handleEdit(scope.row)">编辑</el-button>
-            <el-button size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
+            <div class="table-action-group">
+              <el-button size="small" @click="openMemberDialog(scope.row)">成员管理</el-button>
+              <el-button size="small" @click="handleEdit(scope.row)">编辑</el-button>
+              <el-button size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>

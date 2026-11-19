@@ -288,16 +288,20 @@
             {{ formatTime(scope.row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" align="center" width="180">
+        <el-table-column label="操作" align="center" width="155" fixed="right">
           <template #default="scope">
-            <el-button size="small" @click="openDetail(scope.row)">详情</el-button>
-            <el-button size="small" @click="openFailures(scope.row)">失败项</el-button>
+            <div class="table-action-group">
+              <el-button size="small" @click="openDetail(scope.row)">详情</el-button>
+              <el-button size="small" @click="openFailures(scope.row)">失败项</el-button>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="下载" align="center" width="130">
+        <el-table-column label="下载" align="center" width="120" fixed="right">
           <template #default="scope">
-            <el-button link type="primary" @click="downloadReport(scope.row.id, 'json')">JSON</el-button>
-            <el-button link type="primary" @click="downloadReport(scope.row.id, 'junit')">JUnit</el-button>
+            <div class="table-action-group">
+              <el-button link type="primary" @click="downloadReport(scope.row.id, 'json')">JSON</el-button>
+              <el-button link type="primary" @click="downloadReport(scope.row.id, 'junit')">JUnit</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -349,6 +353,25 @@
         :closable="false"
         class="section-gap"
       />
+
+      <div v-if="diffSummary" class="report-diff-card section-gap">
+        <div class="report-diff-head">
+          <strong>与上次执行对比（对比基线 #{{ diffSummary.prevRunId }}）</strong>
+          <div class="report-diff-tags">
+            <el-tag size="small" type="danger" effect="plain">新增失败 {{ diffSummary.newFailures.length }}</el-tag>
+            <el-tag size="small" type="success" effect="plain">已修复 {{ diffSummary.fixed.length }}</el-tag>
+            <el-tag size="small" type="warning" effect="plain">持续失败 {{ diffSummary.persistentFailures.length }}</el-tag>
+          </div>
+        </div>
+        <div v-if="diffSummary.newFailures.length" class="report-diff-list">
+          <span class="diff-label is-danger">回归退化：</span>
+          <el-tag v-for="name in diffSummary.newFailures" :key="'nf-' + name" size="small" type="danger">{{ name }}</el-tag>
+        </div>
+        <div v-if="diffSummary.fixed.length" class="report-diff-list">
+          <span class="diff-label is-success">已修复通过：</span>
+          <el-tag v-for="name in diffSummary.fixed" :key="'fx-' + name" size="small" type="success">{{ name }}</el-tag>
+        </div>
+      </div>
 
       <div v-if="failureReasonSummary.length" class="failure-reason-summary section-gap">
         <span class="failure-reason-summary__label">失败原因统计</span>
@@ -683,6 +706,7 @@ const list = ref([])
 const listLoading = ref(false)
 const detailVisible = ref(false)
 const shareUrl = ref('')
+const diffSummary = ref(null)
 const shareLoading = ref(false)
 const failureVisible = ref(false)
 const defectDialogVisible = ref(false)
@@ -928,7 +952,26 @@ const openDetail = async (row) => {
     report.defects = data.defects || []
     report.internal_defects = data.internal_defects || []
     shareUrl.value = data.plan_run?.share_token ? buildShareUrl(`/shared-report/${data.plan_run.share_token}`) : ''
+    diffSummary.value = null
     detailVisible.value = true
+    const prevEntry = (report.recent_history || []).find((h) => h.id !== data.plan_run?.id)
+    if (prevEntry?.id) {
+      api.get(`/reports/${prevEntry.id}`).then((prevData) => {
+        const prevMap = new Map((prevData.test_runs || []).map((r) => [`${r.case_type}:${r.case_id}`, r]))
+        const newFailures = []
+        const fixed = []
+        const persistentFailures = []
+        ;(data.test_runs || []).forEach((cur) => {
+          const prev = prevMap.get(`${cur.case_type}:${cur.case_id}`)
+          const curOk = cur.status === 'SUCCESS'
+          const prevOk = prev ? prev.status === 'SUCCESS' : null
+          if (!curOk && prevOk === true) newFailures.push(cur.case_name || `#${cur.case_id}`)
+          else if (curOk && prevOk === false) fixed.push(cur.case_name || `#${cur.case_id}`)
+          else if (!curOk && prevOk === false) persistentFailures.push(cur.case_name || `#${cur.case_id}`)
+        })
+        diffSummary.value = { prevRunId: prevEntry.id, newFailures, fixed, persistentFailures }
+      }).catch(() => { /* ignore diff error */ })
+    }
   } catch (error) {
     ElMessage.error(error.message)
   }
@@ -1314,6 +1357,13 @@ onMounted(() => {
   gap: var(--space-12);
   flex-wrap: wrap;
 }
+
+.report-diff-card { padding: 12px 14px; border-radius: 10px; background: #f8fafc; border: 1px solid #e2e8f0; display: grid; gap: 8px; }
+.report-diff-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 13px; color: #1e293b; }
+.report-diff-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.report-diff-list { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+.diff-label.is-danger { color: #dc2626; font-weight: 600; }
+.diff-label.is-success { color: #16a34a; font-weight: 600; }
 
 .failure-reason-summary {
   display: flex;

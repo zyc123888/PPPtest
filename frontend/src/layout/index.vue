@@ -12,6 +12,7 @@
         <AppMain />
       </el-main>
     </el-container>
+    <CommandPalette />
   </el-container>
 </template>
 
@@ -21,6 +22,7 @@ import { useAppStore } from '@/stores/app'
 import Sidebar from './components/Sidebar.vue'
 import Header from './components/Header.vue'
 import AppMain from './components/AppMain.vue'
+import CommandPalette from '@/components/CommandPalette.vue'
 
 const appStore = useAppStore()
 

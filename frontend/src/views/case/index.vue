@@ -179,9 +179,9 @@
             {{ extraSummary(scope.row) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="120" align="center">
+        <el-table-column label="操作" width="200" align="center" fixed="right">
           <template #default="scope">
-            <div class="row-actions">
+            <div class="table-action-group">
               <el-button size="small" @click="openHistory(scope.row)">查看历史</el-button>
               <el-button size="small" @click="openDetail(scope.row)">进入类型页</el-button>
             </div>
@@ -976,12 +976,6 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-8);
-}
-
-.row-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
 }
 
 .summary-bar {

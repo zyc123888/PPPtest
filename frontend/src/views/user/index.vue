@@ -78,16 +78,18 @@
             {{ formatTime(scope.row.last_login_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" align="center">
+        <el-table-column label="操作" width="150" align="center" fixed="right">
           <template #default="scope">
-            <el-button size="small" @click="handleEdit(scope.row)">编辑</el-button>
-            <el-button
-              size="small"
-              type="danger"
-              plain
-              :disabled="scope.row.id === currentUserId"
-              @click="handleDelete(scope.row)"
-            >删除</el-button>
+            <div class="table-action-group">
+              <el-button size="small" @click="handleEdit(scope.row)">编辑</el-button>
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                :disabled="scope.row.id === currentUserId"
+                @click="handleDelete(scope.row)"
+              >删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>

@@ -1384,10 +1384,19 @@ const handleBeforeUnload = (event) => {
 
 onBeforeRouteLeave(async () => (await confirmDiscardEditorChanges()) || false)
 
+const handleUiEditorKeydown = (e) => {
+  if (!editorVisible.value) return
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault()
+    if (!saving.value) saveCase()
+  }
+}
+
 const route = useRoute()
 
 onMounted(async () => {
   window.addEventListener('beforeunload', handleBeforeUnload)
+  window.addEventListener('keydown', handleUiEditorKeydown)
   if (route.query.project_id) filters.projectId = Number(route.query.project_id) || undefined
   if (route.query.keyword) filters.keyword = String(route.query.keyword)
   await loadProjects()
@@ -1397,6 +1406,7 @@ onMounted(async () => {
 onUnmounted(() => {
   clearRemovedStep()
   window.removeEventListener('beforeunload', handleBeforeUnload)
+  window.removeEventListener('keydown', handleUiEditorKeydown)
   stopPolling()
   revokePreview()
 })

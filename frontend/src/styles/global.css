@@ -99,6 +99,23 @@ a {
   gap: var(--space-8);
 }
 
+.table-action-group {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.table-action-group .el-button + .el-button,
+.table-action-group .el-dropdown,
+.table-action-group .el-dropdown + .el-button,
+.table-action-group .el-button + .el-dropdown,
+.row-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
 @media (max-width: 960px) {
   .app-page {
     padding: var(--space-16);

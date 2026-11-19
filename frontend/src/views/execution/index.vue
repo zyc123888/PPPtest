@@ -126,13 +126,15 @@
             {{ formatTime(scope.row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" align="center" width="260">
+        <el-table-column label="操作" align="center" width="315" fixed="right">
           <template #default="scope">
-            <el-button size="small" @click="handleDetail(scope.row)">详情</el-button>
-            <el-button size="small" @click="openLogs(scope.row)">日志</el-button>
-            <el-button size="small" @click="openArtifacts(scope.row)">产物</el-button>
-            <el-button v-if="canCancel(scope.row)" size="small" type="danger" @click="handleCancel(scope.row)">取消</el-button>
-            <el-button v-if="canTest" size="small" type="primary" @click="handleRerun(scope.row)">重跑</el-button>
+            <div class="table-action-group">
+              <el-button size="small" @click="handleDetail(scope.row)">详情</el-button>
+              <el-button size="small" @click="openLogs(scope.row)">日志</el-button>
+              <el-button size="small" @click="openArtifacts(scope.row)">产物</el-button>
+              <el-button v-if="canCancel(scope.row)" size="small" type="danger" @click="handleCancel(scope.row)">取消</el-button>
+              <el-button v-if="canTest" size="small" type="primary" @click="handleRerun(scope.row)">重跑</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -214,45 +216,13 @@
       </el-tabs>
     </el-dialog>
 
-    <el-dialog v-model="logDialogVisible" title="执行日志" width="960px">
+    <el-dialog v-model="logDialogVisible" title="执行日志" width="980px">
       <el-tabs>
         <el-tab-pane label="标准输出">
-          <div class="log-toolbar">
-            <el-button size="small" @click="copyText(logData.stdout_text)">复制</el-button>
-          </div>
-          <el-input :model-value="logData.stdout_text || ''" type="textarea" :rows="16" readonly />
+          <LogTerminal :content="logData.stdout_text || ''" @copy="copyText" />
         </el-tab-pane>
         <el-tab-pane label="错误输出">
-          <div class="log-toolbar">
-            <el-button size="small" @click="copyText(logData.stderr_text)">复制</el-button>
-          </div>
-          <el-input :model-value="logData.stderr_text || ''" type="textarea" :rows="16" readonly />
-        </el-tab-pane>
-        <el-tab-pane v-if="isPrecheckFailure(logData)" label="预检摘要">
-          <el-alert :title="logData.error_type === 'CONFIG' ? '配置预检失败' : '预检失败'" type="error" :closable="false" />
-          <el-input :model-value="logData.stderr_text || logData.stdout_text || ''" type="textarea" :rows="8" readonly class="precheck-textarea" />
-        </el-tab-pane>
-        <el-tab-pane label="步骤结果">
-          <el-empty v-if="!logSteps.length" description="暂无步骤结果" />
-          <el-table v-else :data="logSteps" border class="step-table">
-            <el-table-column label="#" prop="index" width="70" align="center" />
-            <el-table-column label="步骤" prop="name" min-width="160" show-overflow-tooltip />
-            <el-table-column label="状态" width="110" align="center">
-              <template #default="scope">
-                <el-tag size="small" :type="stepStatusType(scope.row.status)">{{ statusText(scope.row.status) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="详情" min-width="320">
-              <template #default="scope">
-                <span class="step-detail">{{ formatStepDetail(scope.row.detail) }}</span>
-              </template>
-            </el-table-column>
-          </el-table>
-          <el-collapse class="raw-json-collapse">
-            <el-collapse-item title="原始步骤 JSON" name="raw">
-              <el-input :model-value="formatJson(logData.step_results_json)" type="textarea" :rows="10" readonly />
-            </el-collapse-item>
-          </el-collapse>
+          <LogTerminal :content="logData.stderr_text || ''" @copy="copyText" />
         </el-tab-pane>
       </el-tabs>
     </el-dialog>
@@ -282,6 +252,7 @@ import { api } from '@/lib/api'
 import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
+import LogTerminal from '@/components/LogTerminal.vue'
 import { usePermissions } from '@/lib/permissions'
 import { formatDateTime as formatTime } from '@/lib/formatTime'
 import {
@@ -312,6 +283,7 @@ const { canTest } = usePermissions()
 const route = useRoute()
 const router = useRouter()
 let timer = null
+let runEventSource = null
 
 const filters = reactive({
   projectId: '',
@@ -444,11 +416,50 @@ const handleReset = () => {
   handleSearch()
 }
 
+const closeRunStream = () => {
+  if (runEventSource) {
+    runEventSource.close()
+    runEventSource = null
+  }
+}
+
+const subscribeRunStream = (runId) => {
+  closeRunStream()
+  if (typeof EventSource === 'undefined') return
+  const es = new EventSource(`/api/v1/executions/runs/${runId}/stream`, { withCredentials: true })
+  runEventSource = es
+  es.onmessage = async (event) => {
+    try {
+      const payload = JSON.parse(event.data)
+      if (currentRun.value && currentRun.value.id === payload.id) {
+        currentRun.value = { ...currentRun.value, ...payload }
+      }
+      if (['SUCCESS', 'FAILED', 'ERROR', 'TIMEOUT', 'CANCELLED'].includes(payload.status)) {
+        closeRunStream()
+        if (dialogVisible.value && currentRun.value?.id === payload.id) {
+          currentRun.value = await api.get(`/executions/runs/${payload.id}`)
+        }
+        getList()
+      }
+    } catch {
+      // ignore malformed SSE chunk
+    }
+  }
+  es.onerror = () => {
+    closeRunStream()
+  }
+}
+
 const handleDetail = async (row) => {
   try {
     const data = await api.get(`/executions/runs/${row.id}`)
     currentRun.value = data
     dialogVisible.value = true
+    if (['PENDING', 'RUNNING'].includes(data.status)) {
+      subscribeRunStream(data.id)
+    } else {
+      closeRunStream()
+    }
   } catch (error) {
     ElMessage.error(error.message)
   }
@@ -632,7 +643,12 @@ watch(hasActiveRuns, () => {
   restartTimer()
 })
 
+watch(dialogVisible, (open) => {
+  if (!open) closeRunStream()
+})
+
 onBeforeUnmount(() => {
+  closeRunStream()
   if (timer) clearInterval(timer)
 })
 </script>

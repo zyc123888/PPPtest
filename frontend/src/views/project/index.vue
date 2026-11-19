@@ -69,11 +69,13 @@
         <el-table-column label="短码" prop="code" width="110" show-overflow-tooltip />
         <el-table-column label="基础地址" prop="base_url" min-width="200" show-overflow-tooltip />
         <el-table-column label="说明" prop="description" min-width="220" show-overflow-tooltip />
-        <el-table-column label="操作" align="center" width="260">
+        <el-table-column label="操作" align="center" width="240" fixed="right">
           <template #default="scope">
-            <el-button size="small" type="primary" @click="enterWorkspace(scope.row)">进入工作台</el-button>
-            <el-button v-if="canTest" size="small" @click="handleEdit(scope.row)">编辑</el-button>
-            <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
+            <div class="table-action-group">
+              <el-button size="small" type="primary" @click="enterWorkspace(scope.row)">进入工作台</el-button>
+              <el-button v-if="canTest" size="small" @click="handleEdit(scope.row)">编辑</el-button>
+              <el-button v-if="canAdmin" size="small" type="danger" @click="handleDelete(scope.row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>

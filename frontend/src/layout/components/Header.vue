@@ -16,6 +16,9 @@
     </div>
 
     <div class="header-right">
+      <el-button size="small" plain class="cmd-trigger-btn" @click="openCommandPalette">
+        快捷搜索 <kbd style="margin-left:6px;font-size:11px;opacity:.75">⌘K</kbd>
+      </el-button>
       <el-tag size="small" type="info" class="version-tag">v{{ appVersion }}</el-tag>
       <el-tag size="small" :type="backendOnline ? 'success' : 'danger'">
         {{ backendOnline ? '服务在线' : '服务离线' }}
@@ -153,6 +156,10 @@ const breadcrumbs = computed(() => {
 const displayName = computed(() => {
   return authStore.user?.display_name || authStore.user?.username || '用户'
 })
+
+const openCommandPalette = () => {
+  window.dispatchEvent(new CustomEvent('tp-open-command-palette'))
+}
 
 const toggleSideBar = () => {
   appStore.toggleSideBar()

@@ -470,10 +470,23 @@ async function updateField(field, value) {
 }
 
 async function handleMove({ card, toStatus, orderIndex }) {
+  const prevStatus = card.status
+  const prevOrder = card.order_index
+  const targetItem = items.value.find((it) => it.id === card.id)
+  if (targetItem) {
+    targetItem.status = toStatus
+    targetItem.order_index = orderIndex
+  }
   try {
     await api.put(`/requirements/${card.id}/rank`, { status: toStatus, order_index: orderIndex })
+  } catch (error) {
+    if (targetItem) {
+      targetItem.status = prevStatus
+      targetItem.order_index = prevOrder
+    }
+    ElMessage.error(error.message)
     fetchList()
-  } catch (error) { ElMessage.error(error.message); fetchList() }
+  }
 }
 
 async function linkCase() {

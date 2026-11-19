@@ -338,6 +338,19 @@
                 </el-select>
                 <el-input v-model="temp.path" placeholder="/api/v1/..." class="request-bar-path" />
               </div>
+              <div v-if="detectedTemplateVars.length" class="var-preview-bar">
+                <span class="var-preview-label">变量预览：</span>
+                <el-tooltip
+                  v-for="item in detectedTemplateVars"
+                  :key="item.name"
+                  :content="item.defined ? `${item.source}：${item.displayValue}` : '当前项目与所选环境中未定义该变量'"
+                  placement="top"
+                >
+                  <el-tag size="small" :type="item.defined ? 'success' : 'danger'" effect="plain" style="cursor: help">
+                    {{ '{' + '{' + item.name + '}' + '}' }}
+                  </el-tag>
+                </el-tooltip>
+              </div>
             </el-form-item>
           </div>
 
@@ -2723,9 +2736,60 @@ watch(() => page.value, () => {
   getList()
 })
 
+const activeVariablePool = computed(() => {
+  const pool = {}
+  const proj = projects.value.find((p) => p.id === temp.project_id)
+  if (proj?.variables_json && typeof proj.variables_json === 'object') {
+    Object.entries(proj.variables_json).forEach(([k, v]) => {
+      pool[k] = { value: v, source: '项目变量' }
+    })
+  }
+  const env = environments.value.find((e) => e.id === temp.debug_environment_id)
+  if (env?.variables_json && typeof env.variables_json === 'object') {
+    Object.entries(env.variables_json).forEach(([k, v]) => {
+      pool[k] = { value: v, source: `环境(${env.name})` }
+    })
+  }
+  return pool
+})
+
+const detectedTemplateVars = computed(() => {
+  const blob = [
+    temp.path || '',
+    temp.raw_body || '',
+    JSON.stringify(temp.headers || []),
+    JSON.stringify(temp.query_params || [])
+  ].join(' ')
+  const matches = [...blob.matchAll(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g)]
+  const names = [...new Set(matches.map((m) => m[1]))]
+  const pool = activeVariablePool.value
+  return names.map((name) => {
+    const found = pool[name]
+    const sensitive = /(secret|token|password|passwd|api_key|apikey)/i.test(name)
+    return {
+      name,
+      defined: Boolean(found),
+      source: found?.source || '',
+      displayValue: found ? (sensitive ? '***已配置***' : String(found.value)) : ''
+    }
+  })
+})
+
+const handleEditorKeydown = (e) => {
+  if (!dialogVisible.value) return
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault()
+    if (!caseSavePending.value) saveData()
+  } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault()
+    if (!debugLoading.value) sendDebugRequest()
+  }
+}
+
 const route = useRoute()
 
 onMounted(async () => {
+  window.addEventListener('keydown', handleEditorKeydown)
   if (route.query.project_id) filters.projectId = Number(route.query.project_id) || undefined
   if (route.query.keyword) filters.keyword = String(route.query.keyword)
   await loadProjects()
@@ -2734,6 +2798,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('keydown', handleEditorKeydown)
   stopPolling()
   if (keywordTimer) clearTimeout(keywordTimer)
 })
@@ -2741,6 +2806,9 @@ onUnmounted(() => {
 
 <style scoped>
 /* ========== 页面整体布局 ========== */
+.var-preview-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.var-preview-label { font-size: 12px; color: #64748b; }
+
 .api-editor-shell {
   display: grid;
   gap: 16px;
