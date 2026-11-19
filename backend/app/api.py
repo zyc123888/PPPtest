@@ -66,6 +66,7 @@ from app.models import (
 )
 from app.execution_runtime import (
     MissingTemplateVariableError,
+    UnsafeTargetURLError,
     build_variable_context,
     prepare_http_request,
 )
@@ -1284,71 +1285,25 @@ public_router = APIRouter()
 protected_router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
-def _normalize_mock_path(value: str | None) -> str:
-    """去除查询串并规范化为以 / 开头的路径。"""
-    raw = (value or "").split("?", 1)[0]
-    raw = raw.strip()
-    if not raw:
-        return "/"
-    return "/" + raw.strip("/")
-
-
-def _mock_path_matches(pattern_path: str, target_path: str) -> bool:
-    norm_pattern = _normalize_mock_path(pattern_path)
-    if norm_pattern == target_path:
-        return True
-    if "{" not in norm_pattern and ":" not in norm_pattern:
-        return False
-    regex_parts = []
-    for segment in norm_pattern.strip("/").split("/"):
-        if (segment.startswith("{") and segment.endswith("}")) or segment.startswith(":"):
-            regex_parts.append(r"[^/]+")
-        else:
-            regex_parts.append(re.escape(segment))
-    regex_str = "^/" + "/".join(regex_parts) + "$"
-    return bool(re.match(regex_str, target_path))
-
-
-@public_router.api_route(
-    "/mock/{project_id}/{mock_path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+from app.routers.system import (
+    _health_response,
+    _mock_path_matches,
+    _normalize_mock_path,
+    mock_service,
+    register_admin_system_routes,
+    system_health,
+    system_health_live,
+    system_health_ready,
+    system_info,
+    system_protected_router,
+    system_public_router,
 )
-async def mock_service(
-    project_id: int,
-    mock_path: str,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> Response:
-    """轻量 Mock 服务：按 method+path 匹配已启用 Mock 的接口用例，返回其预设响应。
+from app.routers.tools import tools_router
 
-    mock_config_json 结构：{status_code, headers, body, delay_ms}。无匹配时返回 404。
-    """
-    method = request.method.upper()
-    target = _normalize_mock_path(mock_path)
-    candidates = db.scalars(
-        select(APICase).where(
-            APICase.project_id == project_id,
-            APICase.mock_enabled.is_(True),
-            APICase.status == "ACTIVE",
-            func.upper(APICase.method) == method,
-        )
-    ).all()
-    matched = next((c for c in candidates if _normalize_mock_path(c.path) == target), None)
-    if matched is None:
-        matched = next((c for c in candidates if _mock_path_matches(c.path, target)), None)
-    if matched is None:
-        raise HTTPException(status_code=404, detail="未找到匹配的 Mock 用例")
-
-    config = matched.mock_config_json or {}
-    status_code = int(config.get("status_code") or 200)
-    headers = {str(k): str(v) for k, v in (config.get("headers") or {}).items()}
-    delay_ms = int(config.get("delay_ms") or 0)
-    if delay_ms > 0:
-        await asyncio.sleep(min(delay_ms, 10000) / 1000)
-    body = config.get("body")
-    if isinstance(body, (dict, list)):
-        return JSONResponse(content=body, status_code=status_code, headers=headers)
-    return Response(content="" if body is None else str(body), status_code=status_code, headers=headers)
+public_router.include_router(system_public_router)
+protected_router.include_router(system_protected_router)
+protected_router.include_router(tools_router)
+register_admin_system_routes(protected_router, require_admin)
 
 
 def _dispatch_task_or_run_inline(
@@ -1367,46 +1322,7 @@ def _dispatch_task_or_run_inline(
         raise HTTPException(status_code=503, detail=f"任务队列暂不可用，请稍后重试：{exc}") from exc
 
 
-def _health_response() -> schemas.SystemHealth | Response:
-    payload = schemas.SystemHealth(**services.collect_system_health())
-    if payload.app_status != "healthy":
-        # degraded 时仍返回完整分项 JSON，便于编排系统与人工排查。
-        return JSONResponse(status_code=503, content=payload.model_dump(mode="json"))
-    return payload
-
-
-@public_router.get("/system/health", response_model=schemas.SystemHealth)
-def system_health() -> schemas.SystemHealth | Response:
-    return _health_response()
-
-
-@public_router.get("/system/health/live")
-def system_health_live() -> dict:
-    # liveness：进程存活即 200，不探测外部依赖。
-    return {"status": "alive"}
-
-
-@public_router.get("/system/health/ready", response_model=schemas.SystemHealth)
-def system_health_ready() -> schemas.SystemHealth | Response:
-    # readiness：依赖全部可用才 200。
-    return _health_response()
-
-
-@protected_router.get("/system/info", response_model=schemas.SystemInfo)
-def system_info() -> schemas.SystemInfo:
-    return schemas.SystemInfo(**services.collect_system_info())
-
-
-@protected_router.post(
-    "/system/bootstrap",
-    response_model=schemas.SystemBootstrapResult,
-    dependencies=[Depends(require_admin)],
-)
-def system_bootstrap(
-    payload: schemas.SystemBootstrapRequest | None = Body(None),
-) -> schemas.SystemBootstrapResult:
-    should_seed = payload.seed_demo_data if payload is not None else settings.seed_demo_data_on_bootstrap
-    return schemas.SystemBootstrapResult(**services.bootstrap_runtime(seed_demo_data_enabled=should_seed))
+# system health/info/bootstrap routes migrated to app.routers.system
 
 
 @public_router.post("/auth/login", response_model=schemas.AuthLoginResponse)
@@ -1416,12 +1332,24 @@ def login(
     request: Request,
     db: Session = Depends(get_db),
 ) -> schemas.AuthLoginResponse:
+    client_ip = request.client.host if request.client else "unknown"
+    rate_key = f"{client_ip}:{(payload.username or '').strip().lower()}"
+    try:
+        services.check_login_rate_limit(rate_key)
+    except services.LoginRateLimitError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
     try:
         user = services.authenticate_user(db, payload.username, payload.password)
     except services.AccountDisabledError:
         raise HTTPException(status_code=403, detail="账号已停用，请联系管理员")
     if user is None:
+        services.record_login_failure(rate_key)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    services.clear_login_failures(rate_key)
     token = services.issue_user_token(db, user)
     response.set_cookie(
         key="tp_browser_session",
@@ -1988,7 +1916,7 @@ def list_api_cases(
     return items
 
 
-@protected_router.get("/cases", response_model=list[schemas.UnifiedCaseRead])
+@protected_router.get("/cases", response_model=schemas.UnifiedCasePage | list[schemas.UnifiedCaseRead])
 def list_cases(
     project_id: int | None = None,
     case_type: str | None = None,
@@ -2000,16 +1928,18 @@ def list_cases(
     tags: str | None = None,
     tag_mode: str | None = Query(default="ANY", pattern="^(ANY|ALL)$"),
     keyword: str | None = None,
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> list[schemas.UnifiedCaseRead]:
+) -> schemas.UnifiedCasePage | list[schemas.UnifiedCaseRead]:
     if project_id:
         _require_project_access(db, current_user, db.get(Project, project_id))
         project_ids = [project_id]
     elif current_user.role != "admin":
         project_ids = _accessible_project_ids(db, current_user)
         if not project_ids:
-            return []
+            return schemas.UnifiedCasePage(items=[], total=0, page=page, page_size=page_size) if page is not None else []
     else:
         project_ids = None
 
@@ -2026,80 +1956,55 @@ def list_cases(
     normalized_tag_mode = (tag_mode or "ANY").strip().upper()
     items: list[schemas.UnifiedCaseRead] = []
 
-    if normalized_type in {"", "API"}:
-        stmt = select(APICase).order_by(APICase.id.desc())
+    def _apply_sql_filters(stmt, model, keyword_cols):
         if project_ids is not None:
-            stmt = stmt.where(APICase.project_id.in_(project_ids))
-        api_cases = db.scalars(stmt).all()
-        for case in api_cases:
-            if folder_value and folder_value not in str(case.folder_path or "").lower():
-                continue
-            if normalized_priority and (case.priority or "").upper() != normalized_priority:
-                continue
-            if normalized_status and (case.status or "").upper() != normalized_status:
-                continue
-            if normalized_review_status and (case.review_status or "").upper() != normalized_review_status:
-                continue
-            if tag_values:
-                case_tags = {str(item).lower() for item in (case.tags_json or [])}
-                if normalized_tag_mode == "ALL":
-                    if not all(value in case_tags for value in tag_values):
-                        continue
-                elif not any(value in case_tags for value in tag_values):
-                    continue
-            if keyword_value and keyword_value not in f"{case.name} {case.path}".lower():
-                continue
-            items.append(_serialize_unified_case("API", case))
+            stmt = stmt.where(model.project_id.in_(project_ids))
+        if folder_value:
+            stmt = stmt.where(func.lower(func.coalesce(model.folder_path, "")).like(f"%{folder_value}%"))
+        if normalized_priority:
+            stmt = stmt.where(func.upper(func.coalesce(model.priority, "")) == normalized_priority)
+        if normalized_status:
+            stmt = stmt.where(func.upper(func.coalesce(model.status, "")) == normalized_status)
+        if normalized_review_status:
+            stmt = stmt.where(func.upper(func.coalesce(model.review_status, "")) == normalized_review_status)
+        if keyword_value:
+            pattern = f"%{keyword_value}%"
+            stmt = stmt.where(or_(*(func.lower(func.coalesce(col, "")).like(pattern) for col in keyword_cols)))
+        return stmt
+
+    def _matches_tags(case) -> bool:
+        if not tag_values:
+            return True
+        case_tags = {str(item).lower() for item in (case.tags_json or [])}
+        if normalized_tag_mode == "ALL":
+            return all(value in case_tags for value in tag_values)
+        return any(value in case_tags for value in tag_values)
+
+    if normalized_type in {"", "API"}:
+        stmt = _apply_sql_filters(select(APICase).order_by(APICase.id.desc()), APICase, [APICase.name, APICase.path])
+        for case in db.scalars(stmt).all():
+            if _matches_tags(case):
+                items.append(_serialize_unified_case("API", case))
 
     if normalized_type in {"", "UI"}:
-        stmt = select(UICase).order_by(UICase.id.desc())
-        if project_ids is not None:
-            stmt = stmt.where(UICase.project_id.in_(project_ids))
-        ui_cases = db.scalars(stmt).all()
-        for case in ui_cases:
-            if folder_value and folder_value not in str(case.folder_path or "").lower():
-                continue
-            if normalized_priority and (case.priority or "").upper() != normalized_priority:
-                continue
-            if normalized_status and (case.status or "").upper() != normalized_status:
-                continue
-            if normalized_review_status and (case.review_status or "").upper() != normalized_review_status:
-                continue
-            if tag_values:
-                case_tags = {str(item).lower() for item in (case.tags_json or [])}
-                if normalized_tag_mode == "ALL":
-                    if not all(value in case_tags for value in tag_values):
-                        continue
-                elif not any(value in case_tags for value in tag_values):
-                    continue
-            if keyword_value and keyword_value not in f"{case.name} {case.target_url} {case.expect_text}".lower():
-                continue
-            items.append(_serialize_unified_case("UI", case))
+        stmt = _apply_sql_filters(
+            select(UICase).order_by(UICase.id.desc()),
+            UICase,
+            [UICase.name, UICase.target_url, UICase.expect_text],
+        )
+        for case in db.scalars(stmt).all():
+            if _matches_tags(case):
+                items.append(_serialize_unified_case("UI", case))
 
     if normalized_type in {"", "PERF"}:
-        stmt = select(PerformanceCase).order_by(PerformanceCase.id.desc())
-        if project_ids is not None:
-            stmt = stmt.where(PerformanceCase.project_id.in_(project_ids))
-        perf_cases = db.scalars(stmt).all()
-        for case in perf_cases:
-            if folder_value and folder_value not in str(case.folder_path or "").lower():
-                continue
-            if normalized_priority and (case.priority or "").upper() != normalized_priority:
-                continue
-            if normalized_status and (case.status or "").upper() != normalized_status:
-                continue
-            if normalized_review_status and (case.review_status or "").upper() != normalized_review_status:
-                continue
-            if tag_values:
-                case_tags = {str(item).lower() for item in (case.tags_json or [])}
-                if normalized_tag_mode == "ALL":
-                    if not all(value in case_tags for value in tag_values):
-                        continue
-                elif not any(value in case_tags for value in tag_values):
-                    continue
-            if keyword_value and keyword_value not in f"{case.name} {case.path}".lower():
-                continue
-            items.append(_serialize_unified_case("PERF", case))
+        stmt = _apply_sql_filters(
+            select(PerformanceCase).order_by(PerformanceCase.id.desc()),
+            PerformanceCase,
+            [PerformanceCase.name, PerformanceCase.path],
+        )
+        for case in db.scalars(stmt).all():
+            if _matches_tags(case):
+                items.append(_serialize_unified_case("PERF", case))
 
     items.sort(
         key=lambda item: (
@@ -2109,6 +2014,15 @@ def list_cases(
         ),
         reverse=True,
     )
+    if page is not None:
+        total = len(items)
+        start = (page - 1) * page_size
+        return schemas.UnifiedCasePage(
+            items=items[start : start + page_size],
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
     return items
 
 
@@ -4064,7 +3978,7 @@ def debug_api_case(
                     case_body=step.get("body_json"),
                     variables=variables,
                 )
-            except MissingTemplateVariableError as exc:
+            except (MissingTemplateVariableError, UnsafeTargetURLError) as exc:
                 raise HTTPException(status_code=400, detail=f"{step_name}：{exc}") from exc
 
             try:
@@ -4153,7 +4067,7 @@ def debug_api_case(
             case_body=payload.body_json,
             variables=variables,
         )
-    except MissingTemplateVariableError as exc:
+    except (MissingTemplateVariableError, UnsafeTargetURLError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
@@ -7081,6 +6995,63 @@ def cancel_execution(
 
 
 @protected_router.post(
+    "/executions/runs/batch-cancel",
+    response_model=schemas.BatchActionResult,
+    dependencies=[Depends(require_tester)],
+)
+def batch_cancel_executions(
+    payload: schemas.ExecutionBatchActionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.BatchActionResult:
+    run_ids = list(dict.fromkeys(payload.run_ids))
+    runs = list(db.scalars(select(TestRun).where(TestRun.id.in_(run_ids))).all())
+    cancelled_count = 0
+    for run in runs:
+        _require_project_access(db, current_user, db.get(Project, run.project_id))
+        if run.status in {"SUCCESS", "FAILED", "ERROR", "TIMEOUT", "CANCELLED"}:
+            continue
+        if run.task_id:
+            celery_app.control.revoke(run.task_id, terminate=True)
+        run.status = "CANCELLED"
+        run.summary = "执行已批量取消"
+        run.error_type = "CANCELLED"
+        run.finished_at = utc_now_naive()
+        cancelled_count += 1
+    db.commit()
+    return schemas.BatchActionResult(
+        success=True,
+        affected_count=cancelled_count,
+        message=f"已批量取消 {cancelled_count} 条进行中的执行记录",
+    )
+
+
+@protected_router.post(
+    "/executions/runs/batch-rerun",
+    response_model=schemas.BatchActionResult,
+    dependencies=[Depends(require_tester)],
+)
+def batch_rerun_executions(
+    payload: schemas.ExecutionBatchActionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> schemas.BatchActionResult:
+    run_ids = list(dict.fromkeys(payload.run_ids))
+    rerun_count = 0
+    for rid in run_ids:
+        try:
+            rerun_execution(rid, db=db, current_user=current_user)
+            rerun_count += 1
+        except HTTPException:
+            continue
+    return schemas.BatchActionResult(
+        success=True,
+        affected_count=rerun_count,
+        message=f"已批量重跑 {rerun_count} 条执行记录",
+    )
+
+
+@protected_router.post(
     "/executions/api/{case_id}/run",
     response_model=schemas.TestRunRead,
     dependencies=[Depends(require_tester)],
@@ -7236,37 +7207,7 @@ def trigger_performance_case(
     return run
 
 
-@protected_router.post("/tools/json/format", response_model=schemas.ToolResult)
-def json_formatter(payload: schemas.TextPayload) -> schemas.ToolResult:
-    return schemas.ToolResult(result=services.format_json_payload(payload.payload))
-
-
-@protected_router.post("/tools/base64/encode", response_model=schemas.ToolResult)
-def base64_encode(payload: schemas.TextPayload) -> schemas.ToolResult:
-    return schemas.ToolResult(result=services.encode_base64(payload.payload))
-
-
-@protected_router.post("/tools/base64/decode", response_model=schemas.ToolResult)
-def base64_decode(payload: schemas.TextPayload) -> schemas.ToolResult:
-    return schemas.ToolResult(result=services.decode_base64(payload.payload))
-
-
-@protected_router.post("/tools/timestamp/convert", response_model=schemas.ToolResult)
-def timestamp_convert(payload: schemas.TimestampPayload) -> schemas.ToolResult:
-    return schemas.ToolResult(result=services.convert_timestamp(payload.payload))
-
-
-@protected_router.post("/tools/cron/preview", response_model=schemas.ToolResult)
-def cron_preview(payload: schemas.TextPayload) -> schemas.ToolResult:
-    try:
-        return schemas.ToolResult(result=services.preview_cron(payload.payload))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@protected_router.post("/tools/hash/digest", response_model=schemas.ToolResult)
-def hash_digest(payload: schemas.TextPayload) -> schemas.ToolResult:
-    return schemas.ToolResult(result=services.digest_text(payload.payload))
+# tools routes migrated to app.routers.tools
 
 
 @protected_router.get("/reports", response_model=list[schemas.TestPlanRunView])
