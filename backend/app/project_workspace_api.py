@@ -348,20 +348,95 @@ def delete_project_member(
 # ---------------------------------------------------------------------------
 
 
+def _compute_iteration_burndown_payload(iteration: Iteration, reqs: list[Requirement]) -> dict:
+    total_points = sum((r.story_points or 0) for r in reqs)
+    done_points = sum((r.story_points or 0) for r in reqs if r.status in {"DONE", "CLOSED"})
+    remaining_points = max(total_points - done_points, 0)
+
+    series = []
+    start_dt = iteration.start_date
+    end_dt = iteration.end_date
+    if start_dt and end_dt and end_dt >= start_dt:
+        total_days = max((end_dt - start_dt).days, 1)
+        steps = min(total_days + 1, 8)
+        for i in range(steps):
+            ratio = i / max(steps - 1, 1)
+            day_offset = int(round(ratio * total_days))
+            point_date = start_dt + __import__("datetime").timedelta(days=day_offset)
+            ideal_rem = round(max(total_points * (1.0 - ratio), 0.0), 1)
+            done_by_day = sum(
+                (r.story_points or 0)
+                for r in reqs
+                if r.status in {"DONE", "CLOSED"}
+                and r.updated_at is not None
+                and r.updated_at.date() <= point_date
+            )
+            actual_rem = max(total_points - done_by_day, 0) if i < steps - 1 else remaining_points
+            series.append(
+                {
+                    "label": point_date.strftime("%m-%d"),
+                    "ideal": ideal_rem,
+                    "actual": actual_rem,
+                    "ideal_remaining": ideal_rem,
+                    "actual_remaining": actual_rem,
+                }
+            )
+    else:
+        for i, label in enumerate(["起点", "25%", "50%", "75%", "当前"]):
+            ratio = i / 4.0
+            ideal_rem = round(max(total_points * (1.0 - ratio), 0.0), 1)
+            actual_rem = round(total_points - (done_points * ratio), 1) if i < 4 else remaining_points
+            series.append(
+                {
+                    "label": label,
+                    "ideal": ideal_rem,
+                    "actual": actual_rem,
+                    "ideal_remaining": ideal_rem,
+                    "actual_remaining": actual_rem,
+                }
+            )
+
+    return {
+        "iteration_id": iteration.id,
+        "capacity_points": iteration.capacity_points,
+        "total_points": total_points,
+        "done_points": done_points,
+        "remaining_points": remaining_points,
+        "requirement_total": len(reqs),
+        "requirement_done": sum(1 for r in reqs if r.status in {"DONE", "CLOSED"}),
+        "series": series,
+    }
+
+
 @workspace_router.get("/projects/{project_id}/iterations", response_model=list[schemas.IterationRead])
 def list_iterations(
     project_id: int,
+    include_burndown: bool = Query(default=False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> list[Iteration]:
+) -> list[schemas.IterationRead]:
     _require_project_role(db, current_user, project_id, "viewer")
-    return list(
+    items = list(
         db.scalars(
             select(Iteration)
             .where(Iteration.project_id == project_id)
             .order_by(Iteration.sort_order.asc(), Iteration.id.asc())
         ).all()
     )
+    if not include_burndown or not items:
+        return [schemas.IterationRead.model_validate(it) for it in items]
+    iter_ids = [it.id for it in items]
+    all_reqs = list(db.scalars(select(Requirement).where(Requirement.iteration_id.in_(iter_ids))).all())
+    reqs_by_iter: dict[int, list[Requirement]] = {}
+    for req in all_reqs:
+        if req.iteration_id is not None:
+            reqs_by_iter.setdefault(req.iteration_id, []).append(req)
+    results: list[schemas.IterationRead] = []
+    for it in items:
+        read_obj = schemas.IterationRead.model_validate(it)
+        read_obj.burndown = _compute_iteration_burndown_payload(it, reqs_by_iter.get(it.id, []))
+        results.append(read_obj)
+    return results
 
 
 @workspace_router.post(

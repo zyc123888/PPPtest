@@ -1123,40 +1123,44 @@ def _execute_performance_case(
                 for future in as_completed(future_map):
                     results.append(future.result())
     else:
-        with httpx.Client(timeout=timeout_seconds, limits=limits) as shared_client:
-            def perform_http_request(index: int) -> dict:
-                req_start = time.perf_counter()
-                response_status = 0
-                response_body = None
-                error = None
-                try:
-                    req_timeout = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else timeout_seconds
-                    response = shared_client.request(
-                        prepared.method,
-                        prepared.url,
-                        headers=prepared.headers,
-                        timeout=req_timeout,
-                        **prepared.kwargs(),
-                    )
-                    response_status = response.status_code
-                    response_body = response.text[:500]
-                except Exception as exc:
-                    error = str(exc)
-                duration_ms = int((time.perf_counter() - req_start) * 1000)
-                success = error is None and response_status == case.expected_status
-                return {
-                    "index": index + 1,
-                    "status": "SUCCESS" if success else "FAILED",
-                    "status_code": response_status,
-                    "duration_ms": duration_ms,
-                    "error": error,
-                    "response_sample": response_body,
-                }
+        import asyncio
 
-            with ThreadPoolExecutor(max_workers=concurrency) as executor:
-                future_map = {executor.submit(perform_http_request, index): index for index in range(total_requests)}
-                for future in as_completed(future_map):
-                    results.append(future.result())
+        async def _run_async_load() -> list[dict]:
+            sem = asyncio.Semaphore(concurrency)
+            async with httpx.AsyncClient(timeout=timeout_seconds, limits=limits) as async_client:
+                async def perform_async_request(index: int) -> dict:
+                    async with sem:
+                        req_start = time.perf_counter()
+                        response_status = 0
+                        response_body = None
+                        error = None
+                        try:
+                            req_timeout = _remaining_timeout_seconds_or_raise(run, deadline) if deadline else timeout_seconds
+                            response = await async_client.request(
+                                prepared.method,
+                                prepared.url,
+                                headers=prepared.headers,
+                                timeout=req_timeout,
+                                **prepared.kwargs(),
+                            )
+                            response_status = response.status_code
+                            response_body = response.text[:500]
+                        except Exception as exc:
+                            error = str(exc)
+                        duration_ms = int((time.perf_counter() - req_start) * 1000)
+                        success = error is None and response_status == case.expected_status
+                        return {
+                            "index": index + 1,
+                            "status": "SUCCESS" if success else "FAILED",
+                            "status_code": response_status,
+                            "duration_ms": duration_ms,
+                            "error": error,
+                            "response_sample": response_body,
+                        }
+
+                return list(await asyncio.gather(*(perform_async_request(i) for i in range(total_requests))))
+
+        results = asyncio.run(_run_async_load())
 
     results.sort(key=lambda item: item["index"])
     duration_values = [float(item["duration_ms"]) for item in results]
@@ -1164,8 +1168,15 @@ def _execute_performance_case(
     failure_count = total_requests - success_count
     error_rate = round(failure_count / total_requests, 4)
     avg_response_ms = round(sum(duration_values) / len(duration_values), 1) if duration_values else 0.0
+    min_response_ms = round(min(duration_values), 1) if duration_values else 0.0
+    max_response_ms = round(max(duration_values), 1) if duration_values else 0.0
+    p50_response_ms = round(_percentile(duration_values, 50), 1) if duration_values else 0.0
+    p90_response_ms = round(_percentile(duration_values, 90), 1) if duration_values else 0.0
     p95_response_ms = round(_percentile(duration_values, 95), 1) if duration_values else 0.0
-    throughput = round(total_requests / max(time.perf_counter() - started_at, 0.001), 2)
+    p99_response_ms = round(_percentile(duration_values, 99), 1) if duration_values else 0.0
+    elapsed_sec = max(time.perf_counter() - started_at, 0.001)
+    throughput = round(total_requests / elapsed_sec, 2)
+    tps = round(success_count / elapsed_sec, 2)
 
     threshold_errors = []
     if case.max_avg_response_ms is not None and avg_response_ms > case.max_avg_response_ms:
@@ -1195,9 +1206,16 @@ def _execute_performance_case(
             "status": "SUCCESS" if not threshold_errors else "FAILED",
             "detail": {
                 "avg_response_ms": avg_response_ms,
+                "min_response_ms": min_response_ms,
+                "max_response_ms": max_response_ms,
+                "p50_response_ms": p50_response_ms,
+                "p90_response_ms": p90_response_ms,
                 "p95_response_ms": p95_response_ms,
+                "p99_response_ms": p99_response_ms,
                 "error_rate": error_rate,
                 "throughput_rps": throughput,
+                "qps": throughput,
+                "tps": tps,
                 "success_count": success_count,
                 "failure_count": failure_count,
                 "threshold_errors": threshold_errors,
@@ -1207,9 +1225,16 @@ def _execute_performance_case(
 
     response_payload = {
         "avg_response_ms": avg_response_ms,
+        "min_response_ms": min_response_ms,
+        "max_response_ms": max_response_ms,
+        "p50_response_ms": p50_response_ms,
+        "p90_response_ms": p90_response_ms,
         "p95_response_ms": p95_response_ms,
+        "p99_response_ms": p99_response_ms,
         "error_rate": error_rate,
         "throughput_rps": throughput,
+        "qps": throughput,
+        "tps": tps,
         "success_count": success_count,
         "failure_count": failure_count,
         "results": results,
@@ -1220,8 +1245,8 @@ def _execute_performance_case(
         _write_run_artifact(run.id, "performance-results.json", results),
     ]
     summary = (
-        f"压测完成：成功 {success_count}/{total_requests}，平均 {avg_response_ms}ms，"
-        f"P95 {p95_response_ms}ms，错误率 {round(error_rate * 100, 2)}%"
+        f"压测完成：成功 {success_count}/{total_requests}，QPS {throughput}，TPS {tps}，"
+        f"平均 {avg_response_ms}ms，P95 {p95_response_ms}ms，P99 {p99_response_ms}ms，错误率 {round(error_rate * 100, 2)}%"
     )
     if threshold_errors:
         summary = f"{summary}；阈值未通过"

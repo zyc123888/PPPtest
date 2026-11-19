@@ -1113,6 +1113,8 @@ def _html_to_text(content: str) -> str:
 
 
 def _fetch_source_url(source_url: str) -> str:
+    from app.execution_runtime import validate_outbound_url
+    validate_outbound_url(source_url)
     resource = fetch_resource(
         source_url,
         max_bytes=settings.case_gen_max_source_download_bytes,

@@ -781,12 +781,27 @@ class ProjectNotificationSetting(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     channel_type: Mapped[str] = mapped_column(String(20), nullable=False, default="FEISHU")
     webhook_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    secret: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    _legacy_secret: Mapped[str | None] = mapped_column("secret", String(128), nullable=True)
+    secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     notify_on: Mapped[str] = mapped_column(String(20), nullable=False, default="ALL")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
     )
+
+    @property
+    def secret(self) -> str | None:
+        if self.secret_encrypted:
+            return decrypt_secret(self.secret_encrypted)
+        return self._legacy_secret
+
+    @secret.setter
+    def secret(self, value: str | None) -> None:
+        if value:
+            self.secret_encrypted = encrypt_secret(value)
+        else:
+            self.secret_encrypted = None
+        self._legacy_secret = None
 
 
 class ProjectMember(Base):

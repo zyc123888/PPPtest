@@ -16,7 +16,10 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import urljoin
+import ipaddress
+from urllib.parse import urljoin, urlparse
+
+from app.core.config import settings
 
 from app.models import Environment, Project
 
@@ -76,6 +79,39 @@ def build_variable_context(
     if extra:
         variables.update(extra)
     return variables
+
+
+class UnsafeTargetURLError(ValueError):
+    """目标 URL 触发 SSRF 安全拦截时抛出的异常。"""
+
+
+def validate_outbound_url(url: str) -> str:
+    """校验外发请求 URL，拦截云元数据网段、非法协议及受保护内部基础设施主机。"""
+    parsed = urlparse((url or "").strip())
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in {"http", "https"}:
+        raise UnsafeTargetURLError(f"不支持的请求协议：{scheme or '空'}，仅允许 http/https")
+    if not settings.ssrf_protection_enabled:
+        return url
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        raise UnsafeTargetURLError("目标 URL 缺少有效主机名")
+    blocked_hosts = {
+        h.strip().lower()
+        for h in (settings.ssrf_blocked_hosts or "").split(",")
+        if h.strip()
+    }
+    if host in blocked_hosts or host.endswith(".internal"):
+        raise UnsafeTargetURLError(f"出于安全策略，禁止访问受保护内部地址：{host}")
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_link_local or ip.is_unspecified or ip.is_multicast:
+            raise UnsafeTargetURLError(f"出于安全策略，禁止访问受限网段地址：{host}")
+        if str(ip) in {"169.254.169.254", "fd00:ec2::254"}:
+            raise UnsafeTargetURLError(f"出于安全策略，禁止访问云元数据地址：{host}")
+    except ValueError:
+        pass
+    return url
 
 
 class MissingTemplateVariableError(ValueError):
@@ -270,7 +306,8 @@ def build_target_url(
         "base_url",
     )
     rendered_path = render_template(case_path, variables, "case.path")
-    return urljoin(base_url.rstrip("/") + "/", rendered_path.lstrip("/"))
+    full_url = urljoin(base_url.rstrip("/") + "/", rendered_path.lstrip("/"))
+    return validate_outbound_url(full_url)
 
 
 def prepare_http_request(

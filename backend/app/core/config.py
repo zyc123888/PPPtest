@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     password_hash_iterations: int = 260000
     app_encryption_key: str
     normalize_mysql_charset_on_bootstrap: bool = False
+    # —— 安全防护配置（SSRF 与登录限流） ——
+    ssrf_protection_enabled: bool = True
+    ssrf_blocked_hosts: str = "postgres,redis,db,mysql,mariadb,rabbitmq,elasticsearch,metadata.google.internal"
+    login_rate_limit_enabled: bool = True
+    login_max_failed_attempts: int = 5
+    login_window_seconds: int = 300
+    login_lockout_seconds: int = 900
 
     # —— 用例生成（case generation）可调参数 ——
     # 支持通过环境变量覆盖（大写字段名，如 CASE_GEN_DEFAULT_MODEL），无需改源码重建镜像。

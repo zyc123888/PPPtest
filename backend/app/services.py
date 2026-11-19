@@ -582,6 +582,57 @@ def password_hash_needs_upgrade(password_hash: str | None) -> bool:
         return True
 
 
+class LoginRateLimitError(Exception):
+    def __init__(self, retry_after_seconds: int):
+        self.retry_after_seconds = max(int(retry_after_seconds), 1)
+        super().__init__(f"登录失败次数过多，请在 {self.retry_after_seconds} 秒后重试")
+
+
+_LOGIN_RATE_LOCK = __import__("threading").Lock()
+_LOGIN_FAILURE_TIMESTAMPS: dict[str, list[float]] = {}
+_LOGIN_LOCKED_UNTIL: dict[str, float] = {}
+
+
+def reset_login_rate_limiter() -> None:
+    with _LOGIN_RATE_LOCK:
+        _LOGIN_FAILURE_TIMESTAMPS.clear()
+        _LOGIN_LOCKED_UNTIL.clear()
+
+
+def check_login_rate_limit(key: str) -> None:
+    if not settings.login_rate_limit_enabled:
+        return
+    now = __import__("time").monotonic()
+    with _LOGIN_RATE_LOCK:
+        locked_until = _LOGIN_LOCKED_UNTIL.get(key)
+        if locked_until is not None:
+            if now < locked_until:
+                raise LoginRateLimitError(int(locked_until - now) + 1)
+            _LOGIN_LOCKED_UNTIL.pop(key, None)
+
+
+def record_login_failure(key: str) -> None:
+    if not settings.login_rate_limit_enabled:
+        return
+    now = __import__("time").monotonic()
+    window = max(settings.login_window_seconds, 1)
+    max_attempts = max(settings.login_max_failed_attempts, 1)
+    with _LOGIN_RATE_LOCK:
+        timestamps = [ts for ts in _LOGIN_FAILURE_TIMESTAMPS.get(key, []) if now - ts <= window]
+        timestamps.append(now)
+        if len(timestamps) >= max_attempts:
+            _LOGIN_LOCKED_UNTIL[key] = now + max(settings.login_lockout_seconds, 1)
+            _LOGIN_FAILURE_TIMESTAMPS.pop(key, None)
+        else:
+            _LOGIN_FAILURE_TIMESTAMPS[key] = timestamps
+
+
+def clear_login_failures(key: str) -> None:
+    with _LOGIN_RATE_LOCK:
+        _LOGIN_FAILURE_TIMESTAMPS.pop(key, None)
+        _LOGIN_LOCKED_UNTIL.pop(key, None)
+
+
 class AccountDisabledError(Exception):
     """Credentials are correct but the account has been disabled."""
 

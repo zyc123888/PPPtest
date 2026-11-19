@@ -1641,6 +1641,7 @@ class IterationRead(ORMBaseModel):
     sort_order: float | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    burndown: dict | None = None
 
 
 class RequirementCreate(BaseModel):
@@ -1954,3 +1955,14 @@ class TraceRow(BaseModel):
 class TraceMatrix(BaseModel):
     project_id: int
     rows: list[TraceRow]
+
+
+class ExecutionBatchActionRequest(BaseModel):
+    run_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class UnifiedCasePage(BaseModel):
+    items: list[UnifiedCaseRead]
+    total: int
+    page: int
+    page_size: int
