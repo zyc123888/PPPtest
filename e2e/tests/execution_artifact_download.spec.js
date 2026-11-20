@@ -46,11 +46,12 @@ test('执行中心可下载执行产物', async ({ page }) => {
 
   const runRow = page.getByRole('row').filter({ hasText: String(run.id) }).filter({ hasText: run.case_name }).first()
   await expect(runRow).toBeVisible({ timeout: 10000 })
-  await runRow.getByRole('button', { name: '产物' }).click()
+  await runRow.getByRole('button', { name: '更多操作' }).click()
+  await page.getByRole('menuitem', { name: '查看产物' }).click()
 
-  const artifactDialog = page.locator('.el-dialog').filter({ hasText: '执行产物' }).last()
-  await expect(artifactDialog).toBeVisible()
-  await expect(artifactDialog.getByText('request.json', { exact: true })).toBeVisible()
+  const artifactDrawer = page.locator('.exec-drawer:visible')
+  await expect(artifactDrawer).toBeVisible()
+  await expect(artifactDrawer.getByText('request.json', { exact: true })).toBeVisible()
 
   const token = await page.evaluate(() => localStorage.getItem('tp_token'))
   const artifactsResponse = await page.request.get(`/api/v1/executions/runs/${run.id}/artifacts`, {
