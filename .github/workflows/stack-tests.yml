@@ -62,11 +62,11 @@ jobs:
 
       - name: Prepare report placeholders
         run: |
-          mkdir -p backend/reports e2e/reports
+          mkdir -p backend/reports backend/uploads e2e/reports
           : > backend/reports/pytest-stack.log
           : > backend/reports/pytest-stack.xml
           : > e2e/reports/e2e-stack.log
-          chmod -R a+rwX backend/reports e2e/reports
+          chmod -R a+rwX backend/reports backend/uploads e2e/reports
 
       - name: Compose up
         run: docker compose up --build -d
@@ -186,7 +186,7 @@ jobs:
           docker compose logs backend --tail=200 || true
           docker compose logs frontend --tail=200 || true
           docker compose logs worker --tail=200 || true
-          docker compose logs mariadb --tail=200 || true
+          docker compose logs mysql --tail=200 || true
 
       - name: Compose down
         if: always()
