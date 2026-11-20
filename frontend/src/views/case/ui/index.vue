@@ -1388,7 +1388,7 @@ const handleUiEditorKeydown = (e) => {
   if (!editorVisible.value) return
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
     e.preventDefault()
-    if (!saving.value) saveCase()
+    if (!saving.value) saveData()
   }
 }
 
