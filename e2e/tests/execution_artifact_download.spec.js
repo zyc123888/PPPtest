@@ -40,8 +40,9 @@ test('执行中心可下载执行产物', async ({ page }) => {
   const run = await triggerApiRun(page)
 
   await page.goto('/execution/index')
-  await page.locator('.ctrl-search input').fill(run.case_name)
-  await page.getByRole('button', { name: '查询' }).click()
+  const searchInput = page.locator('.ctrl-search input')
+  await searchInput.fill(run.case_name)
+  await searchInput.press('Enter')
 
   const runRow = page.getByRole('row').filter({ hasText: String(run.id) }).filter({ hasText: run.case_name }).first()
   await expect(runRow).toBeVisible({ timeout: 10000 })
