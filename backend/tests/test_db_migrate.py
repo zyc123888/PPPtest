@@ -9,7 +9,9 @@ from sqlalchemy import create_engine, inspect, text
 
 from app.db_migrate import BASELINE_REVISION, current_revision, migration_config, upgrade_database
 
-HEAD_REVISION = "7f42c1d93a6b"
+# Keep the migration contract aligned with the actual Alembic graph.  The
+# webhook-secret migration is the current head after the V2 artifact changes.
+HEAD_REVISION = "a3b9e2c14f08"
 
 
 def test_fresh_database_migrates_and_revision_column_downgrades_without_data_loss(tmp_path: Path) -> None:

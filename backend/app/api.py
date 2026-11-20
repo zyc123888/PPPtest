@@ -1631,7 +1631,12 @@ def add_project_member(
         raise HTTPException(status_code=404, detail="用户不存在")
     if not _project_has_members(db, project.id):
         owner_uid = project.created_by or current_user.id
-        if owner_uid and owner_uid != payload.user_id:
+        # A project creator already has implicit owner access. Keep an
+        # explicit membership row for ordinary creators so switching a
+        # project into member-isolation mode cannot lock them out, but avoid
+        # duplicating the global admin as an explicit owner.
+        creator_is_global_admin = owner_uid == current_user.id and current_user.role == "admin"
+        if owner_uid and owner_uid != payload.user_id and not creator_is_global_admin:
             services.ensure_project_member(db, project.id, owner_uid, "owner")
     existing = db.scalar(select(ProjectMember).where(ProjectMember.project_id == project.id, ProjectMember.user_id == payload.user_id))
     _guard_project_member_change(db, current_user, project, existing, payload.role)
@@ -7368,7 +7373,7 @@ def create_defect(
     ws_defect = Defect(
         project_id=payload.project_id,
         title=payload.title[:200],
-        description=payload.detail,
+        description=payload.summary,
         severity=payload.severity if payload.severity in {"BLOCKER", "CRITICAL", "MAJOR", "MINOR", "TRIVIAL"} else "MAJOR",
         priority="P1",
         status=status_map.get(payload.status, "NEW"),
@@ -7419,7 +7424,7 @@ def update_defect(
     )
     if ws_defect is not None:
         ws_defect.title = defect.title[:200]
-        ws_defect.description = defect.detail
+        ws_defect.description = defect.summary
         if defect.severity in {"BLOCKER", "CRITICAL", "MAJOR", "MINOR", "TRIVIAL"}:
             ws_defect.severity = defect.severity
         ws_defect.status = status_map.get(defect.status, ws_defect.status)
