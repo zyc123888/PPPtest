@@ -18,9 +18,9 @@ GitHub 保存代码并运行 CI；生产服务器只拉取经过测试的镜像�
 
 工作流会发布以下镜像，每次同时带 `latest` 和不可变的 `sha-<commit>` 标签：
 
-- `ghcr.io/zyc123888/ppptest-backend`
-- `ghcr.io/zyc123888/ppptest-worker`
-- `ghcr.io/zyc123888/ppptest-frontend`
+- `ghcr.io/zyc123888/omnitest-backend`
+- `ghcr.io/zyc123888/omnitest-worker`
+- `ghcr.io/zyc123888/omnitest-frontend`
 
 生产部署固定使用 `sha-<commit>`，不会因 `latest` 后续变化而漂移。
 

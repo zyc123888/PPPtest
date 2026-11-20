@@ -1,7 +1,7 @@
 services:
   mysql:
     image: mariadb:11.4
-    container_name: ppptest-mysql
+    container_name: omnitest-mysql
     environment:
       MARIADB_DATABASE: "${MARIADB_DATABASE}"
       MARIADB_USER: "${MARIADB_USER}"
@@ -20,11 +20,11 @@ services:
         limits:
           memory: 256M
     networks:
-      - ppptest-network
+      - omnitest-network
 
   redis:
     image: redis:7-alpine
-    container_name: ppptest-redis
+    container_name: omnitest-redis
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -36,13 +36,13 @@ services:
         limits:
           memory: 64M
     networks:
-      - ppptest-network
+      - omnitest-network
 
   backend:
     build:
       context: ./backend
       target: runtime
-    container_name: ppptest-backend
+    container_name: omnitest-backend
     environment:
       APP_ENV: docker
       DATABASE_URL: "${DOCKER_DATABASE_URL}"
@@ -102,17 +102,17 @@ services:
         max-size: "5m"
         max-file: "2"
     networks:
-      - ppptest-network
+      - omnitest-network
 
   worker:
     build:
       context: ./backend
       target: execution
-    container_name: ppptest-worker
+    container_name: omnitest-worker
     # Docker Desktop bind mounts retain the host owner. Run the browser worker
     # with the host UID/GID so screenshots and traces remain writable.
     user: "${LOCAL_UID:-501}:${LOCAL_GID:-20}"
-    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=solo -Q execution,celery -n execution@%h'
+    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=prefork --concurrency=1 --max-tasks-per-child=50 -Q execution,celery -n execution@%h'
     environment:
       APP_ENV: docker
       DATABASE_URL: "${DOCKER_DATABASE_URL}"
@@ -164,13 +164,13 @@ services:
         max-size: "5m"
         max-file: "2"
     networks:
-      - ppptest-network
+      - omnitest-network
 
   case-worker:
     build:
       context: ./backend
       target: runtime
-    container_name: ppptest-case-worker
+    container_name: omnitest-case-worker
     command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=prefork --concurrency=1 -Q case_generation -n case-generation@%h'
     environment:
       APP_ENV: docker
@@ -219,13 +219,13 @@ services:
         max-size: "5m"
         max-file: "2"
     networks:
-      - ppptest-network
+      - omnitest-network
 
   beat:
     build:
       context: ./backend
       target: runtime
-    container_name: ppptest-beat
+    container_name: omnitest-beat
     command: sh -c 'exec celery -A app.core.celery_app.celery_app beat -l info --schedule /tmp/celerybeat-schedule'
     environment:
       APP_ENV: docker
@@ -255,12 +255,12 @@ services:
         max-size: "2m"
         max-file: "2"
     networks:
-      - ppptest-network
+      - omnitest-network
 
   frontend:
     build:
       context: ./frontend
-    container_name: ppptest-frontend
+    container_name: omnitest-frontend
     depends_on:
       backend:
         condition: service_healthy
@@ -282,12 +282,12 @@ services:
         max-size: "2m"
         max-file: "2"
     networks:
-      - ppptest-network
+      - omnitest-network
 
   e2e:
     build:
       context: ./e2e
-    container_name: ppptest-e2e
+    container_name: omnitest-e2e
     environment:
       E2E_BASE_URL: http://frontend:3000
       E2E_ADMIN_USER: "${E2E_ADMIN_USER:-admin}"
@@ -300,12 +300,13 @@ services:
     profiles:
       - test
     networks:
-      - ppptest-network
+      - omnitest-network
 
 volumes:
   mysql_data:
     driver: local
 
 networks:
-  ppptest-network:
+  omnitest-network:
+    name: omnitest-network
     driver: bridge

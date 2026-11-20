@@ -1,4 +1,4 @@
-# PPPtest Code Wiki
+# OmniTest Code Wiki
 
 本 Wiki 面向代码阅读与二次开发，聚焦：
 
@@ -9,17 +9,13 @@
 
 ## 快速导航
 
-- [01-Architecture.md](file:///Users/zhangyongcheng/Desktop/PPPtest/docs/code-wiki/01-Architecture.md)
-- [02-Backend.md](file:///Users/zhangyongcheng/Desktop/PPPtest/docs/code-wiki/02-Backend.md)
-- [03-Frontend.md](file:///Users/zhangyongcheng/Desktop/PPPtest/docs/code-wiki/03-Frontend.md)
-- [04-DataModel.md](file:///Users/zhangyongcheng/Desktop/PPPtest/docs/code-wiki/04-DataModel.md)
-- [05-Tasks-Workers.md](file:///Users/zhangyongcheng/Desktop/PPPtest/docs/code-wiki/05-Tasks-Workers.md)
-- [06-Run-Test-Deploy.md](file:///Users/zhangyongcheng/Desktop/PPPtest/docs/code-wiki/06-Run-Test-Deploy.md)
+- [01-Architecture.md](./01-Architecture.md)
+- [02-Backend.md](./02-Backend.md)
 
 ## 仓库一览
 
 ```text
-PPPtest/
+OmniTest/
 ├── backend/              # FastAPI + SQLAlchemy + Celery（含 Worker 运行镜像）
 ├── frontend/             # Vue3 + Vite（开发）+ Nginx（生产镜像）
 ├── e2e/                  # Playwright 端到端自测

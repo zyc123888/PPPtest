@@ -2036,7 +2036,7 @@ def export_cases(
     review_status: str | None = None,
     tag: str | None = None,
     tags: str | None = None,
-    tag_mode: str | None = Query(default="ANY", pattern="^(ANY|ALL)$"),
+    tag_mode: str | None = "ANY",
     keyword: str | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -2052,6 +2052,7 @@ def export_cases(
         tags=tags,
         tag_mode=tag_mode,
         keyword=keyword,
+        page=None,
         db=db,
         current_user=current_user,
     )
@@ -3948,7 +3949,7 @@ def debug_api_case(
                     prepared_req.method, parsed_url.path, headers=prepared_req.headers, **prepared_req.kwargs()
                 )
         else:
-            with httpx.Client(timeout=payload.timeout_seconds) as client:
+            with httpx.Client(timeout=payload.timeout_seconds, follow_redirects=False) as client:
                 resp = client.request(
                     prepared_req.method, prepared_req.url, headers=prepared_req.headers, **prepared_req.kwargs()
                 )

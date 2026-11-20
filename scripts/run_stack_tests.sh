@@ -77,14 +77,14 @@ trap on_error ERR
 run_step "compose_up" compose_cmd up --build -d
 
 for _ in {1..40}; do
-  if PPPTEST_RUN_MODE=docker bash scripts/health_check.sh >/tmp/test-platform-health.log 2>&1; then
+  if OMNITEST_RUN_MODE=docker bash scripts/health_check.sh >/tmp/test-platform-health.log 2>&1; then
     cat /tmp/test-platform-health.log
     break
   fi
   sleep 5
 done
 
-run_step "health_check" env PPPTEST_RUN_MODE=docker bash scripts/health_check.sh
+run_step "health_check" env OMNITEST_RUN_MODE=docker bash scripts/health_check.sh
 run_step "backend_pytest" compose_cmd exec -T backend pytest
 run_step "build_e2e_image" compose_cmd build e2e
 

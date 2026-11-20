@@ -31,7 +31,8 @@ import { ElMessage } from 'element-plus'
 const props = defineProps({
   modelValue: { type: String, default: '' },
   placeholder: { type: String, default: '' },
-  disabled: { type: Boolean, default: false }
+  disabled: { type: Boolean, default: false },
+  projectId: { type: [Number, String], default: null }
 })
 const emit = defineEmits(['update:modelValue'])
 
@@ -44,6 +45,9 @@ async function uploadImage(file) {
   try {
     const fd = new FormData()
     fd.append('file', file)
+    if (props.projectId != null && props.projectId !== '') {
+      fd.append('project_id', String(props.projectId))
+    }
     const res = await api.postForm('/uploads/image', fd)
     editor.chain().focus().setImage({ src: res.url }).run()
   } catch (error) {

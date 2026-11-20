@@ -6,11 +6,12 @@ dependency + access helpers defined in ``app.api`` to stay consistent with the
 platform conventions (``get_current_user``, ``_require_project_access`` etc.).
 """
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
+import re
 import uuid
 from pathlib import Path
 
@@ -91,18 +92,23 @@ _ALLOWED_IMAGE_TYPES = {
     "image/webp": ".webp",
     "image/bmp": ".bmp",
 }
+_PROJECT_SCOPED_UPLOAD_RE = re.compile(r"^p(\d+)_[0-9a-f]{32}\.[a-z0-9]+$")
 
 
 @workspace_router.get("/uploads/{filename}", response_class=FileResponse)
 def get_rich_text_image(
     filename: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> FileResponse:
-    """Return an uploaded image to authenticated workspace users."""
+    """Return an uploaded image to authorized workspace/project users."""
     safe_name = Path(filename).name
     allowed_extensions = set(_ALLOWED_IMAGE_TYPES.values())
     if safe_name != filename or Path(safe_name).suffix.lower() not in allowed_extensions:
         raise HTTPException(status_code=404, detail="图片不存在")
+    match = _PROJECT_SCOPED_UPLOAD_RE.match(safe_name)
+    if match is not None:
+        _require_project_role(db, current_user, int(match.group(1)), "viewer")
     upload_dir = Path(settings.upload_dir).resolve()
     path = upload_dir / safe_name
     if path.is_symlink() or path.parent.resolve() != upload_dir or not path.is_file():
@@ -113,13 +119,18 @@ def get_rich_text_image(
 @workspace_router.post("/uploads/image", response_model=schemas.UploadResult)
 async def upload_rich_text_image(
     file: UploadFile = File(...),
+    project_id: int | None = Form(default=None),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> schemas.UploadResult:
     """Accept a pasted / dropped image and return a browser-reachable URL.
 
-    The file is stored under ``settings.upload_dir`` and served back through the
-    ``{api_v1_prefix}/uploads`` static mount (already proxied by nginx ``/api/``).
+    When ``project_id`` is provided, the caller must hold at least ``member``
+    role in that project and the stored filename encodes the project scope so
+    subsequent downloads enforce project-level viewer access (preventing IDOR).
     """
+    if project_id is not None:
+        _require_project_role(db, current_user, project_id, "member")
     declared_ext = _ALLOWED_IMAGE_TYPES.get((file.content_type or "").lower())
     if declared_ext is None:
         raise HTTPException(status_code=422, detail="仅支持 PNG/JPG/GIF/WEBP/BMP 图片")
@@ -135,7 +146,8 @@ async def upload_rich_text_image(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{uuid.uuid4().hex}{ext}"
+    prefix = f"p{project_id}_" if project_id is not None else ""
+    filename = f"{prefix}{uuid.uuid4().hex}{ext}"
     (upload_dir / filename).write_bytes(data)
     url = f"{settings.api_v1_prefix}/uploads/{filename}"
     return schemas.UploadResult(url=url, filename=filename, size=len(data))

@@ -4,9 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-BACKEND_URL="${PPPTEST_BACKEND_URL:-http://127.0.0.1:8000}"
-FRONTEND_URL="${PPPTEST_FRONTEND_URL:-http://127.0.0.1:3000}"
-RUN_MODE="${PPPTEST_RUN_MODE:-local}"
+BACKEND_URL="${OMNITEST_BACKEND_URL:-${PPPTEST_BACKEND_URL:-http://127.0.0.1:8000}}"
+FRONTEND_URL="${OMNITEST_FRONTEND_URL:-${PPPTEST_FRONTEND_URL:-http://127.0.0.1:3000}}"
+RUN_MODE="${OMNITEST_RUN_MODE:-${PPPTEST_RUN_MODE:-local}}"
 
 compose_cmd() {
   if docker compose version >/dev/null 2>&1; then

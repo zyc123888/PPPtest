@@ -45,12 +45,14 @@ from app.notifications import send_plan_run_notification
 from app.tasks.case_generation import _normalize_model_base_url
 from app.execution_runtime import (
     MissingTemplateVariableError,
+    UnsafeTargetURLError,
     build_request_kwargs,
     build_runtime_headers,
     build_variable_context,
     prepare_http_request,
     render_data,
     render_template,
+    validate_outbound_url,
 )
 from app.assertion_engine import ResponseFacts, evaluate_assertions, run_extractors
 from app.services import compute_next_run_at, create_plan_run_with_cases, finalize_run, mark_run_started
@@ -195,7 +197,7 @@ def _execute_case_with_retries(db: Session, run: TestRun, execute_once) -> dict:
                 "artifacts_json": artifacts,
                 "step_results_json": step_results,
             }
-        except MissingTemplateVariableError as exc:
+        except (MissingTemplateVariableError, UnsafeTargetURLError) as exc:
             last_result = {
                 "status": "FAILED",
                 "summary": str(exc),
@@ -477,7 +479,7 @@ def _send_prepared_request(prepared, timeout_seconds: float) -> tuple[httpx.Resp
                 **prepared.kwargs(),
             )
     else:
-        with httpx.Client(timeout=timeout_seconds) as client:
+        with httpx.Client(timeout=timeout_seconds, follow_redirects=False) as client:
             response = client.request(
                 prepared.method,
                 prepared.url,
@@ -673,7 +675,9 @@ def _execute_api_case_pytest(
 
             import time as time_module
             started = time_module.perf_counter()
-            response = httpx.request(method, url, headers=headers, timeout=timeout, **request_body_kwargs(body))
+            response = httpx.request(
+                method, url, headers=headers, timeout=timeout, follow_redirects=False, **request_body_kwargs(body)
+            )
             duration_ms = int((time_module.perf_counter() - started) * 1000)
             result = {
                 "status_code": response.status_code,
@@ -1127,7 +1131,7 @@ def _execute_performance_case(
 
         async def _run_async_load() -> list[dict]:
             sem = asyncio.Semaphore(concurrency)
-            async with httpx.AsyncClient(timeout=timeout_seconds, limits=limits) as async_client:
+            async with httpx.AsyncClient(timeout=timeout_seconds, limits=limits, follow_redirects=False) as async_client:
                 async def perform_async_request(index: int) -> dict:
                     async with sem:
                         req_start = time.perf_counter()
@@ -1333,6 +1337,17 @@ def _execute_ui_case(
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1440, "height": 900})
+        if hasattr(context, "route"):
+            def _guard_ui_route(route) -> None:
+                req_url = getattr(getattr(route, "request", None), "url", "") or ""
+                if req_url.startswith(("http://", "https://")):
+                    try:
+                        validate_outbound_url(req_url)
+                    except UnsafeTargetURLError:
+                        route.abort("blockedbyclient")
+                        return
+                route.continue_()
+            context.route("**/*", _guard_ui_route)
         tracing = getattr(context, "tracing", None)
         if tracing and hasattr(tracing, "start"):
             tracing.start(screenshots=True, snapshots=True, sources=True)
@@ -2179,7 +2194,7 @@ def _write_plan_report_files(plan_run: TestPlanRun, runs: list[TestRun]) -> tupl
     return summary_path, junit_path
 
 
-@celery_app.task(name="app.tasks.run_api_case")
+@celery_app.task(name="app.tasks.run_api_case", soft_time_limit=300, time_limit=330)
 def run_api_case(run_id: int) -> dict:
     db = _open_db()
     started_at = time.perf_counter()
@@ -2237,7 +2252,7 @@ def run_api_case(run_id: int) -> dict:
         db.close()
 
 
-@celery_app.task(name="app.tasks.run_ui_case")
+@celery_app.task(name="app.tasks.run_ui_case", soft_time_limit=600, time_limit=660)
 def run_ui_case(run_id: int) -> dict:
     db = _open_db()
     started_at = time.perf_counter()
@@ -2300,7 +2315,7 @@ def run_ui_case(run_id: int) -> dict:
         db.close()
 
 
-@celery_app.task(name="app.tasks.run_performance_case")
+@celery_app.task(name="app.tasks.run_performance_case", soft_time_limit=600, time_limit=660)
 def run_performance_case(run_id: int) -> dict:
     db = _open_db()
     started_at = time.perf_counter()
@@ -2415,7 +2430,7 @@ def _execute_single_plan_api_run(run_id: int) -> bool:
         worker_db.close()
 
 
-@celery_app.task(name="app.tasks.run_test_plan")
+@celery_app.task(name="app.tasks.run_test_plan", soft_time_limit=1800, time_limit=1860)
 def run_test_plan(plan_run_id: int, concurrency: int = 1) -> dict:
     db = _open_db()
     started_at = time.perf_counter()
@@ -2573,7 +2588,7 @@ def run_test_plan(plan_run_id: int, concurrency: int = 1) -> dict:
         db.close()
 
 
-@celery_app.task(name="app.tasks.scan_scheduled_plans")
+@celery_app.task(name="app.tasks.scan_scheduled_plans", soft_time_limit=120, time_limit=150)
 def scan_scheduled_plans() -> dict:
     """Beat 周期任务：扫描到期的定时测试计划并触发执行。
 
@@ -2647,7 +2662,7 @@ def scan_scheduled_plans() -> dict:
         db.close()
 
 
-@celery_app.task(name="app.tasks.cleanup_execution_artifacts")
+@celery_app.task(name="app.tasks.cleanup_execution_artifacts", soft_time_limit=300, time_limit=330)
 def cleanup_execution_artifacts() -> dict:
     """清理超过保留期的执行产物目录（run_*），避免磁盘无限增长。
 
@@ -2698,7 +2713,7 @@ def cleanup_execution_artifacts() -> dict:
     return {"removed": removed}
 
 
-@celery_app.task(name="app.tasks.run_ui_batch")
+@celery_app.task(name="app.tasks.run_ui_batch", soft_time_limit=1800, time_limit=1860)
 def run_ui_batch(batch_run_id: int) -> dict:
     db = _open_db()
     started_at = time.perf_counter()

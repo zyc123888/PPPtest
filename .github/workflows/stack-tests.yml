@@ -74,14 +74,14 @@ jobs:
       - name: Health check
         run: |
           for i in {1..40}; do
-            if PPPTEST_RUN_MODE=docker bash scripts/health_check.sh >/tmp/test-platform-health.log 2>&1; then
+            if OMNITEST_RUN_MODE=docker bash scripts/health_check.sh >/tmp/test-platform-health.log 2>&1; then
               cat /tmp/test-platform-health.log
               exit 0
             fi
             sleep 5
           done
           cat /tmp/test-platform-health.log || true
-          PPPTEST_RUN_MODE=docker bash scripts/health_check.sh
+          OMNITEST_RUN_MODE=docker bash scripts/health_check.sh
 
       - name: Backend pytest
         id: backend_pytest

@@ -5,6 +5,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.execution_runtime import validate_outbound_url
+
 
 DEFAULT_PROHIBITED_ACTIONS = [
     "删除",
@@ -60,6 +62,7 @@ def build_allowed_origins(target_url: str, project_url: str | None, configured: 
 
 
 def ensure_allowed_url(value: str, origins: set[str]) -> None:
+    validate_outbound_url(value)
     if url_origin(value) not in origins:
         raise ValueError(f"导航地址不在允许域名内：{value}")
 

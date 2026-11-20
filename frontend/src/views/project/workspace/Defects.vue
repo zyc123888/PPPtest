@@ -59,8 +59,8 @@
     <el-dialog v-model="createVisible" title="新建缺陷" width="640px">
       <el-form ref="createFormRef" :model="form" :rules="rules" label-position="top">
         <el-form-item label="标题" prop="title"><el-input v-model="form.title" /></el-form-item>
-        <el-form-item label="描述"><RichTextEditor v-model="form.description" placeholder="描述缺陷现象，可直接粘贴 / 拖拽截图" /></el-form-item>
-        <el-form-item label="重现步骤"><RichTextEditor v-model="form.reproduce_steps" placeholder="分步描述重现路径，可粘贴截图" /></el-form-item>
+        <el-form-item label="描述"><RichTextEditor v-model="form.description" :project-id="project.id" placeholder="描述缺陷现象，可直接粘贴 / 拖拽截图" /></el-form-item>
+        <el-form-item label="重现步骤"><RichTextEditor v-model="form.reproduce_steps" :project-id="project.id" placeholder="分步描述重现路径，可粘贴截图" /></el-form-item>
         <div class="form-row">
           <el-form-item label="缺陷类型">
             <el-select v-model="form.defect_type" style="width: 100%">
@@ -222,19 +222,19 @@
         </div>
         <div class="ds-block">
           <div class="ds-block-label">描述</div>
-          <RichTextEditor v-if="editing" v-model="editForm.description" placeholder="描述缺陷现象，可直接粘贴 / 拖拽截图" />
+          <RichTextEditor v-if="editing" v-model="editForm.description" :project-id="project.id" placeholder="描述缺陷现象，可直接粘贴 / 拖拽截图" />
           <div v-else-if="current.description" class="rich-content" v-html="current.description" />
           <span v-else class="ds-empty">-</span>
         </div>
         <div class="ds-block">
           <div class="ds-block-label">重现步骤</div>
-          <RichTextEditor v-if="editing" v-model="editForm.reproduce_steps" placeholder="分步描述重现路径，可粘贴截图" />
+          <RichTextEditor v-if="editing" v-model="editForm.reproduce_steps" :project-id="project.id" placeholder="分步描述重现路径，可粘贴截图" />
           <div v-else-if="current.reproduce_steps" class="rich-content" v-html="current.reproduce_steps" />
           <span v-else class="ds-empty">-</span>
         </div>
         <div class="ds-block">
           <div class="ds-block-label">解决方案</div>
-          <RichTextEditor v-if="editing" v-model="editForm.resolution" placeholder="记录根因与解决方案" />
+          <RichTextEditor v-if="editing" v-model="editForm.resolution" :project-id="project.id" placeholder="记录根因与解决方案" />
           <div v-else-if="current.resolution" class="rich-content" v-html="current.resolution" />
           <span v-else class="ds-empty">-</span>
         </div>

@@ -1,8 +1,8 @@
-# PPPtest · AI 测试用例生成平台
+# OmniTest · AI 测试用例生成与执行平台
 
 一个面向测试团队的 **AI 驱动测试用例生成与执行平台**：用大模型把需求/文档自动拆解成结构化用例，并管理 API/UI 用例、测试计划、执行与报告。后端 FastAPI，前端 Vue 3，异步任务 Celery + Redis，端到端用 Playwright 自测。
 
-> 仓库 docker-compose 项目名 `omnitest`，镜像前缀 `ghcr.io/zyc123888/ppptest`。
+> Docker Compose 项目名 `omnitest`，GHCR 镜像前缀 `ghcr.io/zyc123888/omnitest`。
 
 ## 平台能力
 
@@ -32,7 +32,7 @@
 ## 目录结构（关键部分）
 
 ```text
-PPPtest/
+OmniTest/
 ├── backend/
 │   ├── app/
 │   │   ├── api.py                # 路由聚合（当前为单体文件，计划按领域拆分，见 docs）
@@ -104,7 +104,7 @@ docker info
 ### 3. 启动项目
 
 ```bash
-cd /Users/zhangyongcheng/Desktop/PPPtest
+cd OmniTest
 docker-compose up -d --build
 docker-compose ps
 ```
