@@ -40,7 +40,7 @@ test('执行中心可下载执行产物', async ({ page }) => {
   const run = await triggerApiRun(page)
 
   await page.goto('/execution/index')
-  await page.getByPlaceholder('用例名称/摘要').fill(run.case_name)
+  await page.locator('.ctrl-search input').fill(run.case_name)
   await page.getByRole('button', { name: '查询' }).click()
 
   const runRow = page.getByRole('row').filter({ hasText: String(run.id) }).filter({ hasText: run.case_name }).first()

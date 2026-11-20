@@ -85,7 +85,7 @@ test('UI 用例新建时项目、目录和目标地址跟随所选项目', async
     const editor = page.locator('.el-dialog:visible').filter({ hasText: '新增 UI 用例' })
     await expect(editor).toBeVisible()
     const projectField = editor.locator('.el-form-item').filter({ hasText: '所属项目' })
-    await expect(projectField.locator('.el-select__selected-item')).toContainText(projectBName)
+    await expect(projectField.locator('.el-select__selection')).toContainText(projectBName)
     const targetField = editor.locator('.el-form-item').filter({ hasText: '目标地址' })
     await expect(targetField.locator('input')).toHaveValue(projectB.base_url)
 

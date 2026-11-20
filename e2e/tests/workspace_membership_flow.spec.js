@@ -30,8 +30,8 @@ test('成员管理联动流程可运行', async ({ page }) => {
   await expect(page.getByText('创建成功').first()).toBeVisible()
 
   await page.goto('/user/index')
-  await page.getByRole('button', { name: '新增用户' }).click()
-  const userDialog = page.locator('.el-dialog').filter({ hasText: '新增用户' }).last()
+  await page.getByRole('button', { name: '邀请成员' }).click()
+  const userDialog = page.locator('.el-dialog').filter({ hasText: '邀请成员' }).last()
   await expect(userDialog).toBeVisible()
   await userDialog.getByPlaceholder('例如：tester1').fill(username)
   await userDialog.getByPlaceholder('可选').fill(displayName)
@@ -41,13 +41,12 @@ test('成员管理联动流程可运行', async ({ page }) => {
   await userDialog.getByRole('button', { name: '确认' }).click()
   await expect(page.getByText('创建成功').first()).toBeVisible()
 
-  const userRow = page.getByRole('row').filter({ hasText: username }).last()
+  const userRow = page.locator('.ap-list-row').filter({ hasText: username }).last()
   await expect(userRow).toContainText('默认空间')
 
   await page.goto('/workspace/index')
-  await page.getByPlaceholder('空间名称/说明').fill(workspaceName)
-  await page.getByRole('button', { name: '查询' }).click()
-  const workspaceRow = page.getByRole('row').filter({ hasText: workspaceName }).last()
+  await page.getByPlaceholder('搜索工作空间名称或说明').fill(workspaceName)
+  const workspaceRow = page.locator('.ap-list-row').filter({ hasText: workspaceName }).last()
   await expect(workspaceRow).toBeVisible()
   await workspaceRow.getByRole('button', { name: '成员管理' }).click()
 
@@ -60,15 +59,15 @@ test('成员管理联动流程可运行', async ({ page }) => {
 
   const memberRow = memberDialog.getByRole('row').filter({ hasText: username }).last()
   await expect(memberRow).toContainText('Member')
-  await memberDialog.getByRole('button', { name: '关闭' }).click()
+  await memberDialog.getByRole('button', { name: '关闭', exact: true }).click()
 
   await page.goto('/user/index')
-  const targetUserRow = page.getByRole('row').filter({ hasText: username }).last()
+  const targetUserRow = page.locator('.ap-list-row').filter({ hasText: username }).last()
   await expect(targetUserRow).toContainText(workspaceName)
   await targetUserRow.getByText(workspaceName).click()
 
   await expect(page).toHaveURL(new RegExp(`/workspace/index\\?workspace_id=\\d+`))
-  const jumpedWorkspaceRow = page.getByRole('row').filter({ hasText: workspaceName }).last()
+  const jumpedWorkspaceRow = page.locator('.ap-list-row').filter({ hasText: workspaceName }).last()
   await expect(jumpedWorkspaceRow).toBeVisible()
   await jumpedWorkspaceRow.getByRole('button', { name: '成员管理' }).click()
 
@@ -78,9 +77,10 @@ test('成员管理联动流程可运行', async ({ page }) => {
   await page.getByRole('option', { name: 'Owner' }).click()
   await expect(page.getByText('成员角色已更新').first()).toBeVisible()
   await expect(roleDialog.getByRole('row').filter({ hasText: username }).last()).toContainText('Owner')
-  await roleDialog.getByRole('button', { name: '关闭' }).click()
+  await roleDialog.getByRole('button', { name: '关闭', exact: true }).click()
 
   await page.goto('/user/index')
-  const updatedUserRow = page.getByRole('row').filter({ hasText: username }).last()
-  await expect(updatedUserRow).toContainText(`${workspaceName} · owner`)
+  const updatedUserRow = page.locator('.ap-list-row').filter({ hasText: username }).last()
+  await expect(updatedUserRow).toContainText(workspaceName)
+  await expect(updatedUserRow).toContainText('owner')
 })

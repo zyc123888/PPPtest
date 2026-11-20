@@ -27,7 +27,8 @@ test('企业级后台首页加载与导航验证', async ({ page }) => {
   // 2. 验证仪表盘核心元素
   // 检查统计卡片 (限定在 main 区域内查找，避免匹配到菜单)
   const main = page.locator('.layout-main')
-  const resourceGrid = main.locator('.resource-grid')
+  // The dashboard uses the Bento asset grid in the current visual layout.
+  const resourceGrid = main.locator('.bn-assets-grid')
   await expect(resourceGrid.getByText('工作空间', { exact: true })).toBeVisible()
   await expect(resourceGrid.getByText('项目总数', { exact: true })).toBeVisible()
   await expect(resourceGrid.getByText('接口用例', { exact: true })).toBeVisible()

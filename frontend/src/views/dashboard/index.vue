@@ -34,7 +34,7 @@
 
       <!-- Top Bento Grid: Health + Pass Rate Ring + Risk Summary -->
       <section class="bn-top-grid">
-        <div class="bn-card bn-health-card">
+        <div class="bn-card bn-health-card" aria-label="系统运行状态">
           <div class="bn-card__head">
             <h2>系统服务状态</h2>
             <span class="bn-pill" :class="health.app_status === 'healthy' ? 'bn-pill--green' : 'bn-pill--amber'">

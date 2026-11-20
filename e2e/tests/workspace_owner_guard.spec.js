@@ -25,9 +25,8 @@ test('最后一个 Owner 不可降级且不可移除', async ({ page }) => {
   await workspaceDialog.getByRole('button', { name: '确认' }).click()
   await expect(page.getByText('创建成功').first()).toBeVisible()
 
-  await page.getByPlaceholder('空间名称/说明').fill(workspaceName)
-  await page.getByRole('button', { name: '查询' }).click()
-  const workspaceRow = page.getByRole('row').filter({ hasText: workspaceName }).last()
+  await page.getByPlaceholder('搜索工作空间名称或说明').fill(workspaceName)
+  const workspaceRow = page.locator('.ap-list-row').filter({ hasText: workspaceName }).last()
   await workspaceRow.getByRole('button', { name: '成员管理' }).click()
 
   const memberDialog = page.locator('.el-dialog').filter({ hasText: `成员管理 · ${workspaceName}` }).last()
