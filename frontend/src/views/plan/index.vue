@@ -1,90 +1,131 @@
 <template>
-  <div class="app-page">
-    <PageHeader title="测试计划" subtitle="编排回归计划并统一执行">
+  <div class="app-page plan-page">
+    <PageHeader title="测试计划" subtitle="编排回归用例、定时调度与批量执行入口">
       <template #actions>
-        <el-button v-if="canTest" type="primary" @click="handleCreate">新增计划</el-button>
+        <div class="plan-header-actions">
+          <el-button :loading="listLoading" @click="getList">刷新</el-button>
+          <el-button v-if="canTest" type="primary" @click="handleCreate">新增计划</el-button>
+        </div>
       </template>
     </PageHeader>
 
-    <div class="plan-hero section-gap">
-      <el-card class="page-card plan-hero__main" shadow="never">
-        <div class="plan-hero__kicker">Execution Orchestration</div>
-        <div class="plan-hero__title">测试计划是执行的编排入口</div>
-        <div class="plan-hero__subtitle">把计划、用例配置和执行动作放在同一层级，减少切换成本，保证回归闭环清晰可见。</div>
-      </el-card>
-      <el-card class="page-card plan-hero__stat" shadow="never">
-        <el-statistic title="计划数量" :value="filteredList.length" />
-      </el-card>
-      <el-card class="page-card plan-hero__stat" shadow="never">
-        <el-statistic title="项目数" :value="projectCount" />
-      </el-card>
-      <el-card class="page-card plan-hero__stat" shadow="never">
-        <el-statistic title="可执行计划" :value="list.filter((item) => item.status === 'ACTIVE').length" />
-      </el-card>
-      <el-card class="page-card plan-hero__stat" shadow="never">
-        <el-statistic title="当前筛选" :value="filters.keyword ? '已筛选' : '全部'" />
-      </el-card>
-    </div>
-
-    <el-card class="page-card section-gap" shadow="never">
-      <el-form :inline="true" class="query-form" label-position="top" :model="filters">
-        <el-form-item label="所属项目">
-          <el-select v-model="filters.projectId" clearable placeholder="全部" style="width: 200px">
-            <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="关键字">
-          <el-input v-model="filters.keyword" clearable placeholder="计划名称/说明" style="width: 260px" />
-        </el-form-item>
-        <el-form-item label=" " class="query-actions">
-          <el-button type="primary" @click="handleSearch">查询</el-button>
-          <el-button @click="handleReset">重置</el-button>
-        </el-form-item>
-      </el-form>
-    </el-card>
-
-    <el-card class="page-card" shadow="never">
-      <div class="toolbar section-gap">
-        <div />
-        <div class="toolbar-right">
-          <el-button @click="getList">刷新</el-button>
+    <section class="overview-strip section-gap" aria-label="测试计划概览">
+      <div class="overview-grid">
+        <div class="overview-cell">
+          <span class="overview-cell__label">计划总数</span>
+          <strong class="overview-cell__val">{{ filteredList.length }}</strong>
+        </div>
+        <div class="overview-cell">
+          <span class="overview-cell__label">
+            <span class="dot dot--emerald" />
+            可执行计划
+          </span>
+          <strong class="overview-cell__val">{{ activePlanCount }}</strong>
+        </div>
+        <div class="overview-cell">
+          <span class="overview-cell__label">
+            <span class="dot dot--sky" />
+            已启定时调度
+          </span>
+          <strong class="overview-cell__val">{{ scheduledPlanCount }}</strong>
+        </div>
+        <div class="overview-cell">
+          <span class="overview-cell__label">覆盖项目数</span>
+          <strong class="overview-cell__val">{{ projectCount }}</strong>
         </div>
       </div>
+    </section>
 
-      <el-table v-loading="listLoading" :data="pagedList" border>
-        <el-table-column label="ID" prop="id" align="center" width="80" />
-        <el-table-column label="项目" width="180" show-overflow-tooltip>
-          <template #default="scope">
-            {{ projectMap[scope.row.project_id] || scope.row.project_id }}
-          </template>
-        </el-table-column>
-        <el-table-column label="计划名称" prop="name" min-width="200" show-overflow-tooltip />
-        <el-table-column label="说明" prop="description" min-width="220" show-overflow-tooltip />
-        <el-table-column label="状态" prop="status" width="120" align="center" />
-        <el-table-column label="定时调度" min-width="170" align="center">
-          <template #default="scope">
-            <template v-if="scope.row.schedule_enabled">
-              <div class="schedule-cron">{{ scope.row.schedule_cron }}</div>
-              <div class="schedule-next">下次：{{ formatDateTime(scope.row.next_run_at) }}</div>
+    <section class="surface-card">
+      <div class="filter-bar">
+        <div class="filter-bar__controls">
+          <el-select
+            v-model="filters.projectId"
+            clearable
+            filterable
+            placeholder="全部项目"
+            class="filter-item filter-item--project"
+            @change="handleSearch"
+          >
+            <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+
+          <el-input
+            v-model="filters.keyword"
+            clearable
+            placeholder="搜索计划名称或说明…"
+            class="filter-item filter-item--search"
+            @keyup.enter="handleSearch"
+            @clear="handleSearch"
+          >
+            <template #prefix>
+              <el-icon><Search /></el-icon>
             </template>
-            <span v-else>—</span>
+          </el-input>
+
+          <el-button v-if="filters.projectId || filters.keyword" text size="small" @click="handleReset">
+            重置
+          </el-button>
+        </div>
+
+        <span class="filter-bar__meta">共 {{ filteredList.length }} 个计划</span>
+      </div>
+
+      <el-table v-loading="listLoading" :data="pagedList" class="clean-table" row-class-name="plan-row">
+        <el-table-column label="计划" min-width="280" show-overflow-tooltip>
+          <template #default="{ row }">
+            <div class="plan-primary">
+              <span class="state-dot" :class="row.status === 'ACTIVE' ? 'state-dot--success' : 'state-dot--muted'" />
+              <div class="plan-cell">
+                <div class="plan-cell__name">{{ row.name }}</div>
+                <div class="plan-cell__desc">
+                  <span class="mono-id">#{{ row.id }}</span>
+                  <span class="sep">·</span>
+                  <span>{{ row.description || '暂无计划说明' }}</span>
+                </div>
+              </div>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" align="center" width="340" fixed="right">
-          <template #default="scope">
-            <div class="table-action-group">
-              <el-button v-if="canTest" size="small" @click="openCaseDialog(scope.row)">用例配置</el-button>
-              <el-button v-if="canTest" size="small" type="primary" @click="openRunDialog(scope.row)">执行计划</el-button>
-              <el-button v-if="canTest" size="small" @click="openScheduleDialog(scope.row)">定时执行</el-button>
-              <el-dropdown v-if="canTest" @command="(cmd) => handlePlanCommand(cmd, scope.row)">
-                <el-button size="small">
-                  更多
-                  <el-icon><ArrowDown /></el-icon>
-                </el-button>
+
+        <el-table-column label="所属项目" width="180" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="project-chip">{{ projectMap[row.project_id] || `#${row.project_id}` }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="状态" width="96">
+          <template #default="{ row }">
+            <span class="status-text" :class="row.status === 'ACTIVE' ? 'status-text--success' : 'status-text--muted'">
+              {{ row.status === 'ACTIVE' ? '启用' : row.status }}
+            </span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="定时调度" min-width="190">
+          <template #default="{ row }">
+            <div v-if="row.schedule_enabled" class="schedule-cell">
+              <code class="schedule-cron">{{ row.schedule_cron }}</code>
+              <span class="schedule-next">下次 {{ formatDateTime(row.next_run_at) }}</span>
+            </div>
+            <span v-else class="text-muted">未启用</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="" align="right" width="188" fixed="right">
+          <template #default="{ row }">
+            <div class="row-ops">
+              <button v-if="canTest" type="button" class="op-link op-link--primary" @click="openRunDialog(row)">执行</button>
+              <button v-if="canTest" type="button" class="op-link" @click="openCaseDialog(row)">用例配置</button>
+              <el-dropdown v-if="canTest" trigger="click" @command="(cmd) => handlePlanCommand(cmd, row)">
+                <button type="button" class="op-icon" aria-label="更多操作">
+                  <el-icon><MoreFilled /></el-icon>
+                </button>
                 <template #dropdown>
                   <el-dropdown-menu>
+                    <el-dropdown-item command="schedule">定时执行</el-dropdown-item>
                     <el-dropdown-item command="edit">编辑计划</el-dropdown-item>
-                    <el-dropdown-item v-if="canAdmin" command="delete" divided>删除</el-dropdown-item>
+                    <el-dropdown-item v-if="canAdmin" command="delete" divided>删除计划</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -96,19 +137,21 @@
       <div class="mobile-cards">
         <div v-for="item in pagedList" :key="item.id" class="mobile-card">
           <div class="mobile-card-title">{{ item.name }}</div>
-          <div class="mobile-card-meta">项目：{{ projectMap[item.project_id] || item.project_id }}</div>
-          <div class="mobile-card-meta">状态：{{ item.status }}</div>
+          <div class="mobile-card-meta">
+            {{ projectMap[item.project_id] || item.project_id }} · {{ item.status === 'ACTIVE' ? '启用' : item.status }}
+          </div>
           <div class="mobile-card-desc">{{ item.description || '-' }}</div>
           <div class="mobile-card-actions">
-            <el-button v-if="canTest" size="small" @click="openCaseDialog(item)">用例配置</el-button>
-            <el-button v-if="canTest" size="small" type="primary" @click="openRunDialog(item)">执行计划</el-button>
-            <el-button v-if="canTest" size="small" @click="handleEdit(item)">编辑</el-button>
-            <el-button v-if="canAdmin" size="small" type="danger" @click="handlePlanCommand('delete', item)">删除</el-button>
+            <el-button v-if="canTest" size="small" text type="primary" @click="openRunDialog(item)">执行</el-button>
+            <el-button v-if="canTest" size="small" text @click="openCaseDialog(item)">用例配置</el-button>
+            <el-button v-if="canTest" size="small" text @click="openScheduleDialog(item)">定时</el-button>
+            <el-button v-if="canTest" size="small" text @click="handleEdit(item)">编辑</el-button>
+            <el-button v-if="canAdmin" size="small" text type="danger" @click="handlePlanCommand('delete', item)">删除</el-button>
           </div>
         </div>
       </div>
 
-      <div class="table-pagination">
+      <div class="surface-footer">
         <el-pagination
           layout="total, sizes, prev, pager, next"
           :total="filteredList.length"
@@ -117,9 +160,9 @@
           v-model:current-page="page"
         />
       </div>
-    </el-card>
+    </section>
 
-    <el-dialog v-model="dialogVisible" :title="editingPlanId ? '编辑测试计划' : '新增测试计划'" width="620px">
+    <el-dialog v-model="dialogVisible" :title="editingPlanId ? '编辑测试计划' : '新增测试计划'" width="560px">
       <el-form ref="dataFormRef" :model="temp" :rules="rules" label-position="top">
         <el-form-item label="所属项目" prop="project_id">
           <el-select v-model="temp.project_id" :disabled="!!editingPlanId" placeholder="请选择项目" style="width: 100%">
@@ -139,142 +182,140 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="caseDialogVisible" title="计划用例配置" width="980px">
-      <template #default>
-        <div class="section-gap">
-          <el-alert
-            v-if="moveResult"
-            :title="moveResult.title"
-            :description="moveResult.description"
-            type="success"
-            :closable="true"
-            class="section-gap"
-            @close="moveResult = null"
-          >
-            <template #default>
-              <div class="move-result-actions">
-                <el-button size="small" type="primary" @click="openMovedPlanCaseDialog">打开新计划</el-button>
-              </div>
-            </template>
-          </el-alert>
-          <el-form :inline="true" class="query-form" label-position="top" :model="caseForm">
-            <el-form-item label="用例类型">
-              <el-select v-model="caseForm.case_type" placeholder="请选择" style="width: 160px">
-                <el-option label="API" value="API" />
-                <el-option label="UI" value="UI" />
-                <el-option label="PERF" value="PERF" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="选择用例">
-              <el-select v-model="caseForm.case_id" placeholder="请选择" style="width: 320px">
-                <el-option
-                  v-for="item in selectableCases"
-                  :key="item.id"
-                  :label="`${item.name} · ${item.review_status || 'DRAFT'} · ${item.version_no || '1.0.0'}`"
-                  :value="item.id"
-                />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="顺序">
-              <el-input-number v-model="caseForm.order_index" :min="1" />
-            </el-form-item>
-            <el-form-item v-if="canAdmin" label="评审覆盖">
-              <el-checkbox v-model="caseForm.allow_unapproved">允许加入未通过评审用例</el-checkbox>
-            </el-form-item>
-            <el-form-item label=" " class="query-actions">
-              <el-button v-if="canTest" type="primary" @click="addPlanCase">加入计划</el-button>
-            </el-form-item>
-          </el-form>
-          <div class="plan-case-toolbar">
-            <el-tag type="danger" effect="light">风险用例 {{ riskPlanCaseCount }}</el-tag>
-            <el-select v-model="caseFilter.riskMode" style="width: 180px">
-              <el-option label="全部用例" value="ALL" />
-              <el-option label="仅风险用例" value="RISK_ONLY" />
-              <el-option label="仅已通过评审" value="APPROVED_ONLY" />
-              <el-option label="仅看带风险加入" value="OVERRIDE_ONLY" />
+    <el-drawer v-model="caseDialogVisible" title="计划用例配置" size="920px">
+      <div class="section-gap">
+        <el-alert
+          v-if="moveResult"
+          :title="moveResult.title"
+          :description="moveResult.description"
+          type="success"
+          :closable="true"
+          class="section-gap"
+          @close="moveResult = null"
+        >
+          <template #default>
+            <div class="move-result-actions">
+              <el-button size="small" type="primary" @click="openMovedPlanCaseDialog">打开新计划</el-button>
+            </div>
+          </template>
+        </el-alert>
+
+        <el-form :inline="true" class="query-form" label-position="top" :model="caseForm">
+          <el-form-item label="用例类型">
+            <el-select v-model="caseForm.case_type" placeholder="请选择" style="width: 130px">
+              <el-option label="API" value="API" />
+              <el-option label="UI" value="UI" />
+              <el-option label="PERF" value="PERF" />
             </el-select>
-            <el-button
-              v-if="filteredPlanCases.length"
-              size="small"
-              @click="exportRiskCases"
-            >
-              导出当前清单
-            </el-button>
-            <el-button
-              v-if="canAdmin && filteredPlanCases.length && caseFilter.riskMode !== 'APPROVED_ONLY'"
-              size="small"
-              type="warning"
-              @click="moveFilteredPlanCases"
-            >
-              复制到待评审计划
-            </el-button>
-            <el-button
-              v-if="canAdmin && filteredPlanCases.length && caseFilter.riskMode !== 'APPROVED_ONLY'"
-              size="small"
-              type="danger"
-              @click="removeFilteredPlanCases"
-            >
-              批量移除当前结果
-            </el-button>
-          </div>
-          <div class="plan-case-hint">
-            默认仅允许加入评审状态为 `APPROVED` 的用例。
-            <span v-if="canAdmin">管理员勾选后可带风险加入，并记录添加人。</span>
-            <span>调整顺序请切换到“全部用例”视图。</span>
-          </div>
+          </el-form-item>
+          <el-form-item label="选择用例">
+            <el-select v-model="caseForm.case_id" filterable placeholder="请选择" style="width: 300px">
+              <el-option
+                v-for="item in selectableCases"
+                :key="item.id"
+                :label="`${item.name} · ${item.review_status || 'DRAFT'} · ${item.version_no || '1.0.0'}`"
+                :value="item.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="顺序">
+            <el-input-number v-model="caseForm.order_index" :min="1" style="width: 110px" />
+          </el-form-item>
+          <el-form-item v-if="canAdmin" label="评审覆盖">
+            <el-checkbox v-model="caseForm.allow_unapproved">允许未通过评审</el-checkbox>
+          </el-form-item>
+          <el-form-item label=" " class="query-actions">
+            <el-button v-if="canTest" type="primary" @click="addPlanCase">加入计划</el-button>
+          </el-form-item>
+        </el-form>
+
+        <div class="plan-case-toolbar">
+          <el-tag type="danger" effect="light">风险用例 {{ riskPlanCaseCount }}</el-tag>
+          <el-select v-model="caseFilter.riskMode" size="small" style="width: 160px">
+            <el-option label="全部用例" value="ALL" />
+            <el-option label="仅风险用例" value="RISK_ONLY" />
+            <el-option label="仅已通过评审" value="APPROVED_ONLY" />
+            <el-option label="仅看带风险加入" value="OVERRIDE_ONLY" />
+          </el-select>
+          <el-button v-if="filteredPlanCases.length" size="small" @click="exportRiskCases">导出当前清单</el-button>
+          <el-button
+            v-if="canAdmin && filteredPlanCases.length && caseFilter.riskMode !== 'APPROVED_ONLY'"
+            size="small"
+            type="warning"
+            plain
+            @click="moveFilteredPlanCases"
+          >
+            复制到待评审计划
+          </el-button>
+          <el-button
+            v-if="canAdmin && filteredPlanCases.length && caseFilter.riskMode !== 'APPROVED_ONLY'"
+            size="small"
+            type="danger"
+            plain
+            @click="removeFilteredPlanCases"
+          >
+            批量移除
+          </el-button>
         </div>
 
-        <el-table v-loading="caseLoading" :data="filteredPlanCases" border>
-          <el-table-column label="顺序" prop="order_index" width="80" align="center" />
-          <el-table-column label="类型" prop="case_type" width="90" align="center" />
-          <el-table-column label="用例名称" prop="case_name" min-width="220" show-overflow-tooltip />
-          <el-table-column label="快照版本" min-width="120" align="center">
-            <template #default="scope">
-              {{ scope.row.case_snapshot_json?.version_no || '-' }}
-            </template>
-          </el-table-column>
-          <el-table-column label="快照评审" min-width="140" align="center">
-            <template #default="scope">
-              <el-tag
+        <div class="plan-case-hint">
+          默认仅允许加入评审状态为 APPROVED 的用例。
+          <span v-if="canAdmin">管理员勾选后可带风险加入，并记录添加人。</span>
+          <span>调整顺序请切换到“全部用例”视图。</span>
+        </div>
+      </div>
+
+      <el-table v-loading="caseLoading" :data="filteredPlanCases" class="clean-table">
+        <el-table-column label="顺序" prop="order_index" width="64" align="center" />
+        <el-table-column label="类型" prop="case_type" width="76" align="center" />
+        <el-table-column label="用例名称" prop="case_name" min-width="200" show-overflow-tooltip />
+        <el-table-column label="版本" width="90" align="center">
+          <template #default="scope">
+            {{ scope.row.case_snapshot_json?.version_no || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="评审" width="110" align="center">
+          <template #default="scope">
+            <el-tag
+              size="small"
+              :type="scope.row.case_snapshot_json?.review_status === 'APPROVED' ? 'success' : 'warning'"
+            >
+              {{ scope.row.case_snapshot_json?.review_status || '-' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="风险备注" min-width="150" show-overflow-tooltip>
+          <template #default="scope">
+            {{ scope.row.case_snapshot_json?.review_status === 'APPROVED' ? '-' : (scope.row.case_snapshot_json?.review_note || '带风险加入计划') }}
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="150" align="right">
+          <template #default="scope">
+            <div class="row-ops">
+              <el-button
+                v-if="canTest"
+                link
                 size="small"
-                :type="scope.row.case_snapshot_json?.review_status === 'APPROVED' ? 'success' : 'warning'"
+                :disabled="caseFilter.riskMode !== 'ALL'"
+                @click="movePlanCase(scope.row, 'up')"
               >
-                {{ scope.row.case_snapshot_json?.review_status || '-' }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="加入人" prop="created_by" width="100" align="center" />
-          <el-table-column label="风险备注" min-width="180" show-overflow-tooltip>
-            <template #default="scope">
-              {{ scope.row.case_snapshot_json?.review_status === 'APPROVED' ? '-' : (scope.row.case_snapshot_json?.review_note || '带风险加入计划') }}
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="200" align="center">
-            <template #default="scope">
-              <div class="table-action-group">
-                <el-button
-                  v-if="canTest"
-                  size="small"
-                  :disabled="caseFilter.riskMode !== 'ALL'"
-                  @click="movePlanCase(scope.row, 'up')"
-                >
-                  上移
-                </el-button>
-                <el-button
-                  v-if="canTest"
-                  size="small"
-                  :disabled="caseFilter.riskMode !== 'ALL'"
-                  @click="movePlanCase(scope.row, 'down')"
-                >
-                  下移
-                </el-button>
-                <el-button v-if="canTest" size="small" type="danger" @click="removePlanCase(scope.row)">移除</el-button>
-              </div>
-            </template>
-          </el-table-column>
-        </el-table>
-      </template>
-    </el-dialog>
+                上移
+              </el-button>
+              <el-button
+                v-if="canTest"
+                link
+                size="small"
+                :disabled="caseFilter.riskMode !== 'ALL'"
+                @click="movePlanCase(scope.row, 'down')"
+              >
+                下移
+              </el-button>
+              <el-button v-if="canTest" link size="small" type="danger" @click="removePlanCase(scope.row)">移除</el-button>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-drawer>
 
     <el-dialog v-model="runDialogVisible" title="执行测试计划" width="520px">
       <el-form label-position="top">
@@ -293,7 +334,6 @@
           v-if="precheckResult.issues?.length"
           :data="precheckResult.issues.slice(0, 20)"
           size="small"
-          border
           class="precheck-table"
         >
           <el-table-column label="范围" prop="scope" min-width="140" show-overflow-tooltip />
@@ -352,7 +392,7 @@ import { computed, onMounted, nextTick, reactive, ref, watch } from 'vue'
 import { api } from '@/lib/api'
 import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown } from '@element-plus/icons-vue'
+import { MoreFilled, Search } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
 
@@ -435,6 +475,9 @@ const projectMap = computed(() => {
   })
   return map
 })
+
+const activePlanCount = computed(() => list.value.filter((item) => item.status === 'ACTIVE').length)
+const scheduledPlanCount = computed(() => list.value.filter((item) => item.schedule_enabled).length)
 
 const riskPlanCaseCount = computed(() =>
   planCases.value.filter((item) => item.case_snapshot_json?.review_status !== 'APPROVED').length
@@ -634,8 +677,8 @@ const persistPlanCaseOrder = async () => {
   await api.post(`/test-plans/${currentPlan.value.id}/cases/reorder`, {
     items: planCases.value.map((item, index) => ({
       id: item.id,
-      order_index: index + 1,
-    })),
+      order_index: index + 1
+    }))
   })
 }
 
@@ -658,7 +701,6 @@ const movePlanCase = async (row, direction) => {
   } catch (error) {
     ElMessage.error(error.message)
     await loadPlanCases(currentPlan.value.id)
-    return
   }
 }
 
@@ -719,7 +761,7 @@ const exportRiskCases = () => {
     ALL: '全部用例',
     RISK_ONLY: '仅风险用例',
     APPROVED_ONLY: '仅已通过评审',
-    OVERRIDE_ONLY: '仅看带风险加入',
+    OVERRIDE_ONLY: '仅看带风险加入'
   }
   const exportedAt = new Date().toLocaleString('zh-CN', { hour12: false })
   const rows = filteredPlanCases.value.map((item) => ({
@@ -735,7 +777,7 @@ const exportRiskCases = () => {
     version_no: item.case_snapshot_json?.version_no || '',
     review_status: item.case_snapshot_json?.review_status || '',
     review_note: item.case_snapshot_json?.review_note || '',
-    created_by: item.created_by || '',
+    created_by: item.created_by || ''
   }))
   const header = ['执行建议', '顺序', '类型', '用例名称', '快照版本', '快照评审', '风险备注', '加入人']
   const meta = [
@@ -743,7 +785,7 @@ const exportRiskCases = () => {
     ['计划', currentPlan.value.name || '-'],
     ['筛选模式', filterLabelMap[caseFilter.riskMode] || caseFilter.riskMode],
     ['导出时间', exportedAt],
-    [],
+    []
   ]
   const lines = [
     ...meta.map((items) => items.map((value) => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')),
@@ -757,11 +799,11 @@ const exportRiskCases = () => {
         row.version_no,
         row.review_status,
         row.review_note,
-        row.created_by,
+        row.created_by
       ]
         .map((value) => `"${String(value ?? '').replace(/"/g, '""')}"`)
         .join(',')
-    ),
+    )
   ]
   const blob = new Blob([`\uFEFF${lines.join('\n')}`], { type: 'text/csv;charset=utf-8;' })
   const link = document.createElement('a')
@@ -807,13 +849,13 @@ const moveFilteredPlanCases = async () => {
       { type: 'warning', confirmButtonText: '复制', cancelButtonText: '取消' }
     )
     const createdPlan = await api.post(`/test-plans/${currentPlan.value.id}/cases/copy-to-review`, {
-      item_ids: filteredPlanCases.value.map((item) => item.id),
+      item_ids: filteredPlanCases.value.map((item) => item.id)
     })
     moveResult.value = {
       title: `已复制到待评审计划：${createdPlan.name}`,
       description: `来源计划：${currentPlan.value.name}。原计划用例已保留；新计划中的条目使用当前用例版本快照。`,
       plan_id: createdPlan.id,
-      plan_name: createdPlan.name,
+      plan_name: createdPlan.name
     }
     ElMessage.success(`已复制 ${filteredPlanCases.value.length} 条用例到计划「${createdPlan.name}」，原计划内容已保留`)
     await getList()
@@ -843,6 +885,10 @@ const openMovedPlanCaseDialog = async () => {
 }
 
 const handlePlanCommand = async (command, row) => {
+  if (command === 'schedule') {
+    openScheduleDialog(row)
+    return
+  }
   if (command === 'edit') {
     handleEdit(row)
     return
@@ -865,7 +911,6 @@ const handlePlanCommand = async (command, row) => {
 
 const formatDateTime = (value) => {
   if (!value) return '-'
-  // 后端存 UTC naive，补上 Z 后按本地时区展示
   const date = new Date(value.endsWith('Z') ? value : `${value}Z`)
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleString('zh-CN', { hour12: false })
@@ -929,43 +974,279 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.plan-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr));
-  gap: var(--space-12);
+.plan-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.plan-hero__main {
-  border-radius: 20px;
-  background:
-    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.88)),
-    radial-gradient(circle at top right, rgba(99, 102, 241, 0.26), transparent 35%);
-  color: #f8fafc;
-}
-
-.plan-hero__kicker {
-  font-size: 12px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: rgba(226, 232, 240, 0.72);
-  margin-bottom: 10px;
-}
-
-.plan-hero__title {
-  font-size: 26px;
-  font-weight: 700;
-  line-height: 1.25;
-  margin-bottom: 10px;
-}
-
-.plan-hero__subtitle {
-  max-width: 760px;
-  color: rgba(226, 232, 240, 0.82);
-  line-height: 1.7;
-}
-
-.plan-hero__stat {
+.overview-strip {
   border-radius: 18px;
+  border: var(--apple-glass-border);
+  background: var(--apple-glass-bg);
+  backdrop-filter: blur(22px) saturate(180%);
+  box-shadow: var(--apple-glass-shadow);
+  overflow: hidden;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.overview-cell {
+  padding: 14px 18px;
+  border-right: 1px solid var(--color-border);
+}
+
+.overview-cell:last-child {
+  border-right: none;
+}
+
+.overview-cell__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #71717a;
+}
+
+.overview-cell__val {
+  display: block;
+  margin-top: 6px;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  color: #09090b;
+  font-variant-numeric: tabular-nums;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+}
+
+.dot--emerald { background: #16a34a; }
+.dot--sky { background: #0284c7; }
+
+.surface-card {
+  border-radius: 20px;
+  border: var(--apple-glass-border);
+  background: var(--apple-glass-bg);
+  backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: var(--apple-glass-shadow);
+  overflow: hidden;
+}
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.055);
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.filter-bar__controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.filter-item--project { width: 170px; }
+.filter-item--search { width: 220px; }
+
+.filter-bar__meta {
+  font-size: 12px;
+  color: #71717a;
+  font-variant-numeric: tabular-nums;
+}
+
+.clean-table {
+  --el-table-border-color: #f4f4f5;
+  --el-table-header-bg-color: #ffffff;
+  --el-table-row-hover-bg-color: #fafafa;
+}
+
+.clean-table :deep(th.el-table__cell) {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: #71717a;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.clean-table :deep(td.el-table__cell) {
+  padding: 11px 0;
+}
+
+.plan-primary {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.state-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.state-dot--success { background: #16a34a; }
+.state-dot--muted { background: #a1a1aa; }
+
+.mono-id {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #71717a;
+  font-variant-numeric: tabular-nums;
+}
+
+.sep {
+  margin: 0 5px;
+  color: #d4d4d8;
+}
+
+.plan-cell {
+  min-width: 0;
+  flex: 1;
+}
+
+.plan-cell__name {
+  font-size: 13px;
+  font-weight: 500;
+  color: #09090b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-cell__desc {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #71717a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-chip {
+  display: inline-block;
+  max-width: 100%;
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid #e4e4e7;
+  background: #fafafa;
+  color: #3f3f46;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-text {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.status-text--success { color: #15803d; }
+.status-text--muted { color: #71717a; }
+
+.schedule-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.schedule-cron {
+  display: inline-block;
+  width: fit-content;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid #e4e4e7;
+  background: #fafafa;
+  color: #18181b;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.schedule-next {
+  font-size: 11px;
+  color: #71717a;
+  font-variant-numeric: tabular-nums;
+}
+
+.text-muted {
+  font-size: 12px;
+  color: #a1a1aa;
+}
+
+.row-ops {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  white-space: nowrap;
+  opacity: 0.4;
+  transition: opacity 0.14s ease;
+}
+
+.clean-table :deep(.plan-row:hover) .row-ops {
+  opacity: 1;
+}
+
+.op-link {
+  border: none;
+  background: transparent;
+  padding: 3px 6px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #52525b;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.op-link:hover {
+  background: #f4f4f5;
+  color: #09090b;
+}
+
+.op-link--primary { color: #0071e3; }
+.op-link--primary:hover { background: rgba(0, 113, 227, 0.1); color: #0071e3; }
+
+.op-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #71717a;
+  cursor: pointer;
+}
+
+.op-icon:hover {
+  background: #f4f4f5;
+  color: #09090b;
+}
+
+.surface-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 14px;
+  border-top: 1px solid var(--color-border);
+  background: #fafafa;
 }
 
 .mobile-cards {
@@ -975,18 +1256,9 @@ onMounted(() => {
 .plan-case-toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 10px;
   margin-top: 8px;
-}
-
-.schedule-cron {
-  font-family: var(--font-mono, monospace);
-  font-size: 12px;
-}
-
-.schedule-next {
-  font-size: 12px;
-  color: var(--color-text-secondary);
 }
 
 .schedule-cron-row {
@@ -997,8 +1269,8 @@ onMounted(() => {
 
 .precheck-panel {
   margin-top: 12px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
   padding: 12px;
   background: #f8fafc;
 }
@@ -1035,34 +1307,35 @@ onMounted(() => {
 }
 
 @media (max-width: 960px) {
-  .plan-hero {
+  .overview-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .plan-hero__main {
-    grid-column: 1 / -1;
+  .filter-item--project,
+  .filter-item--search {
+    width: 100%;
   }
 
-  .el-table {
+  .clean-table {
     display: none;
   }
 
   .mobile-cards {
     display: grid;
-    gap: var(--space-12);
+    gap: 10px;
+    padding: 12px;
   }
 
   .mobile-card {
     background: #ffffff;
-    border: 1px solid var(--el-border-color);
-    border-radius: 12px;
-    padding: 14px 16px;
-    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 12px 14px;
   }
 
   .mobile-card-title {
     font-weight: 600;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
   }
 
   .mobile-card-meta {
@@ -1074,13 +1347,15 @@ onMounted(() => {
   .mobile-card-desc {
     font-size: 13px;
     color: var(--color-text);
-    margin-bottom: 10px;
+    margin-bottom: 8px;
   }
 
   .mobile-card-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: var(--space-8);
+    gap: 6px;
+    padding-top: 8px;
+    border-top: 1px solid #f1f5f9;
   }
 }
 </style>

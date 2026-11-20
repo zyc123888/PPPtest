@@ -16,22 +16,45 @@
     </div>
 
     <div class="header-right">
-      <el-button size="small" plain class="cmd-trigger-btn" @click="openCommandPalette">
-        快捷搜索 <kbd style="margin-left:6px;font-size:11px;opacity:.75">⌘K</kbd>
-      </el-button>
-      <el-tag size="small" type="info" class="version-tag">v{{ appVersion }}</el-tag>
-      <el-tag size="small" :type="backendOnline ? 'success' : 'danger'">
-        {{ backendOnline ? '服务在线' : '服务离线' }}
-      </el-tag>
+      <button
+        type="button"
+        class="glass-toggle-pill"
+        :class="{ 'is-liquid': isLiquidGlass }"
+        :title="isLiquidGlass ? '当前：液态玻璃（点击切回经典毛玻璃）' : '当前：经典毛玻璃（点击开启液态玻璃）'"
+        @click="toggleGlassMode"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path
+            d="M12 2.5C12 2.5 5.5 9.8 5.5 14.5a6.5 6.5 0 0 0 13 0C18.5 9.8 12 2.5 12 2.5z"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linejoin="round"
+          />
+          <path d="M9.5 14.5a2.5 2.5 0 0 0 2.5 2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        </svg>
+        <span>{{ isLiquidGlass ? '液态玻璃' : '经典毛玻璃' }}</span>
+      </button>
+
+      <button type="button" class="cmd-pill" @click="openCommandPalette">
+        <span class="cmd-pill__text">搜索或跳转…</span>
+        <kbd class="cmd-pill__kbd">⌘K</kbd>
+      </button>
+
+      <div class="status-indicator" :class="backendOnline ? 'is-online' : 'is-offline'" :title="`v${appVersion}`">
+        <span class="status-indicator__dot" />
+        <span>{{ backendOnline ? '在线' : '离线' }}</span>
+      </div>
+
       <el-dropdown trigger="click">
-        <el-button text>
-          <el-icon><User /></el-icon>
-          {{ displayName }}
-          <el-icon><CaretBottom /></el-icon>
-        </el-button>
+        <button type="button" class="user-trigger">
+          <span class="user-avatar">{{ displayName.slice(0, 1).toUpperCase() }}</span>
+          <span class="user-name">{{ displayName }}</span>
+          <el-icon class="user-caret"><CaretBottom /></el-icon>
+        </button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item @click="openPasswordDialog">修改密码</el-dropdown-item>
+            <el-dropdown-item disabled>版本 v{{ appVersion }}</el-dropdown-item>
+            <el-dropdown-item divided @click="openPasswordDialog">修改密码</el-dropdown-item>
             <el-dropdown-item @click="openTokenDialog">API Token</el-dropdown-item>
             <el-dropdown-item divided @click="handleLogout">退出登录</el-dropdown-item>
           </el-dropdown-menu>
@@ -132,6 +155,8 @@ const router = useRouter()
 const appStore = useAppStore()
 const authStore = useAuthStore()
 const sidebar = computed(() => appStore.sidebar)
+const isLiquidGlass = computed(() => appStore.glassMode === 'liquid')
+const toggleGlassMode = () => appStore.toggleGlassMode()
 const backendOnline = ref(true)
 
 const checkBackendAlive = async () => {
@@ -297,40 +322,171 @@ async function copyToken() {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: var(--space-8);
+  gap: 10px;
   flex-shrink: 0;
 }
 
+.glass-toggle-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+  color: #424245;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  transition: all 0.16s ease;
+}
+
+.glass-toggle-pill:hover {
+  background: #ffffff;
+  color: #1d1d1f;
+  border-color: rgba(0, 113, 227, 0.3);
+}
+
+.glass-toggle-pill.is-liquid {
+  border-color: rgba(0, 113, 227, 0.28);
+  background: linear-gradient(135deg, rgba(0, 113, 227, 0.14), rgba(94, 92, 230, 0.12));
+  color: #0071e3;
+  box-shadow:
+    0 2px 10px rgba(0, 113, 227, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+.cmd-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  height: 32px;
+  padding: 0 8px 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+  color: #6e6e73;
+  font-size: 12.5px;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+
+.cmd-pill:hover {
+  border-color: rgba(0, 113, 227, 0.3);
+  background: #ffffff;
+  color: #1d1d1f;
+}
+
+.cmd-pill__kbd {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  background: rgba(0, 0, 0, 0.03);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: #6e6e73;
+}
+
+.status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  height: 28px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #248a3d;
+  background: rgba(52, 199, 89, 0.12);
+}
+
+.status-indicator__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+}
+
+.status-indicator.is-online .status-indicator__dot {
+  background: #28cd41;
+}
+
+.status-indicator.is-offline {
+  background: rgba(255, 59, 48, 0.12);
+  color: #d70015;
+}
+
+.status-indicator.is-offline .status-indicator__dot {
+  background: #ff3b30;
+}
+
+.user-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 2px 10px 2px 3px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: rgba(255, 255, 255, 0.72);
+  color: #1d1d1f;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+
+.user-trigger:hover {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.14);
+}
+
+.user-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #3b9eff 0%, #0071e3 100%);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.user-name {
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-caret {
+  font-size: 12px;
+  color: #71717a;
+}
+
 .header-root :deep(.el-button.is-text) {
-  color: var(--color-text);
+  color: #52525b;
 }
 
 .header-root :deep(.el-button.is-text:hover) {
-  color: var(--color-primary);
-  background: rgba(99, 102, 241, 0.08);
+  color: #09090b;
+  background: #f4f4f5;
 }
 
 .header-root :deep(.el-breadcrumb__inner),
 .header-root :deep(.el-breadcrumb__separator) {
-  color: var(--color-text-secondary);
+  color: #71717a;
+  font-size: 13px;
 }
 
-.header-root :deep(.el-tag--success) {
-  border-radius: 999px;
-  background: rgba(16, 185, 129, 0.1);
-  border-color: rgba(16, 185, 129, 0.16);
-  color: #047857;
-}
-
-.header-root :deep(.el-dropdown .el-button) {
-  border-radius: 999px;
-  padding-inline: 10px;
-}
-
-.header-root :deep(.version-tag) {
-  border-radius: 999px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.3px;
+.header-root :deep(.el-breadcrumb__item:last-child .el-breadcrumb__inner) {
+  color: #09090b;
+  font-weight: 600;
 }
 
 .token-created-alert {

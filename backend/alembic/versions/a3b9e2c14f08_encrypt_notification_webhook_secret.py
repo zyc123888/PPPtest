@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import text
 
-from app.core.security import encrypt_secret, is_encryption_available
+from app.core.secrets import encrypt_secret, is_encryption_available
 
 
 revision: str = "a3b9e2c14f08"

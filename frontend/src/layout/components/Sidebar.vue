@@ -1,20 +1,16 @@
 <template>
   <div class="sidebar-root" :class="{ 'is-collapsed': collapsed }">
     <div class="sidebar-brand">
-        <div class="omnitest-logo">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="12" cy="12" r="10" stroke="url(#cyber-grad)" stroke-width="2.5" stroke-linecap="round" />
-            <path d="M8 12L11 15L16 9" stroke="#34D399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
-            <defs>
-              <linearGradient id="cyber-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stop-color="#6366F1" />
-                <stop offset="100%" stop-color="#A855F7" />
-              </linearGradient>
-            </defs>
-          </svg>
-        </div>
-        <span v-if="!collapsed" class="brand-text" data-testid="app-title">OmniTest</span>
+      <div class="omnitest-logo">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 12.5L9.8 17L19 7.5" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
       </div>
+      <div v-if="!collapsed" class="brand-meta">
+        <span class="brand-text" data-testid="app-title">OmniTest</span>
+        <span class="brand-tag">QA</span>
+      </div>
+    </div>
 
     <el-scrollbar class="sidebar-scroll">
       <el-menu
@@ -43,6 +39,13 @@
         </template>
       </el-menu>
     </el-scrollbar>
+
+    <div v-if="!collapsed" class="sidebar-footer">
+      <button type="button" class="sidebar-cmd" @click="openCommandPalette">
+        <span>快速跳转</span>
+        <kbd>⌘K</kbd>
+      </button>
+    </div>
   </div>
 </template>
 
@@ -116,6 +119,10 @@ const menuItems = computed(() => {
 const handleSelect = () => {
   emit('navigate')
 }
+
+const openCommandPalette = () => {
+  window.dispatchEvent(new CustomEvent('tp-open-command-palette'))
+}
 </script>
 
 <style scoped>
@@ -123,51 +130,98 @@ const handleSelect = () => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 255, 0.98)),
-    radial-gradient(circle at top, rgba(99, 102, 241, 0.08), transparent 28%);
+  background: transparent;
 }
 
 .sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 18px;
-  height: 64px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  gap: 10px;
+  padding: 0 16px;
+  height: var(--app-header-height);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
 }
+
 .omnitest-logo {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(168, 85, 247, 0.12));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #3b9eff 0%, #0071e3 100%);
+  box-shadow: 0 2px 8px rgba(0, 113, 227, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  flex-shrink: 0;
 }
+
+.brand-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .brand-text {
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 700;
-  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 40%, #a855f7 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  letter-spacing: -0.5px;
+  color: #1d1d1f;
+  letter-spacing: -0.025em;
+}
+
+.brand-tag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(0, 113, 227, 0.1);
+  color: #0071e3;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
 }
 
 .sidebar-scroll {
   flex: 1;
 }
 
+.sidebar-footer {
+  padding: 10px 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.sidebar-cmd {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  background: rgba(255, 255, 255, 0.72);
+  color: #6e6e73;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.14s ease, color 0.14s ease, background 0.14s ease;
+}
+
+.sidebar-cmd:hover {
+  border-color: rgba(0, 113, 227, 0.3);
+  background: #ffffff;
+  color: #1d1d1f;
+}
+
+.sidebar-cmd kbd {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  background: rgba(0, 0, 0, 0.03);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: #6e6e73;
+}
+
 .sidebar-root.is-collapsed .sidebar-brand {
   justify-content: center;
   padding: 0;
-}
-
-.sidebar-root.is-collapsed .omnitest-logo {
-  width: 34px;
-  height: 34px;
-  border-radius: 12px;
 }
 
 .sidebar-root.is-collapsed :deep(.el-menu) {
@@ -179,7 +233,7 @@ const handleSelect = () => {
 .sidebar-root.is-collapsed :deep(.el-menu-item),
 .sidebar-root.is-collapsed :deep(.el-sub-menu__title) {
   width: calc(100% - 12px);
-  margin: 6px auto;
+  margin: 4px auto;
   padding: 0 !important;
   box-sizing: border-box;
   justify-content: center;
@@ -188,64 +242,72 @@ const handleSelect = () => {
 .sidebar-root.is-collapsed :deep(.el-menu-item .el-icon),
 .sidebar-root.is-collapsed :deep(.el-sub-menu__title .el-icon) {
   margin: 0;
-  flex: 0 0 20px;
-}
-
-.sidebar-root.is-collapsed :deep(.el-menu-item.is-active) {
-  box-shadow: inset 0 0 0 1px rgba(79, 70, 229, 0.12);
+  flex: 0 0 18px;
 }
 
 .sidebar-root :deep(.el-menu) {
   border-right: none;
   background: transparent;
-  padding: 8px 8px 12px;
+  padding: 10px;
 }
 
 .sidebar-root :deep(.el-menu-item),
 .sidebar-root :deep(.el-sub-menu__title) {
-  border-radius: 12px;
-  margin: 4px 6px;
-  height: 44px;
-  line-height: 44px;
+  border-radius: 10px;
+  margin: 2px 0;
+  height: 36px;
+  line-height: 36px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: #424245;
+  padding-left: 11px !important;
+}
+
+.sidebar-root :deep(.el-sub-menu .el-menu-item) {
+  padding-left: 34px !important;
+  height: 33px;
+  line-height: 33px;
+  font-size: 13px;
 }
 
 .sidebar-root :deep(.el-menu-item.is-active) {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.14), rgba(168, 85, 247, 0.16));
-  color: #4338ca;
+  background: rgba(0, 113, 227, 0.11);
+  color: #0071e3;
   font-weight: 600;
 }
 
 .sidebar-root :deep(.el-menu-item:hover),
 .sidebar-root :deep(.el-sub-menu__title:hover) {
-  background: rgba(99, 102, 241, 0.08);
+  background: rgba(0, 0, 0, 0.045);
+  color: #1d1d1f;
 }
 
-.sidebar-root :deep(.el-sub-menu__title) {
-  color: var(--color-text);
-}
-
-.sidebar-root :deep(.el-menu-item) {
-  color: var(--color-text-secondary);
+.sidebar-root :deep(.el-menu-item.is-active:hover) {
+  background: rgba(0, 113, 227, 0.14);
+  color: #0071e3;
 }
 
 .sidebar-root :deep(.sidebar-menu-icon) {
   color: inherit;
-  width: 20px;
-  height: 20px;
-  flex: 0 0 20px;
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  margin-right: 9px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
-  line-height: 1;
+  font-size: 15px;
+  opacity: 0.82;
+}
+
+.sidebar-root :deep(.el-menu-item.is-active .sidebar-menu-icon) {
+  opacity: 1;
 }
 
 .sidebar-root :deep(.sidebar-menu-icon > svg) {
   display: block;
-  width: 18px;
-  height: 18px;
-  min-width: 18px;
-  min-height: 18px;
+  width: 15px;
+  height: 15px;
 }
 
 .sidebar-root :deep(.el-menu--collapse) {

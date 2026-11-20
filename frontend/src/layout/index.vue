@@ -4,7 +4,7 @@
     <el-aside class="layout-aside" :class="{ 'is-mobile': isMobile, 'is-open': sidebarOpened }" :width="asideWidth">
       <Sidebar @navigate="handleNavigate" />
     </el-aside>
-    <el-container>
+    <el-container class="layout-content-col">
       <el-header class="layout-header" :height="headerHeight">
         <Header />
       </el-header>
@@ -33,7 +33,6 @@ const asideWidth = computed(() =>
 const sidebarOpened = computed(() => appStore.sidebar.opened)
 const isMobile = computed(() => appStore.sidebar.mobile)
 
-// 区分「用户显式折叠」与「断点自动默认」：用户手动改过折叠状态后，resize 不再覆盖
 const userAdjustedSidebar = ref(false)
 let applyingSidebarDefault = false
 
@@ -82,18 +81,17 @@ onBeforeUnmount(() => {
 <style scoped>
 .layout-root {
   height: 100vh;
-  background:
-    radial-gradient(circle at 10% 0%, rgba(99, 102, 241, 0.06), transparent 26%),
-    radial-gradient(circle at 100% 0%, rgba(168, 85, 247, 0.05), transparent 22%),
-    linear-gradient(180deg, #eef2ff 0%, #f8fbff 32%, #eef2f7 100%);
+  background: transparent;
+  position: relative;
+  z-index: 1;
 }
 
 .layout-aside {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(249, 250, 255, 0.98));
-  border-right: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border-right: 1px solid rgba(0, 0, 0, 0.06);
   overflow: hidden;
-  box-shadow: 8px 0 28px rgba(15, 23, 42, 0.04);
 }
 
 .layout-aside.is-mobile {
@@ -114,15 +112,23 @@ onBeforeUnmount(() => {
 .mobile-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.4);
+  background: rgba(29, 29, 31, 0.32);
+  backdrop-filter: blur(4px);
   z-index: 1200;
 }
 
+.layout-content-col {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .layout-header {
-  background: rgba(255, 255, 255, 0.88);
-  backdrop-filter: blur(18px);
-  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
-  padding: 0 var(--space-20);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  padding: 0 var(--space-24);
   display: flex;
   align-items: center;
 }
