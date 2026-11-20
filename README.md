@@ -104,7 +104,7 @@ docker info
 ### 3. 启动项目
 
 ```bash
-cd OmniTest
+cd PPPtest
 docker-compose up -d --build
 docker-compose ps
 ```
