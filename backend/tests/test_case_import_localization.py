@@ -2,7 +2,7 @@
 
 import time
 
-import app.api as api_module
+from app.domain import cases as cases_domain
 
 
 def _project(client) -> int:
@@ -38,14 +38,14 @@ def test_import_failure_localizes_item_and_rolls_back(client, monkeypatch) -> No
         {"case_type": "UI", "project_id": project_id, "name": f"界面B_{time.time_ns()}"},
     ]
 
-    real_history = api_module._record_case_history
+    real_history = cases_domain._record_case_history
 
     def fake_history(db, *, case_type, case, action, changed_by, summary):
         if case_type == "UI":
             raise RuntimeError("boom：模拟第二条失败")
         return real_history(db, case_type=case_type, case=case, action=action, changed_by=changed_by, summary=summary)
 
-    monkeypatch.setattr(api_module, "_record_case_history", fake_history)
+    monkeypatch.setattr(cases_domain, "_record_case_history", fake_history)
 
     resp = client.post("/cases/import", json={"items": items})
     assert resp.status_code == 400, resp.text

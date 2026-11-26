@@ -58,8 +58,10 @@ USER root
 COPY --from=midscene-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --chown=app:app --from=midscene-runtime /app/midscene /app/midscene
 COPY --chown=app:app --from=midscene-runtime /ms-playwright /ms-playwright
-RUN python -m playwright install-deps chromium \
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::Retries "3";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/80-network-retries \
+    && python -m playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 USER app
 
-CMD ["sh", "-c", "umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=solo -Q execution"]
+CMD ["sh", "-c", "umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=prefork --concurrency=2 --max-tasks-per-child=20 -Q execution_browser,execution,celery -n execution@%h"]

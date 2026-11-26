@@ -216,8 +216,10 @@ import { useRouter } from 'vue-router'
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePermissions } from '@/lib/permissions'
+import { useContextStore } from '@/stores/context'
 
 const router = useRouter()
+const contextStore = useContextStore()
 
 const list = ref([])
 const workspaces = ref([])
@@ -259,12 +261,12 @@ const APPLE_GRADIENTS = [
 ]
 const iconBg = (idx) => APPLE_GRADIENTS[idx % APPLE_GRADIENTS.length]
 
-const getList = async () => {
+const getList = async ({ force = false } = {}) => {
   listLoading.value = true
   try {
     const [projectData, workspaceData] = await Promise.all([
-      api.get('/projects'),
-      api.get('/workspaces')
+      contextStore.fetchProjects({ force }),
+      contextStore.fetchWorkspaces({ force })
     ])
     list.value = projectData
     workspaces.value = workspaceData
@@ -379,7 +381,8 @@ const saveData = () => {
           ElMessage.success('创建成功')
         }
         dialogVisible.value = false
-        getList()
+        contextStore.invalidateProjects()
+        getList({ force: true })
       } catch (error) {
         ElMessage.error(error.message)
       }
@@ -395,8 +398,9 @@ const handleDelete = async (row) => {
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )
     await api.delete(`/projects/${row.id}`)
+    contextStore.invalidateProjects()
     ElMessage.success('删除成功')
-    getList()
+    getList({ force: true })
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     ElMessage.error(error.message)

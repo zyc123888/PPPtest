@@ -461,6 +461,7 @@ class UIBatchRunRead(ORMBaseModel):
     pass_count: int = 0
     fail_count: int = 0
     started_at: datetime | None = None
+    heartbeat_at: datetime | None = None
     finished_at: datetime | None = None
     duration_ms: int | None = None
     created_by: int | None = None
@@ -605,6 +606,7 @@ class TestRunRead(ORMBaseModel):
     request_payload: dict | None = None
     response_payload: dict | None = None
     started_at: datetime | None = None
+    heartbeat_at: datetime | None = None
     finished_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -1302,6 +1304,7 @@ class TestPlanRunRead(ORMBaseModel):
     pass_count: int
     fail_count: int
     started_at: datetime | None = None
+    heartbeat_at: datetime | None = None
     finished_at: datetime | None = None
     duration_ms: int | None = None
     report_json_path: str | None = None
@@ -1973,3 +1976,16 @@ class UnifiedCasePage(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class ClientErrorReport(BaseModel):
+    source: str = Field(default="vue", min_length=1, max_length=40)
+    message: str = Field(..., min_length=1, max_length=2000)
+    stack: str | None = Field(default=None, max_length=8000)
+    component: str | None = Field(default=None, max_length=200)
+    route: str | None = Field(default=None, max_length=512)
+    extra: dict | None = None
+
+
+class ClientErrorResult(BaseModel):
+    recorded: bool = True

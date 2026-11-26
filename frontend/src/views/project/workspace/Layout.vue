@@ -41,7 +41,7 @@
           :key="currentProject.id"
           :project="currentProject"
           :my-role="myRole"
-          @refresh-project="loadProjects"
+          @refresh-project="() => loadProjects(true)"
         />
       </router-view>
       <el-empty v-else description="加载项目中..." />
@@ -55,12 +55,14 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { api } from '@/lib/api'
+import { useContextStore } from '@/stores/context'
 import { WORKSPACE_TABS, PROJECT_ROLE_LABELS } from './constants'
 
 const route = useRoute()
 const router = useRouter()
+const contextStore = useContextStore()
 
-const projects = ref([])
+const projects = computed(() => contextStore.projects)
 const currentProjectId = ref(Number(route.params.id))
 const myRole = ref('')
 
@@ -69,9 +71,9 @@ const tabs = WORKSPACE_TABS
 const currentProject = computed(() => projects.value.find((p) => p.id === currentProjectId.value) || null)
 const roleLabel = computed(() => PROJECT_ROLE_LABELS[myRole.value] || myRole.value)
 
-async function loadProjects() {
+async function loadProjects(force = false) {
   try {
-    projects.value = await api.get('/projects')
+    await contextStore.fetchProjects({ force })
   } catch (error) {
     ElMessage.error(error.message)
   }

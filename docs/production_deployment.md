@@ -151,6 +151,12 @@ docker compose --env-file .env.production -f compose.production.yml restart
 
 数据库结构发生不兼容变更时，`deploy.sh` 已强制在部署前留一份全量 dump，但恢复仍需人工执行。
 
+### 恢复演练记录
+
+2026-11-26 在独立 MariaDB 11.4 临时容器中完成了一次格式与恢复流程演练：按部署脚本使用的 `mariadb-dump --single-transaction --routines --triggers` 导出并 gzip，执行 `gzip -t`，恢复到新建的空数据库，再比较源库与恢复库的行数、文本长度和 SHA-256 内容摘要，结果一致。演练只使用合成数据，未连接或改写生产数据库。
+
+这验证了 dump/gzip/导入流程；由于当前没有可访问的生产主机或生产备份副本，尚未验证真实生产备份，也没有覆盖 `reports_data`、`uploads_data` 卷的恢复。首次具备生产备份副本后，应先恢复到隔离数据库并核对表数、关键表行数及抽样校验和，再安排文件卷恢复演练。
+
 ## 七、HTTPS
 
 当前生产 Compose 默认直接开放 HTTP 端口，便于首次验证。正式对公网使用时，应在服务器或云负载均衡上配置 HTTPS，并把 `.env.production` 的 `PUBLIC_URL` 改成最终 HTTPS 地址。

@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import SessionLocal, engine, init_db
+from app.core.observability import record_case_execution
 from app.models import (
     APICase,
     AIModelConfig,
@@ -874,10 +875,11 @@ def create_plan_run_with_cases(
 
 
 def mark_run_started(db: Session, run: TestRun) -> bool:
+    now = utc_now_naive()
     result = db.execute(
         update(TestRun)
         .where(TestRun.id == run.id, TestRun.status == "PENDING")
-        .values(status="RUNNING", summary="任务执行中", started_at=utc_now_naive())
+        .values(status="RUNNING", summary="任务执行中", started_at=now, heartbeat_at=now)
     )
     db.commit()
     db.refresh(run)
@@ -923,9 +925,11 @@ def finalize_run(
     run.artifacts_json = artifacts_json
     run.step_results_json = step_results_json
     run.duration_ms = duration_ms
+    now = utc_now_naive()
     run.request_payload = request_payload
     run.response_payload = response_payload
-    run.finished_at = utc_now_naive()
+    run.heartbeat_at = now
+    run.finished_at = now
     _sync_execution_details(
         db,
         run,
@@ -936,6 +940,12 @@ def finalize_run(
     )
     db.commit()
     db.refresh(run)
+    record_case_execution(
+        case_type=run.case_type,
+        status=run.status,
+        error_type=run.error_type,
+        duration_seconds=(run.duration_ms / 1000.0 if run.duration_ms is not None else None),
+    )
 
 
 def format_json_payload(payload: str) -> str:

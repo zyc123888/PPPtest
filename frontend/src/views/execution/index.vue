@@ -445,10 +445,13 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api } from '@/lib/api'
-import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
+import { api, isAbortError } from '@/lib/api'
+import { getSavedProjectId } from '@/lib/projectContext'
+import { useContextStore } from '@/stores/context'
+import { useVisibilityPolling } from '@/composables/useVisibilityPolling'
+import { useExecutionStream } from '@/composables/useExecutionStream'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MoreFilled, Search } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -462,10 +465,11 @@ import {
   executionStatusText
 } from '@/lib/execution'
 
+const contextStore = useContextStore()
 const list = ref([])
 const total = ref(0)
 const stats = reactive({ running: 0, failed: 0, retryable: 0 })
-const projects = ref([])
+const projects = computed(() => contextStore.projects)
 const selectedRuns = ref([])
 const cancellableSelectedRuns = computed(() =>
   selectedRuns.value.filter((item) => ['PENDING', 'RUNNING'].includes(item.status))
@@ -488,8 +492,6 @@ const loadedArtifactRunId = ref(null)
 const { canTest } = usePermissions()
 const route = useRoute()
 const router = useRouter()
-let timer = null
-let runEventSource = null
 
 const filters = reactive({
   projectId: '',
@@ -597,7 +599,6 @@ const maxStepDuration = computed(() =>
 
 const getList = async (options = {}) => {
   const silent = options?.silent === true
-  if (silent && typeof document !== 'undefined' && document.visibilityState === 'hidden') return
   if (!silent) listLoading.value = true
   try {
     const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value) })
@@ -606,14 +607,15 @@ const getList = async (options = {}) => {
     if (filters.status) params.set('status', filters.status)
     if (filters.errorType) params.set('error_type', filters.errorType)
     if (filters.keyword.trim()) params.set('keyword', filters.keyword.trim())
-    const data = await api.get(`/executions/runs?${params.toString()}`)
+    const reqOpts = options?.signal ? { signal: options.signal } : {}
+    const data = await api.get(`/executions/runs?${params.toString()}`, reqOpts)
     list.value = data.items || []
     total.value = data.total || 0
     stats.running = data.running || 0
     stats.failed = data.failed || 0
     stats.retryable = data.retryable || 0
   } catch (error) {
-    if (!silent) ElMessage.error(error.message)
+    if (!silent && !isAbortError(error)) ElMessage.error(error.message)
   } finally {
     if (!silent) listLoading.value = false
   }
@@ -621,29 +623,35 @@ const getList = async (options = {}) => {
 
 const fetchProjects = async () => {
   try {
-    projects.value = await api.get('/projects')
+    const projectData = await contextStore.fetchProjects()
     if (!filters.projectId) {
-      const saved = getSavedProjectId(projects.value)
+      const saved = getSavedProjectId(projectData)
       if (saved) filters.projectId = saved
     }
   } catch {
-    projects.value = []
+    // keep shared store state intact on transient failure
   }
 }
 
 watch(() => filters.projectId, (val) => {
-  saveActiveProjectId(val)
+  contextStore.setActiveProjectId(val)
 })
 
 const hasActiveRuns = computed(() => list.value.some((item) => ['PENDING', 'RUNNING'].includes(item.status)))
 
+const listPoller = useVisibilityPolling(
+  async ({ signal }) => {
+    await getList({ silent: true, signal })
+  },
+  { intervalMs: 5000 }
+)
+
 const restartTimer = () => {
-  if (timer) {
-    clearInterval(timer)
-    timer = null
+  if (hasActiveRuns.value) {
+    listPoller.start({ immediate: false })
+  } else {
+    listPoller.stop()
   }
-  if (!hasActiveRuns.value) return
-  timer = setInterval(() => getList({ silent: true }), 5000)
 }
 
 watch([page, pageSize], () => {
@@ -672,43 +680,30 @@ const handleReset = () => {
   handleSearch()
 }
 
+const runStream = useExecutionStream({ fallbackIntervalMs: 2500 })
+
 const closeRunStream = () => {
-  if (runEventSource) {
-    runEventSource.close()
-    runEventSource = null
-  }
+  runStream.stop()
 }
 
 const subscribeRunStream = (runId) => {
-  closeRunStream()
-  if (typeof EventSource === 'undefined') return
-  const es = new EventSource(`/api/v1/executions/runs/${runId}/stream`, { withCredentials: true })
-  runEventSource = es
-  es.onmessage = async (event) => {
-    if (runEventSource !== es) return
-    try {
-      const payload = JSON.parse(event.data)
+  runStream.subscribe(runId, {
+    onMessage: (payload) => {
       if (currentRun.value && currentRun.value.id === payload.id) {
         currentRun.value = { ...currentRun.value, ...payload }
       }
-      if (['SUCCESS', 'FAILED', 'ERROR', 'TIMEOUT', 'CANCELLED'].includes(payload.status)) {
-        closeRunStream()
-        if (inspectorVisible.value && currentRun.value?.id === payload.id) {
-          const data = await api.get(`/executions/runs/${payload.id}`)
-          if (!inspectorVisible.value || currentRun.value?.id !== payload.id) return
-          currentRun.value = data
-          if (inspectorTab.value === 'logs') await fetchLogs(payload.id, true)
-          if (inspectorTab.value === 'artifacts') await fetchArtifacts(payload.id, true)
-        }
-        getList()
+    },
+    onTerminal: async (payload) => {
+      if (inspectorVisible.value && currentRun.value?.id === payload.id) {
+        const data = await api.get(`/executions/runs/${payload.id}`)
+        if (!inspectorVisible.value || currentRun.value?.id !== payload.id) return
+        currentRun.value = data
+        if (inspectorTab.value === 'logs') await fetchLogs(payload.id, true)
+        if (inspectorTab.value === 'artifacts') await fetchArtifacts(payload.id, true)
       }
-    } catch {
-      // ignore malformed SSE chunk
+      getList()
     }
-  }
-  es.onerror = () => {
-    if (runEventSource === es) closeRunStream()
-  }
+  })
 }
 
 let inspectorRequest = 0
@@ -961,11 +956,6 @@ watch(() => route.query.run_id, (runId) => {
 
 watch(hasActiveRuns, () => {
   restartTimer()
-})
-
-onBeforeUnmount(() => {
-  closeRunStream()
-  if (timer) clearInterval(timer)
 })
 </script>
 

@@ -16,6 +16,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.core.observability import record_ai_stage_duration
 from app.models import (
     CaseGenerationArtifact,
     CaseGenerationAttempt,
@@ -271,6 +272,15 @@ def update_job_stage(db, job, key: str, title: str, status: str, summary: str) -
     job.summary = summary
     sync_attempt_from_job(db, job)
     db.commit()
+    if status in {"success", "failed"}:
+        matched = next((item for item in reversed(stages) if item.get("key") == key), None)
+        if matched is not None:
+            record_ai_stage_duration(
+                mode=current_pipeline_version() or "v1",
+                stage=key,
+                status=status,
+                duration_seconds=max(int(matched.get("duration_ms") or 0), 0) / 1000.0,
+            )
 
 
 def mark_last_job_stage_failed(job, *, summary: str) -> None:
@@ -281,17 +291,24 @@ def mark_last_job_stage_failed(job, *, summary: str) -> None:
     now_iso = utc_now_naive().isoformat()
     current = stages[-1]
     started_at = current.get("started_at") or now_iso
+    duration_ms = _duration_ms_from_iso(started_at, now_iso)
     current.update(
         {
             "status": "failed",
             "summary": summary,
             "updated_at": now_iso,
-            "duration_ms": _duration_ms_from_iso(started_at, now_iso),
+            "duration_ms": duration_ms,
         }
     )
     progress["stages"] = stages
     job.progress_json = progress
     flag_modified(job, "progress_json")
+    record_ai_stage_duration(
+        mode=current_pipeline_version() or "v1",
+        stage=str(current.get("key") or "unknown"),
+        status="failed",
+        duration_seconds=max(int(duration_ms), 0) / 1000.0,
+    )
 
 
 def raise_if_job_cancelled(db, job_cls, job_id: int) -> None:

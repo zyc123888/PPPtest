@@ -171,13 +171,15 @@
 <script setup>
 import { computed, onMounted, nextTick, reactive, ref, watch } from 'vue'
 import { api } from '@/lib/api'
-import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
+import { getSavedProjectId } from '@/lib/projectContext'
+import { useContextStore } from '@/stores/context'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePermissions } from '@/lib/permissions'
 import { formatDateTime as formatTime } from '@/lib/formatTime'
 
+const contextStore = useContextStore()
 const list = ref([])
-const projects = ref([])
+const projects = computed(() => contextStore.projects)
 const listLoading = ref(true)
 const dialogVisible = ref(false)
 const isEditing = ref(false)
@@ -276,15 +278,14 @@ const hasAuth = (row) => {
   }
 }
 
-const getList = async () => {
+const getList = async ({ forceProjects = false } = {}) => {
   listLoading.value = true
   try {
     const [envData, projectData] = await Promise.all([
       api.get('/environments'),
-      api.get('/projects')
+      contextStore.fetchProjects({ force: forceProjects })
     ])
     list.value = envData
-    projects.value = projectData
     if (!filters.projectId) {
       const saved = getSavedProjectId(projectData)
       if (saved) filters.projectId = saved
@@ -297,7 +298,7 @@ const getList = async () => {
 }
 
 watch(() => filters.projectId, (val) => {
-  saveActiveProjectId(val)
+  contextStore.setActiveProjectId(val)
 })
 
 const filteredList = computed(() => {
@@ -417,6 +418,7 @@ const submitData = () => {
           await api.post('/environments', payload)
         }
         dialogVisible.value = false
+        contextStore.invalidateEnvironments(temp.project_id)
         ElMessage.success(isEditing.value ? '更新成功' : '创建成功')
         getList()
       } catch (error) {
@@ -434,6 +436,7 @@ const handleDelete = async (row) => {
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )
     await api.delete(`/environments/${row.id}`)
+    contextStore.invalidateEnvironments(row.project_id)
     ElMessage.success('删除成功')
     getList()
   } catch (error) {

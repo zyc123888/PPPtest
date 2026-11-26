@@ -115,7 +115,7 @@ if compose up -d --remove-orphans && healthcheck; then
 fi
 
 echo "Deployment health check failed for ${NEW_TAG}." >&2
-compose logs --tail=120 backend frontend worker case-worker >&2 || true
+compose logs --tail=120 backend frontend worker fast-worker perf-worker case-worker beat >&2 || true
 
 if [[ -n "${PREVIOUS_TAG}" && "${PREVIOUS_TAG}" != "${NEW_TAG}" ]]; then
   echo "Rolling back to ${PREVIOUS_TAG}." >&2

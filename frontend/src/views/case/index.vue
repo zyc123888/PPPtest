@@ -408,15 +408,17 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api } from '@/lib/api'
-import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
+import { getSavedProjectId } from '@/lib/projectContext'
+import { useContextStore } from '@/stores/context'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
 
 const router = useRouter()
+const contextStore = useContextStore()
 const { canAdmin, canTest } = usePermissions()
 const list = ref([])
 const folderTree = ref([])
-const projects = ref([])
+const projects = computed(() => contextStore.projects)
 const plans = ref([])
 const listLoading = ref(false)
 const page = ref(1)
@@ -613,12 +615,11 @@ const getList = async () => {
     const folderQuery = folderParams.toString() ? `?${folderParams.toString()}` : ''
     const [caseData, projectData, planData, folderData] = await Promise.all([
       api.get(`/cases${query}`),
-      api.get('/projects'),
+      contextStore.fetchProjects(),
       api.get('/test-plans'),
       api.get(`/cases/folders${folderQuery}`),
     ])
     list.value = caseData
-    projects.value = projectData
     if (!filters.projectId) {
       const saved = getSavedProjectId(projectData)
       if (saved) filters.projectId = saved
@@ -958,7 +959,7 @@ const goCreate = (type) => {
 }
 
 watch(() => filters.projectId, (val) => {
-  saveActiveProjectId(val)
+  contextStore.setActiveProjectId(val)
 })
 
 onMounted(() => {

@@ -29,7 +29,7 @@
         :uploaded-char-count="uploadedCharCount"
         :effective-model-preview="effectiveModelPreview"
         :model-config-dirty="modelConfigDirty"
-        @load-model-config="loadModelConfig"
+        @load-model-config="loadModelConfig(true)"
         @save-model-config="saveModelConfig"
         @file-change="handleFileChange"
       />
@@ -93,7 +93,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import GeneratorConfigForm from './components/GeneratorConfigForm.vue'
@@ -101,19 +101,19 @@ import JobDetailPanel from './components/JobDetailPanel.vue'
 import JobHistoryPanel from './components/JobHistoryPanel.vue'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
+import { useContextStore } from '@/stores/context'
+import { useModelConfigStore } from '@/stores/modelConfig'
+import { useVisibilityPolling } from '@/composables/useVisibilityPolling'
 import {
   cancelCaseGenerationV2Job,
   createCaseGenerationV2Job,
-  getCaseGenerationV2ModelConfig,
   getCaseGenerationV2MetricsComparison,
   getCaseGenerationV2Artifact,
   downloadCaseGenerationV2Artifact,
   getCaseGenerationV2JobDetail,
   listCaseGenerationV2Jobs,
-  listCaseGenerationV2ModelOptions,
   rerunCaseGenerationV2Job,
-  rerunCaseGenerationV2SourceShard,
-  saveCaseGenerationV2ModelConfig
+  rerunCaseGenerationV2SourceShard
 } from '@/lib/caseGenerationV2'
 import {
   nextPollingDelay,
@@ -132,7 +132,9 @@ import {
   resolveFinalDeliveryGatePassed
 } from './presentation'
 
-const projects = ref([])
+const contextStore = useContextStore()
+const modelConfigStore = useModelConfigStore()
+const projects = computed(() => contextStore.projects)
 const jobs = ref([])
 const allJobs = ref([])
 const currentJob = ref(null)
@@ -348,9 +350,7 @@ const activeExecutionProof = computed(() => {
   return parts.join(' · ')
 })
 
-let pollTimer = null
-let pollInFlight = false
-let pollDelay = 3000
+const pollDelay = ref(3000)
 let pollCycle = 0
 
 function extractRawUrl(value) {
@@ -440,43 +440,32 @@ function validateModelConfigInput() {
   return { model, apiKey, baseUrl }
 }
 
+const jobPoller = useVisibilityPolling(
+  async () => {
+    if (!currentJob.value || !['RUNNING', 'PENDING'].includes(currentJob.value.status)) {
+      jobPoller.stop()
+      return
+    }
+    try {
+      await refreshCurrentJob({ refreshList: pollCycle % 4 === 3 })
+      pollCycle += 1
+      pollDelay.value = nextPollingDelay(pollDelay.value)
+    } catch {
+      pollDelay.value = nextPollingDelay(pollDelay.value, true)
+    }
+  },
+  { intervalMs: pollDelay }
+)
+
 function stopPolling() {
-  if (pollTimer) {
-    clearTimeout(pollTimer)
-    pollTimer = null
-  }
+  jobPoller.stop()
 }
 
 function startPolling() {
   stopPolling()
-  pollDelay = 3000
+  pollDelay.value = 3000
   pollCycle = 0
-  scheduleNextPoll()
-}
-
-function scheduleNextPoll() {
-  stopPolling()
-  pollTimer = setTimeout(async () => {
-    if (pollInFlight) return
-    if (!currentJob.value) return
-    if (!['RUNNING', 'PENDING'].includes(currentJob.value.status)) {
-      stopPolling()
-      return
-    }
-    pollInFlight = true
-    try {
-      await refreshCurrentJob({ refreshList: pollCycle % 4 === 3 })
-      pollCycle += 1
-      pollDelay = nextPollingDelay(pollDelay)
-    } catch {
-      pollDelay = nextPollingDelay(pollDelay, true)
-    } finally {
-      pollInFlight = false
-      if (['RUNNING', 'PENDING'].includes(currentJob.value?.status)) {
-        scheduleNextPoll()
-      }
-    }
-  }, pollDelay)
+  jobPoller.start({ immediate: false })
 }
 
 watch(
@@ -535,10 +524,10 @@ watch(
 
 async function fetchProjects() {
   try {
-    projects.value = await api.get('/projects')
+    const projectData = await contextStore.fetchProjects()
     pageError.value = ''
-    if (!form.value.project_id && projects.value.length) {
-      form.value.project_id = projects.value[0].id
+    if (!form.value.project_id && projectData.length) {
+      form.value.project_id = projectData[0].id
     }
     await loadModelConfig()
   } catch (error) {
@@ -693,10 +682,10 @@ function currentWorkspaceId() {
   return project?.workspace_id || currentJob.value?.workspace_id || null
 }
 
-async function loadModelConfig() {
+async function loadModelConfig(force = false) {
   const workspaceId = currentWorkspaceId()
   if (!workspaceId) return
-  const config = await getCaseGenerationV2ModelConfig(workspaceId)
+  const config = await modelConfigStore.fetchWorkspaceConfig(workspaceId, { force: force === true })
   if (!config) {
     hasSavedModelConfig.value = false
     return
@@ -715,7 +704,7 @@ async function loadModelConfig() {
 }
 
 async function loadModelOptions() {
-  modelOptions.value = normalizeModelOptions(await listCaseGenerationV2ModelOptions())
+  modelOptions.value = normalizeModelOptions(await modelConfigStore.fetchModelOptions())
 }
 
 async function persistModelConfig() {
@@ -727,7 +716,7 @@ async function persistModelConfig() {
   if (!apiKey) {
     throw new Error('请填写模型 API Key')
   }
-  await saveCaseGenerationV2ModelConfig({
+  await modelConfigStore.saveWorkspaceConfig({
     workspace_id: workspaceId,
     provider: resolveModelProvider(model),
     name: modelConfig.value.name || '默认模型配置',
@@ -997,10 +986,6 @@ onMounted(async () => {
   await loadModelOptions()
   await fetchProjects()
   await fetchJobs()
-})
-
-onBeforeUnmount(() => {
-  stopPolling()
 })
 </script>
 

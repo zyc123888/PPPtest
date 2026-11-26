@@ -74,6 +74,10 @@ async function request(path, options = {}) {
     }
   }
 
+  if (options.signal) {
+    config.signal = options.signal
+  }
+
   if (options.body) {
     config.body = isForm ? options.body : JSON.stringify(options.body)
   }
@@ -116,29 +120,33 @@ async function request(path, options = {}) {
   return JSON.parse(text)
 }
 
+export function isAbortError(error) {
+  return error?.name === 'AbortError' || error?.code === 20
+}
+
 export const api = {
-  get(path) {
-    return request(path)
+  get(path, options = {}) {
+    return request(path, options)
   },
-  getBlob(path) {
-    return request(path, { responseType: 'blob' })
+  getBlob(path, options = {}) {
+    return request(path, { ...options, responseType: 'blob' })
   },
-  post(path, body) {
+  post(path, body, options = {}) {
     if (body === undefined) {
-      return request(path, { method: 'POST' })
+      return request(path, { ...options, method: 'POST' })
     }
-    return request(path, { method: 'POST', body })
+    return request(path, { ...options, method: 'POST', body })
   },
-  postForm(path, formData) {
-    return request(path, { method: 'POST', body: formData })
+  postForm(path, formData, options = {}) {
+    return request(path, { ...options, method: 'POST', body: formData })
   },
-  delete(path, body) {
+  delete(path, body, options = {}) {
     if (body === undefined) {
-      return request(path, { method: 'DELETE' })
+      return request(path, { ...options, method: 'DELETE' })
     }
-    return request(path, { method: 'DELETE', body })
+    return request(path, { ...options, method: 'DELETE', body })
   },
-  put(path, body) {
-    return request(path, { method: 'PUT', body })
+  put(path, body, options = {}) {
+    return request(path, { ...options, method: 'PUT', body })
   }
 }

@@ -225,6 +225,7 @@ import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePermissions } from '@/lib/permissions'
 import { useAuthStore } from '@/stores/auth'
+import { useContextStore } from '@/stores/context'
 import { useRoute } from 'vue-router'
 import { formatDateTime as formatTime } from '@/lib/formatTime'
 
@@ -297,11 +298,13 @@ const filteredMemberList = computed(() => {
   })
 })
 
-const getList = async () => {
+const contextStore = useContextStore()
+
+const getList = async ({ force = false } = {}) => {
   listLoading.value = true
   try {
     const [workspaceData, userData] = await Promise.all([
-      api.get('/workspaces'),
+      contextStore.fetchWorkspaces({ force }),
       canAdmin.value ? api.get('/users') : Promise.resolve([])
     ])
     list.value = workspaceData
@@ -362,8 +365,9 @@ const handleDelete = async (row) => {
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )
     await api.delete(`/workspaces/${row.id}`)
+    contextStore.invalidateWorkspaces()
     ElMessage.success('删除成功')
-    getList()
+    getList({ force: true })
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     ElMessage.error(error.message)
@@ -392,7 +396,8 @@ const saveData = () => {
           ElMessage.success('创建成功')
         }
         dialogVisible.value = false
-        getList()
+        contextStore.invalidateWorkspaces()
+        getList({ force: true })
       } catch (error) {
         ElMessage.error(error.message)
       }

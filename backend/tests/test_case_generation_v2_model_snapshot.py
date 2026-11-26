@@ -9,7 +9,7 @@ from app.models import AIModelConfig, CaseGenerationV2Attempt, CaseGenerationV2J
 
 
 def test_v2_attempt_snapshots_submitted_model_config(client, monkeypatch) -> None:
-    from app import api
+    from app.deps import auth as auth_deps
     from app.tasks.case_generation_v2_pipeline import engine
 
     # 使用独立用户 + 独立项目，避免与套件中其它用例遗留的「进行中生成任务」冲突。
@@ -42,7 +42,7 @@ def test_v2_attempt_snapshots_submitted_model_config(client, monkeypatch) -> Non
             )
             db.commit()
 
-        monkeypatch.setattr(api, "_dispatch_task_or_run_inline", lambda *args, **kwargs: ("queued-task", False))
+        monkeypatch.setattr(auth_deps, "_dispatch_task_or_run_inline", lambda *args, **kwargs: ("queued-task", False))
         created = isolated.post(
             "/case-generation-v2/jobs",
             json={

@@ -72,9 +72,10 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Back, Refresh, RefreshRight } from '@element-plus/icons-vue'
-import { api } from '@/lib/api'
+import { api, isAbortError } from '@/lib/api'
 import { executionStatusTag, executionStatusText } from '@/lib/execution'
 import { formatShortTime } from '@/lib/formatTime'
+import { useVisibilityPolling } from '@/composables/useVisibilityPolling'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -94,7 +95,6 @@ const listLoading = ref(false)
 const detail = ref(null)
 const detailLoading = ref(false)
 const rerunning = ref(false)
-let pollTimer = null
 
 const successRate = computed(() => {
   if (!detail.value || !detail.value.total_count) return '-'
@@ -106,22 +106,30 @@ const batchStatusText = (status) => ({ PENDING: '排队中', RUNNING: '执行中
 const batchStatusTag = (status) => ({ PENDING: 'info', RUNNING: 'warning', SUCCESS: 'success', FAILED: 'danger' }[status] || 'info')
 const formatDuration = (value) => (value === null || value === undefined ? '-' : value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(1)}s`)
 
-const stopPolling = () => { if (pollTimer) window.clearInterval(pollTimer); pollTimer = null }
-const startPolling = () => {
-  stopPolling()
-  pollTimer = window.setInterval(async () => {
-    if (!props.modelValue || !detail.value) return stopPolling()
+const batchPoller = useVisibilityPolling(
+  async ({ signal }) => {
+    if (!props.modelValue || !detail.value) {
+      batchPoller.stop()
+      return
+    }
     try {
-      const data = await api.get(`${batchBase.value}/${detail.value.id}`)
+      const data = await api.get(`${batchBase.value}/${detail.value.id}`, { signal })
       detail.value = data
       if (!['PENDING', 'RUNNING'].includes(data.status)) {
-        stopPolling()
+        batchPoller.stop()
         emit('finished', data)
       }
-    } catch {
-      stopPolling()
+    } catch (error) {
+      if (!isAbortError(error)) batchPoller.stop()
     }
-  }, 2000)
+  },
+  { intervalMs: 2000 }
+)
+
+const stopPolling = () => { batchPoller.stop() }
+const startPolling = () => {
+  batchPoller.stop()
+  batchPoller.start({ immediate: false })
 }
 
 const loadList = async () => {
@@ -189,7 +197,10 @@ const handleClosed = () => {
 watch(
   () => props.modelValue,
   async (visible) => {
-    if (!visible) return
+    if (!visible) {
+      stopPolling()
+      return
+    }
     if (props.batchId) await openDetail(props.batchId)
     else {
       detail.value = null

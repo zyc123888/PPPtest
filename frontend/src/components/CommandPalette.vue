@@ -46,16 +46,15 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { api } from '@/lib/api'
-import { saveActiveProjectId } from '@/lib/projectContext'
+import { useContextStore } from '@/stores/context'
 
 const router = useRouter()
+const contextStore = useContextStore()
 const visible = ref(false)
 const query = ref('')
 const activeIndex = ref(0)
 const inputRef = ref(null)
-const projects = ref([])
-let projectsLoaded = false
+const projects = computed(() => contextStore.projects)
 
 const staticCommands = [
   { id: 'nav-dashboard', group: '导航', tagType: 'primary', title: '质量监控大盘', hint: '/dashboard', action: () => router.push('/dashboard') },
@@ -84,7 +83,7 @@ const allCommands = computed(() => {
     title: `切换到项目：${p.name}`,
     hint: `进入工作台 #${p.id}`,
     action: () => {
-      saveActiveProjectId(p.id)
+      contextStore.setActiveProjectId(p.id)
       ElMessage.success(`已切换全局项目为「${p.name}」`)
       router.push(`/projects/${p.id}/overview`)
     }
@@ -108,10 +107,8 @@ watch(query, () => {
 })
 
 const loadProjectsOnce = async () => {
-  if (projectsLoaded) return
   try {
-    projects.value = (await api.get('/projects')) || []
-    projectsLoaded = true
+    await contextStore.fetchProjects()
   } catch {
     // ignore if unauthenticated
   }

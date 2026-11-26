@@ -1,22 +1,36 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import hashlib
 from pathlib import Path
+import tempfile
 
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import UniqueConstraint, create_engine, inspect
+from sqlalchemy import UniqueConstraint, create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 from app import models  # noqa: F401
 from app.core.config import settings
 from app.core.database import Base, engine as application_engine
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
+
 
 BASELINE_REVISION = "407d35f11aee"
-MIGRATION_ADDED_COLUMNS = {"case_generation_v2_artifacts": {"revision", "parent_attempt_id"}}
+MIGRATION_ADDED_COLUMNS = {
+    "case_generation_v2_artifacts": {"revision", "parent_attempt_id"},
+    "project_notification_settings": {"secret_encrypted"},
+    "test_plan_runs": {"heartbeat_at"},
+    "ui_batch_runs": {"heartbeat_at"},
+    "test_runs": {"heartbeat_at"},
+}
 ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 
 
@@ -25,6 +39,39 @@ def migration_config(database_url: str | None = None) -> Config:
     config.set_main_option("script_location", str(ALEMBIC_INI.parent / "alembic"))
     config.set_main_option("sqlalchemy.url", (database_url or settings.database_url).replace("%", "%%"))
     return config
+
+
+@contextmanager
+def _migration_lock(db_engine: Engine):
+    """Serialize concurrent migrations across multi-replica startup or local processes."""
+    dialect = db_engine.dialect.name
+    if dialect in {"mysql", "mariadb"}:
+        with db_engine.connect() as connection:
+            acquired = connection.scalar(text("SELECT GET_LOCK('omnitest_alembic_migrate', 60)"))
+            if acquired != 1:
+                raise RuntimeError("获取数据库迁移锁超时，可能有另一实例正在执行迁移")
+            try:
+                yield
+            finally:
+                try:
+                    connection.execute(text("SELECT RELEASE_LOCK('omnitest_alembic_migrate')"))
+                except Exception:
+                    pass
+        return
+
+    db_path = db_engine.url.database
+    if dialect == "sqlite" and db_path and db_path != ":memory:" and fcntl is not None:
+        lock_name = hashlib.sha256(str(db_path).encode("utf-8")).hexdigest()[:12]
+        lock_path = Path(tempfile.gettempdir()) / f"omnitest-alembic-{lock_name}.lock"
+        with open(lock_path, "w", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+
+    yield
 
 
 def _schema_gaps(db_engine: Engine) -> list[str]:
@@ -129,8 +176,9 @@ def upgrade_database(database_url: str | None = None) -> str:
     config = migration_config(url)
     db_engine = create_engine(url, pool_pre_ping=True, future=True)
     try:
-        _stamp_unversioned_database(config, db_engine)
-        command.upgrade(config, "head")
+        with _migration_lock(db_engine):
+            _stamp_unversioned_database(config, db_engine)
+            command.upgrade(config, "head")
         return ScriptDirectory.from_config(config).get_current_head()
     finally:
         db_engine.dispose()
@@ -154,15 +202,29 @@ def assert_database_current(db_engine: Engine = application_engine) -> str:
     return current
 
 
+def verify_schema_parity(database_url: str | None = None) -> None:
+    """Assert Alembic head matches SQLAlchemy models with no pending autogenerate diff."""
+    url = database_url or settings.database_url
+    db_engine = create_engine(url, pool_pre_ping=True, future=True)
+    try:
+        assert_database_current(db_engine)
+    finally:
+        db_engine.dispose()
+    command.check(migration_config(url))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="OmniTest database schema migrations")
-    parser.add_argument("action", choices=("upgrade", "check", "revision"))
+    parser.add_argument("action", choices=("upgrade", "check", "schema-check", "revision"))
     parser.add_argument("-m", "--message", help="Alembic revision message")
     args = parser.parse_args()
     if args.action == "upgrade":
         print(f"数据库迁移完成：{upgrade_database()}")
     elif args.action == "check":
         print(f"数据库迁移版本有效：{assert_database_current()}")
+    elif args.action == "schema-check":
+        verify_schema_parity()
+        print("数据库迁移与 ORM 模型结构完全一致")
     else:
         if not args.message:
             parser.error("revision 操作必须提供 --message")

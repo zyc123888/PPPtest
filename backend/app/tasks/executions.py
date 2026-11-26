@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import json
 import os
 import re
@@ -13,12 +14,14 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+import threading
 from threading import Thread
 from types import SimpleNamespace
-from typing import NoReturn
+from typing import Iterable, NoReturn
 from urllib.parse import urljoin, urlparse
 from xml.sax.saxutils import escape
 
+from celery import Task
 import httpx
 from fastapi.testclient import TestClient
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -29,6 +32,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
+from app.core.observability import get_logger, record_case_execution, run_id_var
 from app.models import (
     AIModelConfig,
     APICase,
@@ -2185,10 +2189,109 @@ def _write_plan_report_files(plan_run: TestPlanRun, runs: list[TestRun]) -> tupl
     return summary_path, junit_path
 
 
+logger = get_logger(__name__)
+
+
+def select_queue_for_case_types(case_types: Iterable[str | None]) -> str | None:
+    """Return dedicated queue when a plan/batch only contains API or PERF cases."""
+    normalized = {str(item).strip().upper() for item in case_types if item}
+    if normalized == {"API"}:
+        return "execution_fast"
+    if normalized == {"PERF"}:
+        return "execution_perf"
+    return None
+
+
+class ExecutionHeartbeat:
+    """Background heartbeat maintainer for active TestRun / TestPlanRun / UIBatchRun rows."""
+
+    def __init__(
+        self,
+        model_cls,
+        record_id: int,
+        *,
+        interval_seconds: int | None = None,
+        touch_on_enter: bool = False,
+    ) -> None:
+        self.model_cls = model_cls
+        self.record_id = record_id
+        self.interval_seconds = max(
+            1,
+            int(interval_seconds or settings.execution_heartbeat_seconds or 30),
+        )
+        self.touch_on_enter = touch_on_enter
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def beat_once(self) -> bool:
+        db = _open_db()
+        try:
+            result = db.execute(
+                update(self.model_cls)
+                .where(self.model_cls.id == self.record_id, self.model_cls.status == "RUNNING")
+                .values(heartbeat_at=utc_now_naive())
+            )
+            db.commit()
+            return (result.rowcount or 0) > 0
+        except Exception:
+            db.rollback()
+            logger.warning(
+                "execution_heartbeat_failed",
+                model=self.model_cls.__name__,
+                record_id=self.record_id,
+                exc_info=True,
+            )
+            return True
+        finally:
+            db.close()
+
+    def _run(self) -> None:
+        if self.touch_on_enter and not self.beat_once():
+            return
+        while not self._stop.wait(self.interval_seconds):
+            if not self.beat_once():
+                return
+
+    def __enter__(self):
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"exec-heartbeat-{self.model_cls.__name__}-{self.record_id}",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback_obj) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+
+def _active_execution_celery_task_ids() -> set[str] | None:
+    if os.getenv("PYTEST_CURRENT_TEST") or settings.backend_internal_url.startswith("http://testserver"):
+        return None
+    try:
+        inspector = celery_app.control.inspect(timeout=1.0)
+        groups = [inspector.active(), inspector.reserved(), inspector.scheduled()]
+        if all(group is None for group in groups):
+            return None
+        return {
+            str(item.get("id"))
+            for group in groups
+            for tasks in (group or {}).values()
+            for item in tasks or []
+            if isinstance(item, dict) and item.get("id")
+        }
+    except Exception:
+        logger.warning("celery_inspect_failed", exc_info=True)
+        return None
+
+
 @celery_app.task(name="app.tasks.run_api_case", soft_time_limit=300, time_limit=330)
 def run_api_case(run_id: int) -> dict:
     db = _open_db()
     started_at = time.perf_counter()
+    run_token = run_id_var.set(run_id)
     try:
         run = db.get(TestRun, run_id)
         if run is None:
@@ -2202,9 +2305,10 @@ def run_api_case(run_id: int) -> dict:
 
         if not mark_run_started(db, run):
             return {"status": run.status, "summary": run.summary}
-        result = _execute_case_with_retries(
-            db, run, lambda deadline: _execute_api_case(db, run, case, project, deadline=deadline)
-        )
+        with ExecutionHeartbeat(TestRun, run.id):
+            result = _execute_case_with_retries(
+                db, run, lambda deadline: _execute_api_case(db, run, case, project, deadline=deadline)
+            )
         status = result["status"]
         summary = result["summary"]
         finalize_run(
@@ -2240,6 +2344,7 @@ def run_api_case(run_id: int) -> dict:
             )
         return {"status": "ERROR", "summary": str(exc)}
     finally:
+        run_id_var.reset(run_token)
         db.close()
 
 
@@ -2248,6 +2353,7 @@ def run_ui_case(run_id: int) -> dict:
     db = _open_db()
     started_at = time.perf_counter()
     case = None
+    run_token = run_id_var.set(run_id)
     try:
         run = db.get(TestRun, run_id)
         if run is None:
@@ -2265,9 +2371,10 @@ def run_ui_case(run_id: int) -> dict:
             finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
             return {"status": "FAILED", "summary": "关联项目不存在"}
 
-        result = _execute_case_with_retries(
-            db, run, lambda deadline: _execute_ui_case_by_engine(db, run, case, project, deadline=deadline)
-        )
+        with ExecutionHeartbeat(TestRun, run.id):
+            result = _execute_case_with_retries(
+                db, run, lambda deadline: _execute_ui_case_by_engine(db, run, case, project, deadline=deadline)
+            )
         summary = result["summary"]
         finalize_run(
             db,
@@ -2303,6 +2410,7 @@ def run_ui_case(run_id: int) -> dict:
             )
         return {"status": "ERROR", "summary": str(exc)}
     finally:
+        run_id_var.reset(run_token)
         db.close()
 
 
@@ -2310,6 +2418,7 @@ def run_ui_case(run_id: int) -> dict:
 def run_performance_case(run_id: int) -> dict:
     db = _open_db()
     started_at = time.perf_counter()
+    run_token = run_id_var.set(run_id)
     try:
         run = db.get(TestRun, run_id)
         if run is None:
@@ -2327,9 +2436,10 @@ def run_performance_case(run_id: int) -> dict:
             finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
             return {"status": "FAILED", "summary": "关联项目不存在"}
 
-        result = _execute_case_with_retries(
-            db, run, lambda deadline: _execute_performance_case(db, run, case, project, deadline=deadline)
-        )
+        with ExecutionHeartbeat(TestRun, run.id):
+            result = _execute_case_with_retries(
+                db, run, lambda deadline: _execute_performance_case(db, run, case, project, deadline=deadline)
+            )
         finalize_run(
             db,
             run,
@@ -2364,12 +2474,14 @@ def run_performance_case(run_id: int) -> dict:
             )
         return {"status": "ERROR", "summary": str(exc)}
     finally:
+        run_id_var.reset(run_token)
         db.close()
 
 
 def _execute_single_plan_api_run(run_id: int) -> bool:
     worker_db = _open_db()
     case_started_at = time.perf_counter()
+    run_token = run_id_var.set(run_id)
     try:
         run = worker_db.get(TestRun, run_id)
         if run is None or run.status == "CANCELLED":
@@ -2381,9 +2493,10 @@ def _execute_single_plan_api_run(run_id: int) -> bool:
             return False
         if not mark_run_started(worker_db, run):
             return False
-        result = _execute_case_with_retries(
-            worker_db, run, lambda deadline: _execute_api_case(worker_db, run, case, project, deadline=deadline)
-        )
+        with ExecutionHeartbeat(TestRun, run.id):
+            result = _execute_case_with_retries(
+                worker_db, run, lambda deadline: _execute_api_case(worker_db, run, case, project, deadline=deadline)
+            )
         duration_ms = int((time.perf_counter() - case_started_at) * 1000)
         finalize_run(
             worker_db,
@@ -2419,6 +2532,7 @@ def _execute_single_plan_api_run(run_id: int) -> bool:
             )
         return False
     finally:
+        run_id_var.reset(run_token)
         worker_db.close()
 
 
@@ -2432,11 +2546,14 @@ def run_test_plan(plan_run_id: int, concurrency: int = 1) -> dict:
             return {"status": "FAILED", "summary": f"测试计划执行 {plan_run_id} 不存在"}
 
         effective_concurrency = max(1, min(int(concurrency or 1), 5))
+        now = utc_now_naive()
         claim = db.execute(
             update(TestPlanRun)
             .where(TestPlanRun.id == plan_run_id, TestPlanRun.status == "PENDING")
             .values(
-                status="RUNNING", started_at=utc_now_naive(),
+                status="RUNNING",
+                started_at=now,
+                heartbeat_at=now,
                 summary=f"测试计划执行中（并发度 {effective_concurrency}）" if effective_concurrency > 1 else "测试计划执行中",
             )
         )
@@ -2451,114 +2568,126 @@ def run_test_plan(plan_run_id: int, concurrency: int = 1) -> dict:
         pass_count = 0
         fail_count = 0
 
-        if effective_concurrency > 1:
-            api_run_ids = [r.id for r in runs if r.case_type == "API"]
-            runs = [r for r in runs if r.case_type != "API"]
-            db.commit()
-            if api_run_ids:
-                with ThreadPoolExecutor(max_workers=effective_concurrency) as pool:
-                    futures = [pool.submit(_execute_single_plan_api_run, rid) for rid in api_run_ids]
-                    for fut in as_completed(futures):
-                        if fut.result():
-                            pass_count += 1
-                        else:
+        with ExecutionHeartbeat(TestPlanRun, plan_run.id):
+            if effective_concurrency > 1:
+                api_run_ids = [r.id for r in runs if r.case_type == "API"]
+                runs = [r for r in runs if r.case_type != "API"]
+                db.commit()
+                if api_run_ids:
+                    with ThreadPoolExecutor(max_workers=effective_concurrency) as pool:
+                        futures = [
+                            pool.submit(contextvars.copy_context().run, _execute_single_plan_api_run, rid)
+                            for rid in api_run_ids
+                        ]
+                        for fut in as_completed(futures):
+                            if fut.result():
+                                pass_count += 1
+                            else:
+                                fail_count += 1
+
+            for run in runs:
+                case_started_at = time.perf_counter()
+                child_token = run_id_var.set(run.id)
+                try:
+                    db.refresh(run)
+                    if run.status == "CANCELLED":
+                        fail_count += 1
+                        continue
+                    project = db.get(Project, run.project_id)
+                    if project is None:
+                        finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
+                        fail_count += 1
+                        continue
+
+                    if run.case_type == "API":
+                        case = db.get(APICase, run.case_id)
+                        if case is None:
+                            finalize_run(db, run, status="FAILED", summary="接口用例不存在", error_type="SYSTEM")
                             fail_count += 1
-
-        for run in runs:
-            case_started_at = time.perf_counter()
-            try:
-                db.refresh(run)
-                if run.status == "CANCELLED":
-                    fail_count += 1
-                    continue
-                project = db.get(Project, run.project_id)
-                if project is None:
-                    finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
-                    fail_count += 1
-                    continue
-
-                if run.case_type == "API":
-                    case = db.get(APICase, run.case_id)
-                    if case is None:
-                        finalize_run(db, run, status="FAILED", summary="接口用例不存在", error_type="SYSTEM")
+                            continue
+                        if not mark_run_started(db, run):
+                            fail_count += 1
+                            continue
+                        with ExecutionHeartbeat(TestRun, run.id):
+                            result = _execute_case_with_retries(
+                                db, run, lambda deadline: _execute_api_case(db, run, case, project, deadline=deadline)
+                            )
+                    elif run.case_type == "UI":
+                        case = db.get(UICase, run.case_id)
+                        if case is None:
+                            finalize_run(db, run, status="FAILED", summary="UI 用例不存在", error_type="SYSTEM")
+                            fail_count += 1
+                            continue
+                        if not mark_run_started(db, run):
+                            fail_count += 1
+                            continue
+                        with ExecutionHeartbeat(TestRun, run.id):
+                            result = _execute_case_with_retries(
+                                db, run, lambda deadline: _execute_ui_case_by_engine(db, run, case, project, deadline=deadline)
+                            )
+                    elif run.case_type == "PERF":
+                        case = db.get(PerformanceCase, run.case_id)
+                        if case is None:
+                            finalize_run(db, run, status="FAILED", summary="性能用例不存在", error_type="SYSTEM")
+                            fail_count += 1
+                            continue
+                        if not mark_run_started(db, run):
+                            fail_count += 1
+                            continue
+                        with ExecutionHeartbeat(TestRun, run.id):
+                            result = _execute_case_with_retries(
+                                db, run, lambda deadline: _execute_performance_case(db, run, case, project, deadline=deadline)
+                            )
+                    else:
+                        finalize_run(db, run, status="FAILED", summary="未知用例类型", error_type="SYSTEM")
                         fail_count += 1
                         continue
-                    if not mark_run_started(db, run):
-                        fail_count += 1
-                        continue
-                    result = _execute_case_with_retries(
-                        db, run, lambda deadline: _execute_api_case(db, run, case, project, deadline=deadline)
+
+                    finalize_run(
+                        db,
+                        run,
+                        status=result["status"],
+                        summary=result["summary"],
+                        error_type=result.get("error_type"),
+                        exit_code=result.get("exit_code"),
+                        stdout_text=result.get("stdout_text"),
+                        stderr_text=result.get("stderr_text"),
+                        artifacts_json=result.get("artifacts_json"),
+                        step_results_json=result.get("step_results_json"),
+                        duration_ms=int((time.perf_counter() - case_started_at) * 1000),
+                        request_payload=result["request_payload"],
+                        response_payload=result["response_payload"],
                     )
-                elif run.case_type == "UI":
-                    case = db.get(UICase, run.case_id)
-                    if case is None:
-                        finalize_run(db, run, status="FAILED", summary="UI 用例不存在", error_type="SYSTEM")
+                    if result["status"] == "SUCCESS":
+                        pass_count += 1
+                    else:
                         fail_count += 1
-                        continue
-                    if not mark_run_started(db, run):
-                        fail_count += 1
-                        continue
-                    result = _execute_case_with_retries(
-                        db, run, lambda deadline: _execute_ui_case_by_engine(db, run, case, project, deadline=deadline)
+                except Exception as exc:
+                    artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
+                    finalize_run(
+                        db,
+                        run,
+                        status="ERROR",
+                        summary=f"执行异常: {exc}",
+                        error_type="SYSTEM",
+                        stderr_text=traceback.format_exc(),
+                        artifacts_json=artifacts,
+                        step_results_json=step_results,
+                        duration_ms=int((time.perf_counter() - case_started_at) * 1000),
                     )
-                elif run.case_type == "PERF":
-                    case = db.get(PerformanceCase, run.case_id)
-                    if case is None:
-                        finalize_run(db, run, status="FAILED", summary="性能用例不存在", error_type="SYSTEM")
-                        fail_count += 1
-                        continue
-                    if not mark_run_started(db, run):
-                        fail_count += 1
-                        continue
-                    result = _execute_case_with_retries(
-                        db, run, lambda deadline: _execute_performance_case(db, run, case, project, deadline=deadline)
-                    )
-                else:
-                    finalize_run(db, run, status="FAILED", summary="未知用例类型", error_type="SYSTEM")
                     fail_count += 1
-                    continue
+                finally:
+                    run_id_var.reset(child_token)
 
-                finalize_run(
-                    db,
-                    run,
-                    status=result["status"],
-                    summary=result["summary"],
-                    error_type=result.get("error_type"),
-                    exit_code=result.get("exit_code"),
-                    stdout_text=result.get("stdout_text"),
-                    stderr_text=result.get("stderr_text"),
-                    artifacts_json=result.get("artifacts_json"),
-                    step_results_json=result.get("step_results_json"),
-                    duration_ms=int((time.perf_counter() - case_started_at) * 1000),
-                    request_payload=result["request_payload"],
-                    response_payload=result["response_payload"],
-                )
-                if result["status"] == "SUCCESS":
-                    pass_count += 1
-                else:
-                    fail_count += 1
-            except Exception as exc:
-                artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
-                finalize_run(
-                    db,
-                    run,
-                    status="ERROR",
-                    summary=f"执行异常: {exc}",
-                    error_type="SYSTEM",
-                    stderr_text=traceback.format_exc(),
-                    artifacts_json=artifacts,
-                    step_results_json=step_results,
-                    duration_ms=int((time.perf_counter() - case_started_at) * 1000),
-                )
-                fail_count += 1
-
+        finished_now = utc_now_naive()
         plan_status = "SUCCESS" if fail_count == 0 else "FAILED"
         plan_run.status = plan_status
         plan_run.summary = f"总计 {total}，成功 {pass_count}，失败 {fail_count}"
         plan_run.total_count = total
         plan_run.pass_count = pass_count
         plan_run.fail_count = fail_count
-        plan_run.finished_at = utc_now_naive()
+        plan_run.heartbeat_at = finished_now
+        plan_run.finished_at = finished_now
         plan_run.duration_ms = int((time.perf_counter() - started_at) * 1000)
         refreshed_runs = (
             db.query(TestRun).filter(TestRun.plan_run_id == plan_run.id).order_by(TestRun.id.asc()).all()
@@ -2575,14 +2704,134 @@ def run_test_plan(plan_run_id: int, concurrency: int = 1) -> dict:
     except Exception as exc:
         plan_run = db.get(TestPlanRun, plan_run_id)
         if plan_run is not None:
+            finished_now = utc_now_naive()
             plan_run.status = "FAILED"
             plan_run.error_type = "SYSTEM"
             plan_run.summary = f"测试计划执行异常: {exc}"
-            plan_run.finished_at = utc_now_naive()
+            plan_run.heartbeat_at = finished_now
+            plan_run.finished_at = finished_now
             plan_run.duration_ms = int((time.perf_counter() - started_at) * 1000)
             db.commit()
             send_plan_run_notification(db, plan_run.id)
         return {"status": "FAILED", "summary": str(exc)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.reconcile_interrupted_executions", soft_time_limit=120, time_limit=150)
+def reconcile_interrupted_executions() -> dict:
+    """Close runs whose worker heartbeat expired or whose execution exceeded hard limits."""
+    db = _open_db()
+    now = utc_now_naive()
+    stale_seconds = max(int(settings.execution_heartbeat_stale_seconds or 120), 30)
+    heartbeat_cutoff = now - timedelta(seconds=stale_seconds)
+    parent_hard_cutoff = now - timedelta(seconds=1860 + 300)
+    single_hard_cutoff = now - timedelta(seconds=660 + 300)
+    hb_summary = "执行心跳超时，工作进程可能已意外中断，请检查结果后重试"
+    hard_summary = "执行进程中断或超过任务时限，请检查结果后手动重试"
+    active_task_ids = _active_execution_celery_task_ids()
+    counts = {"plans": 0, "batches": 0, "runs": 0}
+    try:
+        for model, foreign_key, label in (
+            (TestPlanRun, TestRun.plan_run_id, "plans"),
+            (UIBatchRun, TestRun.batch_run_id, "batches"),
+        ):
+            parents = db.scalars(
+                select(model).where(model.status == "RUNNING").order_by(model.id).with_for_update()
+            ).all()
+            for parent in parents:
+                hb_stale = parent.heartbeat_at is not None and parent.heartbeat_at < heartbeat_cutoff
+                hard_stale = parent.started_at is not None and parent.started_at < parent_hard_cutoff
+                if not (hb_stale or hard_stale):
+                    continue
+                children = db.scalars(select(TestRun).where(foreign_key == parent.id).with_for_update()).all()
+                if not hard_stale:
+                    # Parent runs do not persist their Celery task id. Only use
+                    # heartbeat recovery when the inspector is reachable, no
+                    # task is active, and every active child has an id we can
+                    # prove is absent. Otherwise wait for the hard time limit.
+                    if active_task_ids is None or active_task_ids or any(
+                        child.status in {"PENDING", "RUNNING"} and not child.task_id
+                        for child in children
+                    ):
+                        continue
+                    if any(
+                        child.status == "RUNNING" and child.task_id in active_task_ids
+                        for child in children
+                    ):
+                        continue
+                reason = hb_summary if (hb_stale and not hard_stale) else hard_summary
+                for child in children:
+                    if child.status in {"PENDING", "RUNNING"}:
+                        was_running = child.status == "RUNNING"
+                        child.status = "ERROR"
+                        child.error_type = "SYSTEM"
+                        child.summary = reason
+                        child.finished_at = now
+                        counts["runs"] += 1
+                        if was_running:
+                            record_case_execution(
+                                case_type=child.case_type,
+                                status="ERROR",
+                                error_type="SYSTEM",
+                                duration_seconds=(
+                                    max(0.0, (now - child.started_at).total_seconds())
+                                    if child.started_at
+                                    else None
+                                ),
+                            )
+                parent.status = "FAILED"
+                parent.error_type = "SYSTEM"
+                parent.summary = reason
+                parent.finished_at = now
+                parent.total_count = len(children)
+                parent.pass_count = sum(child.status == "SUCCESS" for child in children)
+                parent.fail_count = len(children) - parent.pass_count
+                counts[label] += 1
+            db.flush()
+
+        standalone_runs = db.scalars(
+            select(TestRun)
+            .where(
+                TestRun.status == "RUNNING",
+                TestRun.plan_run_id.is_(None),
+                TestRun.batch_run_id.is_(None),
+            )
+            .order_by(TestRun.id)
+            .with_for_update()
+        ).all()
+        for run in standalone_runs:
+            hb_stale = run.heartbeat_at is not None and run.heartbeat_at < heartbeat_cutoff
+            hard_stale = run.started_at is not None and run.started_at < single_hard_cutoff
+            if not (hb_stale or hard_stale):
+                continue
+            if not hard_stale and (
+                active_task_ids is None or not run.task_id or run.task_id in active_task_ids
+            ):
+                continue
+            reason = hb_summary if (hb_stale and not hard_stale) else hard_summary
+            run.status = "ERROR"
+            run.error_type = "SYSTEM"
+            run.summary = reason
+            run.finished_at = now
+            counts["runs"] += 1
+            record_case_execution(
+                case_type=run.case_type,
+                status="ERROR",
+                error_type="SYSTEM",
+                duration_seconds=(
+                    max(0.0, (now - run.started_at).total_seconds())
+                    if run.started_at
+                    else None
+                ),
+            )
+        db.commit()
+        if counts["plans"] or counts["batches"] or counts["runs"]:
+            logger.warning("reconciled_interrupted_executions", **counts)
+        return counts
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
@@ -2655,7 +2904,14 @@ def scan_scheduled_plans() -> dict:
             plan.next_run_at = next_run_at
             db.commit()
             try:
-                run_test_plan.delay(plan_run.id)
+                child_types = db.scalars(
+                    select(TestRun.case_type).where(TestRun.plan_run_id == plan_run.id)
+                ).all()
+                target_queue = select_queue_for_case_types(child_types)
+                if target_queue and getattr(run_test_plan.delay, "__func__", None) is Task.delay:
+                    run_test_plan.apply_async(args=(plan_run.id,), queue=target_queue)
+                else:
+                    run_test_plan.delay(plan_run.id)
             except Exception:
                 # Only fail executions that the worker has not already claimed.
                 finished_at = utc_now_naive()
@@ -2739,10 +2995,11 @@ def run_ui_batch(batch_run_id: int) -> dict:
         if batch_run is None:
             return {"status": "FAILED", "summary": f"批量执行 {batch_run_id} 不存在"}
 
+        now = utc_now_naive()
         claim = db.execute(
             update(UIBatchRun)
             .where(UIBatchRun.id == batch_run_id, UIBatchRun.status == "PENDING")
-            .values(status="RUNNING", summary="批量执行中", started_at=utc_now_naive())
+            .values(status="RUNNING", summary="批量执行中", started_at=now, heartbeat_at=now)
         )
         db.commit()
         db.refresh(batch_run)
@@ -2754,87 +3011,94 @@ def run_ui_batch(batch_run_id: int) -> dict:
         pass_count = 0
         fail_count = 0
 
-        for run in runs:
-            case_started_at = time.perf_counter()
-            try:
-                db.refresh(run)
-                if run.status == "CANCELLED":
-                    fail_count += 1
-                    continue
-                project = db.get(Project, run.project_id)
-                if project is None:
-                    finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
-                    fail_count += 1
-                    continue
+        with ExecutionHeartbeat(UIBatchRun, batch_run.id):
+            for run in runs:
+                case_started_at = time.perf_counter()
+                child_token = run_id_var.set(run.id)
+                try:
+                    db.refresh(run)
+                    if run.status == "CANCELLED":
+                        fail_count += 1
+                        continue
+                    project = db.get(Project, run.project_id)
+                    if project is None:
+                        finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
+                        fail_count += 1
+                        continue
 
-                case_type = (run.case_type or "UI").upper()
-                if case_type == "API":
-                    case = db.get(APICase, run.case_id)
-                elif case_type == "PERF":
-                    case = db.get(PerformanceCase, run.case_id)
-                else:
-                    case = db.get(UICase, run.case_id)
-                if case is None:
-                    finalize_run(db, run, status="FAILED", summary="用例不存在", error_type="SYSTEM")
-                    fail_count += 1
-                    continue
-                if not mark_run_started(db, run):
-                    fail_count += 1
-                    continue
-                if case_type == "API":
-                    result = _execute_case_with_retries(
-                        db, run, lambda deadline: _execute_api_case(db, run, case, project, deadline=deadline)
-                    )
-                elif case_type == "PERF":
-                    result = _execute_case_with_retries(
-                        db, run, lambda deadline: _execute_performance_case(db, run, case, project, deadline=deadline)
-                    )
-                else:
-                    result = _execute_case_with_retries(
-                        db, run, lambda deadline: _execute_ui_case_by_engine(db, run, case, project, deadline=deadline)
-                    )
+                    case_type = (run.case_type or "UI").upper()
+                    if case_type == "API":
+                        case = db.get(APICase, run.case_id)
+                    elif case_type == "PERF":
+                        case = db.get(PerformanceCase, run.case_id)
+                    else:
+                        case = db.get(UICase, run.case_id)
+                    if case is None:
+                        finalize_run(db, run, status="FAILED", summary="用例不存在", error_type="SYSTEM")
+                        fail_count += 1
+                        continue
+                    if not mark_run_started(db, run):
+                        fail_count += 1
+                        continue
+                    with ExecutionHeartbeat(TestRun, run.id):
+                        if case_type == "API":
+                            result = _execute_case_with_retries(
+                                db, run, lambda deadline: _execute_api_case(db, run, case, project, deadline=deadline)
+                            )
+                        elif case_type == "PERF":
+                            result = _execute_case_with_retries(
+                                db, run, lambda deadline: _execute_performance_case(db, run, case, project, deadline=deadline)
+                            )
+                        else:
+                            result = _execute_case_with_retries(
+                                db, run, lambda deadline: _execute_ui_case_by_engine(db, run, case, project, deadline=deadline)
+                            )
 
-                finalize_run(
-                    db,
-                    run,
-                    status=result["status"],
-                    summary=result["summary"],
-                    error_type=result.get("error_type"),
-                    exit_code=result.get("exit_code"),
-                    stdout_text=result.get("stdout_text"),
-                    stderr_text=result.get("stderr_text"),
-                    artifacts_json=result.get("artifacts_json"),
-                    step_results_json=result.get("step_results_json"),
-                    duration_ms=int((time.perf_counter() - case_started_at) * 1000),
-                    request_payload=result["request_payload"],
-                    response_payload=result["response_payload"],
-                )
-                if result["status"] == "SUCCESS":
-                    pass_count += 1
-                else:
+                    finalize_run(
+                        db,
+                        run,
+                        status=result["status"],
+                        summary=result["summary"],
+                        error_type=result.get("error_type"),
+                        exit_code=result.get("exit_code"),
+                        stdout_text=result.get("stdout_text"),
+                        stderr_text=result.get("stderr_text"),
+                        artifacts_json=result.get("artifacts_json"),
+                        step_results_json=result.get("step_results_json"),
+                        duration_ms=int((time.perf_counter() - case_started_at) * 1000),
+                        request_payload=result["request_payload"],
+                        response_payload=result["response_payload"],
+                    )
+                    if result["status"] == "SUCCESS":
+                        pass_count += 1
+                    else:
+                        fail_count += 1
+                except Exception as exc:
+                    artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
+                    finalize_run(
+                        db,
+                        run,
+                        status="ERROR",
+                        summary=f"执行异常: {exc}",
+                        error_type="SYSTEM",
+                        stderr_text=traceback.format_exc(),
+                        artifacts_json=artifacts,
+                        step_results_json=step_results,
+                        duration_ms=int((time.perf_counter() - case_started_at) * 1000),
+                    )
                     fail_count += 1
-            except Exception as exc:
-                artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
-                finalize_run(
-                    db,
-                    run,
-                    status="ERROR",
-                    summary=f"执行异常: {exc}",
-                    error_type="SYSTEM",
-                    stderr_text=traceback.format_exc(),
-                    artifacts_json=artifacts,
-                    step_results_json=step_results,
-                    duration_ms=int((time.perf_counter() - case_started_at) * 1000),
-                )
-                fail_count += 1
+                finally:
+                    run_id_var.reset(child_token)
 
+        finished_now = utc_now_naive()
         batch_status = "SUCCESS" if fail_count == 0 else "FAILED"
         batch_run.status = batch_status
         batch_run.summary = f"总计 {total}，成功 {pass_count}，失败 {fail_count}"
         batch_run.total_count = total
         batch_run.pass_count = pass_count
         batch_run.fail_count = fail_count
-        batch_run.finished_at = utc_now_naive()
+        batch_run.heartbeat_at = finished_now
+        batch_run.finished_at = finished_now
         batch_run.duration_ms = int((time.perf_counter() - started_at) * 1000)
         db.commit()
         db.refresh(batch_run)
@@ -2843,10 +3107,12 @@ def run_ui_batch(batch_run_id: int) -> dict:
     except Exception as exc:
         batch_run = db.get(UIBatchRun, batch_run_id)
         if batch_run is not None:
+            finished_now = utc_now_naive()
             batch_run.status = "FAILED"
             batch_run.error_type = "SYSTEM"
             batch_run.summary = f"批量执行异常: {exc}"
-            batch_run.finished_at = utc_now_naive()
+            batch_run.heartbeat_at = finished_now
+            batch_run.finished_at = finished_now
             batch_run.duration_ms = int((time.perf_counter() - started_at) * 1000)
             db.commit()
         return {"status": "FAILED", "summary": str(exc)}

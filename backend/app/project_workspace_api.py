@@ -16,13 +16,12 @@ import uuid
 from pathlib import Path
 
 from app import schemas
-from app.api import (
-    _load_case_entity,
-    _normalize_case_type,
+from app.deps.auth import (
     _require_project_access,
     _resolve_project_role,
     get_current_user,
 )
+from app.domain.cases import _load_case_entity, _normalize_case_type
 from app.core.config import settings
 from app.core.database import get_db
 from app.rich_text_security import plain_text_to_safe_html, sanitize_rich_text, validate_image_content
@@ -45,7 +44,10 @@ from app.permissions import project_role_allows
 from app.timeutil import utc_now_naive
 
 
-workspace_router = APIRouter(dependencies=[Depends(get_current_user)])
+workspace_router = APIRouter(
+    dependencies=[Depends(get_current_user)],
+    tags=["workspace-collaboration"],
+)
 
 
 # ---------------------------------------------------------------------------

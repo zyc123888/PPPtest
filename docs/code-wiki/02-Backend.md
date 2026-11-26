@@ -12,7 +12,7 @@ backend/
     ├── services.py          # 业务服务层（初始化、鉴权、执行落库、工具能力等）
     ├── core/
     │   ├── config.py        # Settings（环境变量 -> 配置）
-    │   ├── database.py      # engine/SessionLocal/init_db/ensure_schema
+    │   ├── database.py      # engine/SessionLocal/init_db（由 db_migrate.py 管理 Alembic 迁移）
     │   └── celery_app.py    # Celery 配置与任务注册
     └── tasks/
         ├── executions.py    # 用例执行引擎（API/UI/性能/计划）

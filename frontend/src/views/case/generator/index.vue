@@ -71,7 +71,7 @@
               placeholder="可选：自定义 OpenAI 兼容 base_url；不填则使用预设"
             />
             <div class="model-config-actions">
-              <el-button size="small" @click="loadModelConfig">读取已保存配置</el-button>
+              <el-button size="small" @click="loadModelConfig(true)">读取已保存配置</el-button>
               <el-button size="small" type="primary" :loading="savingModelConfig" @click="saveModelConfig">保存模型配置</el-button>
             </div>
           </el-form-item>
@@ -305,30 +305,32 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
+import { useContextStore } from '@/stores/context'
+import { useModelConfigStore } from '@/stores/modelConfig'
+import { useVisibilityPolling } from '@/composables/useVisibilityPolling'
 import {
   cancelCaseGenerationJob,
   caseGenerationArtifactLabel,
   caseGenerationStatusTagType,
   createCaseGenerationJob,
   getCaseGenerationArtifact,
-  getCaseGenerationModelConfig,
   downloadCaseGenerationArtifact,
   formatCaseGenerationArtifactContent,
   getCaseGenerationJobDetail,
   listCaseGenerationJobs,
-  listCaseGenerationModelOptions,
-  rerunCaseGenerationJob,
-  saveCaseGenerationModelConfig
+  rerunCaseGenerationJob
 } from '@/lib/caseGeneration'
 import { nextPollingDelay, normalizeModelOptions, validateRequirementFile } from '@/lib/caseGenerationUi'
 
-const projects = ref([])
+const contextStore = useContextStore()
+const modelConfigStore = useModelConfigStore()
+const projects = computed(() => contextStore.projects)
 const jobs = ref([])
 const allJobs = ref([])
 const currentJob = ref(null)
@@ -447,9 +449,7 @@ const progressStatusText = computed(() => {
   return runningStage ? `当前阶段：${runningStage.label}` : '等待任务调度'
 })
 
-let pollTimer = null
-let pollInFlight = false
-let pollDelay = 3000
+const pollDelay = ref(3000)
 let pollCycle = 0
 
 function extractRawUrl(value) {
@@ -540,43 +540,32 @@ function validateModelConfigInput() {
   return { model, apiKey, baseUrl }
 }
 
+const jobPoller = useVisibilityPolling(
+  async () => {
+    if (!currentJob.value || !['RUNNING', 'PENDING'].includes(currentJob.value.status)) {
+      jobPoller.stop()
+      return
+    }
+    try {
+      await refreshCurrentJob({ refreshList: pollCycle % 4 === 3 })
+      pollCycle += 1
+      pollDelay.value = nextPollingDelay(pollDelay.value)
+    } catch {
+      pollDelay.value = nextPollingDelay(pollDelay.value, true)
+    }
+  },
+  { intervalMs: pollDelay }
+)
+
 function stopPolling() {
-  if (pollTimer) {
-    clearTimeout(pollTimer)
-    pollTimer = null
-  }
+  jobPoller.stop()
 }
 
 function startPolling() {
   stopPolling()
-  pollDelay = 3000
+  pollDelay.value = 3000
   pollCycle = 0
-  scheduleNextPoll()
-}
-
-function scheduleNextPoll() {
-  stopPolling()
-  pollTimer = setTimeout(async () => {
-    if (pollInFlight) return
-    if (!currentJob.value) return
-    if (!['RUNNING', 'PENDING'].includes(currentJob.value.status)) {
-      stopPolling()
-      return
-    }
-    pollInFlight = true
-    try {
-      await refreshCurrentJob({ refreshList: pollCycle % 4 === 3 })
-      pollCycle += 1
-      pollDelay = nextPollingDelay(pollDelay)
-    } catch {
-      pollDelay = nextPollingDelay(pollDelay, true)
-    } finally {
-      pollInFlight = false
-      if (['RUNNING', 'PENDING'].includes(currentJob.value?.status)) {
-        scheduleNextPoll()
-      }
-    }
-  }, pollDelay)
+  jobPoller.start({ immediate: false })
 }
 
 watch(
@@ -635,10 +624,10 @@ watch(
 
 async function fetchProjects() {
   try {
-    projects.value = await api.get('/projects')
+    const projectData = await contextStore.fetchProjects()
     pageError.value = ''
-    if (!form.value.project_id && projects.value.length) {
-      form.value.project_id = projects.value[0].id
+    if (!form.value.project_id && projectData.length) {
+      form.value.project_id = projectData[0].id
     }
     await loadModelConfig()
   } catch (error) {
@@ -734,7 +723,7 @@ async function refreshCurrentJob(options = {}) {
 }
 
 async function loadModelOptions() {
-  modelOptions.value = normalizeModelOptions(await listCaseGenerationModelOptions())
+  modelOptions.value = normalizeModelOptions(await modelConfigStore.fetchModelOptions())
 }
 
 function currentWorkspaceId() {
@@ -742,10 +731,10 @@ function currentWorkspaceId() {
   return project?.workspace_id || currentJob.value?.workspace_id || null
 }
 
-async function loadModelConfig() {
+async function loadModelConfig(force = false) {
   const workspaceId = currentWorkspaceId()
   if (!workspaceId) return
-  const config = await getCaseGenerationModelConfig(workspaceId)
+  const config = await modelConfigStore.fetchWorkspaceConfig(workspaceId, { force: force === true })
   if (!config) {
     hasSavedModelConfig.value = false
     return
@@ -768,7 +757,7 @@ async function persistModelConfig() {
   if (!apiKey) {
     throw new Error('请填写模型 API Key')
   }
-  await saveCaseGenerationModelConfig({
+  await modelConfigStore.saveWorkspaceConfig({
     workspace_id: workspaceId,
     provider: resolveModelProvider(model),
     name: modelConfig.value.name || '默认模型配置',
@@ -971,10 +960,6 @@ onMounted(async () => {
   await loadModelOptions()
   await fetchProjects()
   await fetchJobs()
-})
-
-onBeforeUnmount(() => {
-  stopPolling()
 })
 </script>
 

@@ -86,6 +86,12 @@ jobs:
           cat /tmp/test-platform-health.log || true
           OMNITEST_RUN_MODE=docker bash scripts/health_check.sh
 
+      - name: Verify database schema parity
+        run: |
+          docker compose exec -T \
+            -e DATABASE_URL="sqlite:////tmp/schema-check-${GITHUB_RUN_ID}.db" \
+            backend sh -c "python -m app.db_migrate upgrade && python -m app.db_migrate schema-check"
+
       - name: Backend pytest
         id: backend_pytest
         continue-on-error: true

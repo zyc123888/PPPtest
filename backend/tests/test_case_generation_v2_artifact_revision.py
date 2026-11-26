@@ -14,7 +14,7 @@ from app.models import (
 
 
 def test_v2_preview_and_download_reject_stale_artifact_revision(client, monkeypatch, tmp_path: Path) -> None:
-    from app import api
+    from app.deps import auth as auth_deps
 
     project = client.get("/projects").json()[0]
     with SessionLocal() as db:
@@ -31,7 +31,7 @@ def test_v2_preview_and_download_reject_stale_artifact_revision(client, monkeypa
         )
         db.commit()
 
-    monkeypatch.setattr(api, "_dispatch_task_or_run_inline", lambda *args, **kwargs: ("queued-task", False))
+    monkeypatch.setattr(auth_deps, "_dispatch_task_or_run_inline", lambda *args, **kwargs: ("queued-task", False))
     created = client.post(
         "/case-generation-v2/jobs",
         json={

@@ -390,14 +390,16 @@
 <script setup>
 import { computed, onMounted, nextTick, reactive, ref, watch } from 'vue'
 import { api } from '@/lib/api'
-import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
+import { getSavedProjectId } from '@/lib/projectContext'
+import { useContextStore } from '@/stores/context'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MoreFilled, Search } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { usePermissions } from '@/lib/permissions'
 
+const contextStore = useContextStore()
 const list = ref([])
-const projects = ref([])
+const projects = computed(() => contextStore.projects)
 const apiCases = ref([])
 const uiCases = ref([])
 const perfCases = ref([])
@@ -509,10 +511,9 @@ const getList = async () => {
   try {
     const [planData, projectData] = await Promise.all([
       api.get('/test-plans'),
-      api.get('/projects')
+      contextStore.fetchProjects()
     ])
     list.value = planData
-    projects.value = projectData
     if (!filters.projectId) {
       const saved = getSavedProjectId(projectData)
       if (saved) filters.projectId = saved
@@ -525,7 +526,7 @@ const getList = async () => {
 }
 
 watch(() => filters.projectId, (val) => {
-  saveActiveProjectId(val)
+  contextStore.setActiveProjectId(val)
 })
 
 const filteredList = computed(() => {
@@ -619,7 +620,7 @@ const loadCaseAssets = async (projectId) => {
     api.get(`/api-cases?project_id=${projectId}`),
     api.get(`/ui-cases?project_id=${projectId}`),
     api.get(`/performance-cases?project_id=${projectId}`),
-    api.get(`/environments?project_id=${projectId}`)
+    contextStore.fetchEnvironments(projectId)
   ])
   apiCases.value = Array.isArray(apiData) ? apiData : (apiData?.items || [])
   uiCases.value = Array.isArray(uiData) ? uiData : (uiData?.items || [])

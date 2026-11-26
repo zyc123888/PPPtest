@@ -184,10 +184,13 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
 import { ElMessage } from 'element-plus'
+import { useContextStore } from '@/stores/context'
 import { PROJECT_ROLE_LABELS } from './constants'
 import { formatDateTime as formatTime } from '@/lib/formatTime'
 
 const props = defineProps({ project: { type: Object, required: true }, myRole: { type: String, default: '' } })
+const emit = defineEmits(['refresh-project'])
+const contextStore = useContextStore()
 
 const roleOptions = ['viewer', 'member', 'manager', 'owner']
 const roleLabels = PROJECT_ROLE_LABELS
@@ -233,8 +236,9 @@ async function saveProjectInfo() {
   }
   projectSaving.value = true
   try {
-    const updated = await api.put(`/projects/${props.project.id}`, { ...projectForm })
-    Object.assign(props.project, updated)
+    await api.put(`/projects/${props.project.id}`, { ...projectForm })
+    contextStore.invalidateProjects()
+    emit('refresh-project')
     editProjectVisible.value = false
     ElMessage.success('项目信息已更新')
   } catch (error) {
@@ -361,6 +365,8 @@ async function saveVariables() {
   varSaving.value = true
   try {
     await api.put(`/projects/${props.project.id}/variables`, { variables_json: payload })
+    contextStore.invalidateProjects()
+    emit('refresh-project')
     ElMessage.success('变量池已保存')
     fetchVariables()
   } catch (error) { ElMessage.error(error.message) } finally { varSaving.value = false }

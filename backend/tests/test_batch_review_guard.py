@@ -63,7 +63,8 @@ def test_project_viewer_cannot_review_even_with_global_tester_role(client, monke
     import time
     from types import SimpleNamespace
     from fastapi.testclient import TestClient
-    from app import api
+    from app.deps import auth as auth_deps
+    from app.domain import precheck as precheck_domain
     from app.core.database import SessionLocal
     from app.models import ProjectMember
 
@@ -95,8 +96,8 @@ def test_project_viewer_cannot_review_even_with_global_tester_role(client, monke
                 member = db.query(ProjectMember).filter_by(project_id=project['id'], user_id=user['id']).one()
                 member.role = 'member'
                 db.commit()
-            monkeypatch.setattr(api, 'precheck_ui_case_execution', lambda *args, **kwargs: SimpleNamespace(is_valid=True))
-            monkeypatch.setattr(api, '_dispatch_task_or_run_inline', lambda *args: ('test-task', False))
+            monkeypatch.setattr(precheck_domain, 'precheck_ui_case', lambda *args, **kwargs: SimpleNamespace(is_valid=True))
+            monkeypatch.setattr(auth_deps, '_dispatch_task_or_run_inline', lambda *args: ('test-task', False))
             run = viewer.post(f'/executions/ui/{case_id}/run', json={}, headers=headers)
             assert run.status_code == 200, run.text
         assert client.get(f'/ui-cases/{case_id}').json()['review_status'] == 'IN_REVIEW'

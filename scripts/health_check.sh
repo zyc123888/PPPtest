@@ -31,7 +31,7 @@ echo "基础健康检查通过"
 
 if [[ "${RUN_MODE}" == "docker" ]]; then
   echo "检查应用容器运行状态"
-  for service in backend frontend worker case-worker beat mysql redis; do
+  for service in backend frontend worker fast-worker perf-worker case-worker beat mysql redis; do
     container_id="$(compose_cmd ps -q "${service}")"
     if [[ -z "${container_id}" ]] || [[ "$(docker inspect -f '{{.State.Running}}' "${container_id}")" != "true" ]]; then
       echo "服务 ${service} 未运行" >&2
@@ -47,10 +47,20 @@ if [[ "${RUN_MODE}" == "docker" ]]; then
   redis_ping="$(compose_cmd exec -T redis redis-cli ping)"
   grep -q PONG <<<"${redis_ping}"
 
-  echo "检查执行 Worker 响应"
+  echo "检查浏览器执行 Worker 响应"
   execution_ping="$(compose_cmd exec -T worker sh -lc \
     'celery -A app.core.celery_app.celery_app inspect ping --timeout=5 -d "execution@$(hostname)"')"
   grep -q pong <<<"${execution_ping}"
+
+  echo "检查快队列 Worker 响应"
+  fast_ping="$(compose_cmd exec -T fast-worker sh -lc \
+    'celery -A app.core.celery_app.celery_app inspect ping --timeout=5 -d "fast@$(hostname)"')"
+  grep -q pong <<<"${fast_ping}"
+
+  echo "检查性能 Worker 响应"
+  perf_ping="$(compose_cmd exec -T perf-worker sh -lc \
+    'celery -A app.core.celery_app.celery_app inspect ping --timeout=5 -d "perf@$(hostname)"')"
+  grep -q pong <<<"${perf_ping}"
 
   echo "检查用例生成 Worker 响应"
   case_generation_ping="$(compose_cmd exec -T case-worker sh -lc \

@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import text
 
-from app.core.secrets import encrypt_secret, is_encryption_available
+from app.core.secrets import decrypt_secret, encrypt_secret, is_encryption_available
 
 
 revision: str = "a3b9e2c14f08"
@@ -51,4 +51,30 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    columns = {col["name"] for col in inspector.get_columns("project_notification_settings")}
+    if "secret_encrypted" not in columns:
+        return
+
+    encrypted_rows = list(
+        bind.execute(
+            text(
+                "SELECT id, secret_encrypted FROM project_notification_settings "
+                "WHERE secret_encrypted IS NOT NULL AND secret_encrypted != ''"
+            )
+        ).mappings()
+    )
+    if encrypted_rows and not is_encryption_available():
+        raise RuntimeError("project_notification_settings 存在已加密 Webhook 密钥，但 APP_ENCRYPTION_KEY 不可用")
+    for row in encrypted_rows:
+        plaintext = decrypt_secret(row["secret_encrypted"])
+        if plaintext and len(plaintext) > 128:
+            raise RuntimeError("Webhook 密钥超过 128 字符，无法安全回滚到旧列 secret")
+        bind.execute(
+            text("UPDATE project_notification_settings SET secret = :secret WHERE id = :row_id"),
+            {"secret": plaintext, "row_id": row["id"]},
+        )
+
+    with op.batch_alter_table("project_notification_settings") as batch_op:
+        batch_op.drop_column("secret_encrypted")

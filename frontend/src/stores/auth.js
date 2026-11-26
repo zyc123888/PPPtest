@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import { api } from '@/lib/api'
+import { useContextStore } from '@/stores/context'
+import { useModelConfigStore } from '@/stores/modelConfig'
 
 const TOKEN_KEY = 'tp_token'
 
@@ -40,12 +42,18 @@ export const useAuthStore = defineStore('auth', {
         if (this.token) {
           await api.post('/auth/logout')
         }
-      } catch (error) {
+      } catch {
         // ignore logout error
       } finally {
         this.setToken('')
         this.user = null
         this.loaded = false
+        try {
+          useContextStore().reset()
+          useModelConfigStore().reset()
+        } catch {
+          // ignore if Pinia is inactive in isolated unit tests
+        }
       }
     }
   }

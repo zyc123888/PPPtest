@@ -38,7 +38,7 @@ def test_trace_coverage_requires_every_linked_case_to_finish_successfully() -> N
 
 
 def test_v2_job_snapshots_selected_model_per_attempt(client, monkeypatch) -> None:
-    from app import api
+    from app.deps import auth as auth_deps
     from app.core.database import SessionLocal
     from app.models import AIModelConfig, CaseGenerationV2Attempt, CaseGenerationV2Job
 
@@ -56,7 +56,7 @@ def test_v2_job_snapshots_selected_model_per_attempt(client, monkeypatch) -> Non
         db.commit()
         config_id = config.id
 
-    monkeypatch.setattr(api, "_dispatch_task_or_run_inline", lambda *args, **kwargs: ("queued-task", False))
+    monkeypatch.setattr(auth_deps, "_dispatch_task_or_run_inline", lambda *args, **kwargs: ("queued-task", False))
     created = client.post("/case-generation-v2/jobs", json={
         "project_id": project["id"], "name": f"模型快照_{time.time_ns()}",
         "markdown_text": "# 登录\n需要覆盖登录页面和错误提示行为。",
@@ -3755,14 +3755,14 @@ def test_case_generation_requires_skill_execution_proof() -> None:
 
 
 def test_case_generation_job_response_masks_openai_key(client, monkeypatch) -> None:
-    from app import api as api_module
+    from app.routers import case_generation_v1 as case_gen_v1_router
     from app.core.database import SessionLocal
     from app.models import CaseGenerationJob
 
     def fake_run_case_generation_job(job_id: int, attempt_id: int | None = None) -> None:
         return None
 
-    monkeypatch.setattr(api_module, "run_case_generation_job", fake_run_case_generation_job)
+    monkeypatch.setattr(case_gen_v1_router, "run_case_generation_job", fake_run_case_generation_job)
     with SessionLocal() as db:
         for job in db.query(CaseGenerationJob).filter(CaseGenerationJob.status.in_(["PENDING", "RUNNING"])).all():
             job.status = "CANCELLED"
@@ -4974,9 +4974,9 @@ def test_ui_case_runtime_rejects_login_page_before_model_call(monkeypatch) -> No
 
 def test_ui_case_ai_skill_generates_reviewable_draft_and_persists_source(client, monkeypatch) -> None:
     from app import schemas
+    from app import ui_case_ai as ui_case_ai_module
     from app.core.database import SessionLocal
     from app.models import AIModelConfig, Project
-    import app.api as api_module
 
     project_id = client.get("/projects").json()[0]["id"]
     with SessionLocal() as db:
@@ -5025,7 +5025,7 @@ def test_ui_case_ai_skill_generates_reviewable_draft_and_persists_source(client,
             model=kwargs["model"],
         )
 
-    monkeypatch.setattr(api_module, "generate_ui_case_draft", fake_generate)
+    monkeypatch.setattr(ui_case_ai_module, "generate_ui_case_draft", fake_generate)
     try:
         generated = client.post(
             "/ui-cases/ai/generate",
@@ -6813,7 +6813,7 @@ def test_ai_model_config_encrypts_key_at_rest() -> None:
 
 def test_case_generation_v2_local_rerun_copies_inherited_artifacts(client, tmp_path, monkeypatch) -> None:
     import app.tasks.case_generation_runtime as runtime
-    from app.api import _inherit_case_generation_v2_artifacts
+    from app.domain.case_generation import _inherit_case_generation_v2_artifacts
     from app.core.database import SessionLocal
     from app.models import CaseGenerationV2Artifact, CaseGenerationV2Job, Project
 
@@ -7256,19 +7256,25 @@ def test_case_generation_v2_task_failure_is_visible_to_db_and_celery() -> None:
     assert run_case_generation_v2_job.reject_on_worker_lost is True
 
 
-def test_celery_routes_named_execution_tasks_to_execution_queue() -> None:
+def test_celery_routes_named_execution_tasks_to_isolated_queues() -> None:
     from app.core.celery_app import celery_app
 
     router = celery_app.amqp.Router()
-    task_names = (
-        "app.tasks.run_api_case",
-        "app.tasks.run_ui_case",
-        "app.tasks.run_performance_case",
-        "app.tasks.run_test_plan",
-    )
-    for task_name in task_names:
+    expected = {
+        "app.tasks.run_api_case": "execution_fast",
+        "app.tasks.run_ui_case": "execution_browser",
+        "app.tasks.run_ui_batch": "execution_browser",
+        "app.tasks.run_performance_case": "execution_perf",
+        "app.tasks.run_test_plan": "execution_browser",
+        "app.tasks.scan_scheduled_plans": "execution_fast",
+        "app.tasks.reconcile_interrupted_executions": "maintenance",
+        "app.tasks.cleanup_execution_artifacts": "maintenance",
+        "app.tasks.case_generation.run_case_generation_job": "case_generation",
+        "app.tasks.case_generation_v2.run_case_generation_v2_job": "case_generation",
+    }
+    for task_name, expected_queue in expected.items():
         route = router.route({}, task_name)
-        assert route["queue"].name == "execution"
+        assert route["queue"].name == expected_queue
 
 
 def test_execution_retry_result_preserves_ui_error_and_has_complete_shape() -> None:
@@ -8592,27 +8598,51 @@ def test_project_variable_pool_crud(client) -> None:
     assert cleared.json()["variables_json"] == {}
 
 
-def test_legacy_variable_pools_are_migrated_to_encrypted_storage(client) -> None:
-    _, project_id = _create_project_for_feature(client, "变量迁移")
-    from app.core.database import SessionLocal, engine, ensure_schema
-    from app.models import Project
+def test_legacy_variable_pools_are_migrated_to_encrypted_storage(tmp_path) -> None:
+    from alembic import command
+    from sqlalchemy import create_engine
+    from app.core.secrets import decrypt_secret
+    from app.db_migrate import migration_config, upgrade_database
 
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                "UPDATE projects SET variables_json = :variables, variables_encrypted = NULL "
-                "WHERE id = :project_id"
-            ),
-            {"variables": json.dumps({"token": "legacy-secret"}), "project_id": project_id},
-        )
+    database_url = f"sqlite:///{tmp_path / 'legacy-env-vars.db'}"
+    command.upgrade(migration_config(database_url), "ce41b2a38d0f")
+    migration_engine = create_engine(database_url)
+    try:
+        with migration_engine.begin() as connection:
+            connection.execute(text("INSERT INTO workspaces (name) VALUES ('迁移空间')"))
+            workspace_id = connection.scalar(text("SELECT id FROM workspaces WHERE name = '迁移空间'"))
+            connection.execute(
+                text(
+                    "INSERT INTO projects (workspace_id, name, base_url, status, variables_json) "
+                    "VALUES (:workspace_id, '变量迁移项目', 'http://example.test', 'ACTIVE', :variables)"
+                ),
+                {"workspace_id": workspace_id, "variables": json.dumps({"token": "legacy-secret"})},
+            )
+            project_id = connection.scalar(text("SELECT id FROM projects WHERE name = '变量迁移项目'"))
+            connection.execute(
+                text(
+                    "INSERT INTO environments (project_id, name, base_url, variables_json) "
+                    "VALUES (:project_id, '迁移环境', 'http://example.test', :variables)"
+                ),
+                {"project_id": project_id, "variables": json.dumps({"env_token": "env-secret"})},
+            )
 
-    changes = ensure_schema(engine)
-    assert any(change.startswith("projects.variables_encrypted:migrated(") for change in changes)
-    with SessionLocal() as db:
-        project = db.get(Project, project_id)
-        assert project.variables_json == {"token": "legacy-secret"}
-        assert project._legacy_variables_json is None
-        assert "legacy-secret" not in project.variables_encrypted
+        upgrade_database(database_url)
+        with migration_engine.connect() as connection:
+            proj_row = connection.execute(
+                text("SELECT variables_json, variables_encrypted FROM projects WHERE id = :project_id"),
+                {"project_id": project_id},
+            ).mappings().one()
+            env_row = connection.execute(
+                text("SELECT variables_json, variables_encrypted FROM environments WHERE project_id = :project_id"),
+                {"project_id": project_id},
+            ).mappings().one()
+        assert proj_row["variables_json"] is None
+        assert json.loads(decrypt_secret(proj_row["variables_encrypted"])) == {"token": "legacy-secret"}
+        assert env_row["variables_json"] is None
+        assert json.loads(decrypt_secret(env_row["variables_encrypted"])) == {"env_token": "env-secret"}
+    finally:
+        migration_engine.dispose()
 
 
 def test_project_member_management_and_isolation(client) -> None:

@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     case_gen_watchdog_interval_seconds: int = 30
     case_gen_artifact_retention_days: int = 30
     execution_artifact_retention_days: int = 30
+    execution_heartbeat_seconds: int = 30
+    execution_heartbeat_stale_seconds: int = 120
+    log_level: str = "INFO"
+    log_format: str = "auto"
+    worker_heartbeat_path: str = "/tmp/omnitest-worker-heartbeat"
+    worker_heartbeat_interval_seconds: int = 15
     case_gen_artifact_content_preview_bytes: int = 131072
     case_gen_max_source_download_bytes: int = 10 * 1024 * 1024
     case_gen_max_image_download_bytes: int = 12 * 1024 * 1024

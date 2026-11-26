@@ -10,12 +10,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app import models  # noqa: E402,F401
+from app.core.config import settings  # noqa: E402
 from app.core.database import Base  # noqa: E402
 
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+configured_url = config.get_main_option("sqlalchemy.url")
+if not configured_url or "alembic-placeholder.db" in configured_url:
+    config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

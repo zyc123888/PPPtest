@@ -112,7 +112,7 @@ services:
     # Docker Desktop bind mounts retain the host owner. Run the browser worker
     # with the host UID/GID so screenshots and traces remain writable.
     user: "${LOCAL_UID:-501}:${LOCAL_GID:-20}"
-    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=prefork --concurrency=1 --max-tasks-per-child=50 -Q execution,celery -n execution@%h'
+    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=prefork --concurrency=2 --max-tasks-per-child=20 -Q execution_browser,execution,celery -n execution@%h'
     environment:
       APP_ENV: docker
       DATABASE_URL: "${DOCKER_DATABASE_URL}"
@@ -152,7 +152,111 @@ services:
       - ./backend/claw_5skill_final:/app/claw_5skill_final
       - ./backend/claw_5skill_unified:/app/claw_5skill_unified
     restart: unless-stopped
-    shm_size: 256M
+    shm_size: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "find /tmp/omnitest-worker-heartbeat -mmin -2 2>/dev/null | grep -q . || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: '2.0'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - omnitest-network
+
+  fast-worker:
+    build:
+      context: ./backend
+      target: runtime
+    container_name: omnitest-fast-worker
+    user: "${LOCAL_UID:-501}:${LOCAL_GID:-20}"
+    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=threads --concurrency=4 -Q execution_fast,maintenance -n fast@%h'
+    environment:
+      APP_ENV: docker
+      DATABASE_URL: "${DOCKER_DATABASE_URL}"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      BACKEND_INTERNAL_URL: http://backend:8000
+      FRONTEND_INTERNAL_URL: http://frontend:3000
+      BACKEND_PUBLIC_URL: http://127.0.0.1:8000
+      FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
+      APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
+      INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD}"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./backend/reports:/app/reports
+      - ./backend/app:/app/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "find /tmp/omnitest-worker-heartbeat -mmin -2 2>/dev/null | grep -q . || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: '1.0'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - omnitest-network
+
+  perf-worker:
+    build:
+      context: ./backend
+      target: runtime
+    container_name: omnitest-perf-worker
+    user: "${LOCAL_UID:-501}:${LOCAL_GID:-20}"
+    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=prefork --concurrency=2 --max-tasks-per-child=50 -Q execution_perf -n perf@%h'
+    environment:
+      APP_ENV: docker
+      DATABASE_URL: "${DOCKER_DATABASE_URL}"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      BACKEND_INTERNAL_URL: http://backend:8000
+      FRONTEND_INTERNAL_URL: http://frontend:3000
+      BACKEND_PUBLIC_URL: http://127.0.0.1:8000
+      FRONTEND_PUBLIC_URL: http://127.0.0.1:3000
+      APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY}"
+      INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD}"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./backend/reports:/app/reports
+      - ./backend/app:/app/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "find /tmp/omnitest-worker-heartbeat -mmin -2 2>/dev/null | grep -q . || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -208,6 +312,12 @@ services:
       - ./backend/claw_5skill_final:/app/claw_5skill_final
       - ./backend/claw_5skill_unified:/app/claw_5skill_unified
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "find /tmp/omnitest-worker-heartbeat -mmin -2 2>/dev/null | grep -q . || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -244,6 +354,12 @@ services:
     volumes:
       - ./backend/app:/app/app
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "find /tmp/omnitest-worker-heartbeat -mmin -2 2>/dev/null | grep -q . || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:

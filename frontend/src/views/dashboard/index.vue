@@ -184,11 +184,12 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { api } from '@/lib/api'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { api, isAbortError } from '@/lib/api'
 import { ElMessage } from 'element-plus'
 import TrendChart from '@/components/TrendChart.vue'
 import { formatDateTime as formatTime } from '@/lib/formatTime'
+import { useVisibilityPolling } from '@/composables/useVisibilityPolling'
 
 const summary = ref({
   workspace_count: 0,
@@ -338,29 +339,34 @@ const successTrendText = computed(() => {
   return delta > 0 ? `较昨日 +${delta}%` : `较昨日 ${delta}%`
 })
 
-let timer = null
-
-const loadAll = async (silent = false) => {
-  if (silent && typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+const loadAll = async (silent = false, reqOptions = {}) => {
   if (!silent) loading.value = true
   try {
     const [summaryData, runData] = await Promise.all([
-      api.get('/dashboard/summary'),
-      api.get('/executions/runs')
+      api.get('/dashboard/summary', reqOptions),
+      api.get('/executions/runs', reqOptions)
     ])
     summary.value = summaryData
     runs.value = Array.isArray(runData) ? runData : (runData?.items || [])
     try {
-      health.value = await api.get('/system/health')
-    } catch {
+      health.value = await api.get('/system/health', reqOptions)
+    } catch (healthError) {
+      if (isAbortError(healthError)) return
       health.value = { app_status: 'degraded', database: 'unknown', redis: 'unknown', checked_at: '' }
     }
   } catch (error) {
-    if (!silent) ElMessage.error(error.message)
+    if (!silent && !isAbortError(error)) ElMessage.error(error.message)
   } finally {
     if (!silent) loading.value = false
   }
 }
+
+const dashboardPoller = useVisibilityPolling(
+  async ({ signal }) => {
+    await loadAll(true, { signal })
+  },
+  { intervalMs: 10000 }
+)
 
 const filteredRuns = computed(() => {
   const keyword = filters.keyword.trim().toLowerCase()
@@ -376,15 +382,19 @@ const pagedRuns = computed(() => {
   return filteredRuns.value.slice(start, start + pageSize.value)
 })
 
-onMounted(() => {
-  loadAll(false)
-  timer = setInterval(() => {
-    if (autoRefresh.value) loadAll(true)
-  }, 10000)
+watch(autoRefresh, (enabled) => {
+  if (enabled) {
+    dashboardPoller.start({ immediate: false })
+  } else {
+    dashboardPoller.stop()
+  }
 })
 
-onBeforeUnmount(() => {
-  if (timer) clearInterval(timer)
+onMounted(() => {
+  loadAll(false)
+  if (autoRefresh.value) {
+    dashboardPoller.start({ immediate: false })
+  }
 })
 </script>
 

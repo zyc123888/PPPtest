@@ -396,7 +396,9 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '@/lib/api'
-import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
+import { getSavedProjectId } from '@/lib/projectContext'
+import { useContextStore } from '@/stores/context'
+import { useExecutionStream } from '@/composables/useExecutionStream'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { formatShortTime } from '@/lib/formatTime'
 import {
@@ -412,9 +414,10 @@ import { usePermissions } from '@/lib/permissions'
 import { useAuthStore } from '@/stores/auth'
 import { executionStatusTag, executionStatusText } from '@/lib/execution'
 
+const contextStore = useContextStore()
 const list = ref([])
 const total = ref(0)
-const projects = ref([])
+const projects = computed(() => contextStore.projects)
 const environments = ref([])
 const listLoading = ref(true)
 const saving = ref(false)
@@ -453,7 +456,6 @@ const batchEditForm = reactive({ folder_path: '', priority: '', status: '' })
 const { canAdmin, canTest } = usePermissions()
 const authStore = useAuthStore()
 const currentUserId = computed(() => authStore.user?.id || null)
-let pollTimer = null
 let keywordTimer = null
 
 const filters = reactive({ projectId: undefined, status: '', priority: '', reviewStatus: '', method: '', keyword: '' })
@@ -553,9 +555,9 @@ const loadFolders = async () => {
 
 const loadProjects = async () => {
   try {
-    projects.value = await api.get('/projects')
+    const projectData = await contextStore.fetchProjects()
     if (!filters.projectId) {
-      const saved = getSavedProjectId(projects.value)
+      const saved = getSavedProjectId(projectData)
       if (saved) filters.projectId = saved
     }
   } catch (error) { ElMessage.error(error.message) }
@@ -581,7 +583,7 @@ const openBatchRun = async () => {
   const inactive = selectedRows.value.filter((row) => row.status !== 'ACTIVE')
   if (inactive.length) { ElMessage.warning(`以下用例未启用，无法批量执行：${inactive.map((row) => row.name).join('、')}`); return }
   try {
-    batchEnvironments.value = await api.get(`/environments?project_id=${projectIds[0]}`)
+    batchEnvironments.value = await contextStore.fetchEnvironments(projectIds[0])
     batchRunVisible.value = true
   } catch (error) { ElMessage.error(error.message) }
 }
@@ -721,7 +723,7 @@ const handleRun = async (row) => {
   Object.assign(runForm, { case_id: row.id, project_id: row.project_id, environment_id: undefined, timeout_seconds: 120 })
   precheckResult.value = null
   try {
-    environments.value = await api.get(`/environments?project_id=${row.project_id}`)
+    environments.value = await contextStore.fetchEnvironments(row.project_id)
     runDialogVisible.value = true
   } catch (error) { ElMessage.error(error.message) }
 }
@@ -745,9 +747,14 @@ const submitRun = async () => {
     runDialogVisible.value = false
     ElMessage.success(`性能任务 #${run.id} 已提交`)
     const row = list.value.find((item) => item.id === runForm.case_id)
-    if (row) await openCaseDetail(row, 'runs')
-    await selectRun(run)
-    startPolling()
+    if (row) {
+      await openCaseDetail(row, 'runs')
+      if (selectedRun.value?.id !== run.id) {
+        await selectRun(run)
+      }
+    } else {
+      await selectRun(run)
+    }
   } catch (error) { ElMessage.error(error.message) } finally { submittingRun.value = false }
 }
 
@@ -771,22 +778,36 @@ const selectRun = async (run) => {
   } catch (error) { ElMessage.error(error.message) } finally { runDetailLoading.value = false }
 }
 
-const startPolling = () => {
-  stopPolling()
-  pollTimer = window.setInterval(async () => {
-    if (!detailVisible.value || !selectedRun.value?.id) return stopPolling()
-    try {
-      const detail = await api.get(`/executions/runs/${selectedRun.value.id}`)
-      selectedRun.value = detail
-      if (!['PENDING', 'RUNNING'].includes(detail.status)) {
-        stopPolling()
-        caseRuns.value = await api.get(`/executions/runs?case_type=PERF&case_id=${detail.case_id}&limit=100`)
-        await getList()
-      }
-    } catch { stopPolling() }
-  }, 2000)
+const runStream = useExecutionStream({ fallbackIntervalMs: 2000 })
+
+const stopPolling = () => {
+  runStream.stop()
 }
-const stopPolling = () => { if (pollTimer) window.clearInterval(pollTimer); pollTimer = null }
+
+const startPolling = () => {
+  const runId = selectedRun.value?.id
+  if (!detailVisible.value || !runId) {
+    stopPolling()
+    return
+  }
+  runStream.subscribe(runId, {
+    onMessage: (payload) => {
+      if (!detailVisible.value || selectedRun.value?.id !== payload.id) {
+        stopPolling()
+        return
+      }
+      selectedRun.value = { ...selectedRun.value, ...payload }
+    },
+    onTerminal: async (payload) => {
+      if (!detailVisible.value) return
+      const detail = await api.get(`/executions/runs/${payload.id}`)
+      if (!detailVisible.value) return
+      selectedRun.value = detail
+      caseRuns.value = await api.get(`/executions/runs?case_type=PERF&case_id=${detail.case_id}&limit=100`)
+      await getList()
+    }
+  })
+}
 
 const exportCurrentCases = async () => {
   try {
@@ -814,7 +835,7 @@ const submitImportCases = async () => {
   } catch (error) { ElMessage.error(error.message) }
 }
 
-watch(() => filters.projectId, (val) => { saveActiveProjectId(val); selectedFolder.value = ''; page.value = 1; refreshAll() })
+watch(() => filters.projectId, (val) => { contextStore.setActiveProjectId(val); selectedFolder.value = ''; page.value = 1; refreshAll() })
 watch([() => filters.status, () => filters.priority, () => filters.reviewStatus, () => filters.method], () => { page.value = 1; getList() })
 watch(() => filters.keyword, () => { clearTimeout(keywordTimer); keywordTimer = setTimeout(() => { page.value = 1; getList() }, 300) })
 watch(selectedFolder, () => { page.value = 1; getList() })

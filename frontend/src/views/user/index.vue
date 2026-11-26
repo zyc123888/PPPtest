@@ -160,6 +160,7 @@ import { useRouter } from 'vue-router'
 import { api } from '@/lib/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import { useContextStore } from '@/stores/context'
 import { formatDateTime as formatTime } from '@/lib/formatTime'
 
 const list = ref([])
@@ -169,6 +170,7 @@ const dataFormRef = ref(null)
 const isEdit = ref(false)
 const router = useRouter()
 const authStore = useAuthStore()
+const contextStore = useContextStore()
 
 const currentUserId = computed(() => authStore.user?.id ?? null)
 
@@ -277,7 +279,7 @@ const getList = async () => {
 
 const loadWorkspaces = async () => {
   try {
-    allWorkspaces.value = await api.get('/workspaces')
+    allWorkspaces.value = await contextStore.fetchWorkspaces()
   } catch {
     allWorkspaces.value = []
   }

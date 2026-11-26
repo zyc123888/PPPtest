@@ -1039,9 +1039,11 @@
 <script setup>
 import { computed, onMounted, onUnmounted, nextTick, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { api } from '@/lib/api'
+import { api, isAbortError } from '@/lib/api'
 import ApiDebugResultPanel from './components/ApiDebugResultPanel.vue'
-import { getSavedProjectId, saveActiveProjectId } from '@/lib/projectContext'
+import { getSavedProjectId } from '@/lib/projectContext'
+import { useContextStore } from '@/stores/context'
+import { useVisibilityPolling } from '@/composables/useVisibilityPolling'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { formatShortTime as formatShortTimeDefault } from '@/lib/formatTime'
 import {
@@ -1059,8 +1061,9 @@ import { executionStatusTag, executionStatusText } from '@/lib/execution'
 import { useSubmitGuard } from '@/composables/useSubmitGuard'
 import { buildCaseBatchPatch } from '@/lib/caseBatch'
 
+const contextStore = useContextStore()
 const list = ref([])
-const projects = ref([])
+const projects = computed(() => contextStore.projects)
 const environments = ref([])
 const listLoading = ref(true)
 const dialogVisible = ref(false)
@@ -1119,7 +1122,6 @@ const detailTab = ref('definition')
 const currentCase = ref(null)
 const caseRuns = ref([])
 const currentRun = ref(null)
-let pollTimer = null
 let keywordTimer = null
 
 const importVisible = ref(false)
@@ -1229,7 +1231,7 @@ const rules = {
           JSON.parse(value)
         }
         callback()
-      } catch (e) {
+      } catch {
         callback(new Error('JSON 格式错误'))
       }
     }, trigger: 'blur'
@@ -1239,7 +1241,7 @@ const rules = {
       try {
         if (value && methodSupportsBody.value && temp.body_mode === 'graphql') JSON.parse(value)
         callback()
-      } catch (e) {
+      } catch {
         callback(new Error('GraphQL Variables 必须是 JSON'))
       }
     }, trigger: 'blur'
@@ -1255,7 +1257,7 @@ const rules = {
           }
         }
         callback()
-      } catch (e) {
+      } catch {
         callback(new Error('JSON 格式错误'))
       }
     }, trigger: 'blur'
@@ -1382,7 +1384,7 @@ const handleAssertionsModeChange = (mode) => {
     }
     temp.assertion_rows = rows
     temp.assertions_mode = 'form'
-  } catch (e) {
+  } catch {
     ElMessage.warning('断言 JSON 格式错误，无法切换到结构化模式')
   }
 }
@@ -1471,7 +1473,7 @@ const parseStepJsonField = (text, label, stepNo, expectArray = false) => {
   let parsed
   try {
     parsed = JSON.parse(trimmed)
-  } catch (e) {
+  } catch {
     throw new Error(`步骤 ${stepNo} 的${label}不是合法 JSON`)
   }
   if (expectArray && !Array.isArray(parsed)) throw new Error(`步骤 ${stepNo} 的${label}必须是 JSON 数组`)
@@ -1573,10 +1575,6 @@ const syncPathFromParams = () => {
   const basePath = pathWithoutQuery(temp.path) || '/'
   const query = buildQueryString()
   temp.path = query ? `${basePath}?${query}` : basePath
-}
-
-const hydrateParamsFromPath = () => {
-  temp.query_params = parseQueryParams(temp.path)
 }
 
 const addQueryParam = () => {
@@ -1848,7 +1846,7 @@ const applyCurlImport = () => {
       try {
         const parsedUrl = new URL(url)
         temp.name = `${temp.method} ${parsedUrl.pathname || '/'}`
-      } catch (error) {
+      } catch {
         temp.name = `${temp.method} ${pathWithoutQuery(url) || '/'}`
       }
     }
@@ -1998,7 +1996,7 @@ const loadLatestRuns = async (ids) => {
     const map = {}
     ;(data || []).forEach((run) => { map[run.case_id] = run })
     latestRunMap.value = map
-  } catch (error) {
+  } catch {
     latestRunMap.value = {}
   }
 }
@@ -2030,7 +2028,7 @@ const loadStats = async () => {
     const params = filters.projectId ? `?project_id=${filters.projectId}` : ''
     const data = await api.get(`/api-cases/stats${params}`)
     Object.assign(stats, data)
-  } catch (error) {
+  } catch {
     Object.assign(stats, { total: 0, active: 0, approved: 0, recent_success_rate: 0 })
   }
 }
@@ -2042,22 +2040,21 @@ const loadFolders = async () => {
     folderTree.total = data.total
     folderTree.ungrouped = data.ungrouped
     folderTree.folders = data.folders || []
-  } catch (error) {
+  } catch {
     folderTree.folders = []
   }
 }
 
 const loadProjects = async () => {
   try {
-    const [projectData, environmentData] = await Promise.all([
-      api.get('/projects'),
-      api.get('/environments')
-    ])
-    projects.value = projectData
-    environments.value = environmentData
+    const projectData = await contextStore.fetchProjects()
     if (!filters.projectId) {
       const saved = getSavedProjectId(projectData)
       if (saved) filters.projectId = saved
+    }
+    const targetProjectId = filters.projectId || projectData[0]?.id
+    if (targetProjectId) {
+      environments.value = await contextStore.fetchEnvironments(targetProjectId)
     }
   } catch (error) {
     ElMessage.error(error.message)
@@ -2089,7 +2086,7 @@ const handleSelectionChange = (rows) => { selectedRows.value = rows }
 const clearSelection = () => { tableRef.value?.clearSelection(); selectedRows.value = [] }
 const handlePageSizeChange = (size) => { pageSize.value = size; page.value = 1 }
 
-const openBatchRun = () => {
+const openBatchRun = async () => {
   const projectIds = new Set(selectedRows.value.map((row) => row.project_id))
   if (projectIds.size > 1) {
     ElMessage.warning('批量执行需选择同一项目下的用例')
@@ -2101,8 +2098,12 @@ const openBatchRun = () => {
     return
   }
   const projectId = selectedRows.value[0].project_id
-  batchEnvironments.value = environments.value.filter((item) => item.project_id === projectId)
-  batchRunVisible.value = true
+  try {
+    batchEnvironments.value = await contextStore.fetchEnvironments(projectId)
+    batchRunVisible.value = true
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
 }
 
 const submitBatchRun = async (payload) => {
@@ -2204,28 +2205,44 @@ const selectRun = async (run) => {
   if (!run) return
   try {
     currentRun.value = await api.get(`/executions/runs/${run.id}`)
-  } catch (error) {
+  } catch {
     currentRun.value = run
   }
 }
 
-const startPolling = () => {
-  stopPolling()
-  pollTimer = setInterval(async () => {
-    if (!detailVisible.value || !currentCase.value) { stopPolling(); return }
-    try {
-      const data = await api.get(`/executions/runs?case_type=API&case_id=${currentCase.value.id}&limit=100`)
-      caseRuns.value = data || []
-      const running = (data || []).some((run) => run.status === 'RUNNING' || run.status === 'PENDING')
-      if (!running) { stopPolling(); await loadLatestRuns(list.value.map((item) => item.id)) }
-    } catch (error) {
-      stopPolling()
+const runListPoller = useVisibilityPolling(
+  async ({ signal }) => {
+    if (!detailVisible.value || !currentCase.value) {
+      runListPoller.stop()
+      return
     }
-  }, 2000)
+    try {
+      const data = await api.get(`/executions/runs?case_type=API&case_id=${currentCase.value.id}&limit=100`, { signal })
+      caseRuns.value = data || []
+      if (currentRun.value?.id) {
+        const matched = caseRuns.value.find((run) => run.id === currentRun.value.id)
+        if (matched) currentRun.value = matched
+      }
+      const running = (data || []).some((run) => run.status === 'RUNNING' || run.status === 'PENDING')
+      if (!running) {
+        runListPoller.stop()
+        if (currentRun.value?.id) await selectRun(currentRun.value)
+        await loadLatestRuns(list.value.map((item) => item.id))
+      }
+    } catch (error) {
+      if (!isAbortError(error)) runListPoller.stop()
+    }
+  },
+  { intervalMs: 2000 }
+)
+
+const startPolling = () => {
+  runListPoller.stop()
+  runListPoller.start({ immediate: false })
 }
 
 const stopPolling = () => {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+  runListPoller.stop()
 }
 
 const exportCurrentCases = async () => {
@@ -2621,7 +2638,7 @@ const handleRun = async (row) => {
   runForm.max_retries = 0
   precheckResult.value = null
   try {
-    environments.value = await api.get(`/environments?project_id=${row.project_id}`)
+    environments.value = await contextStore.fetchEnvironments(row.project_id)
     runDialogVisible.value = true
   } catch (error) {
     ElMessage.error(error.message)
@@ -2707,8 +2724,17 @@ watch(() => temp.body_raw_type, () => {
   syncContentTypeForBodyMode()
 })
 
+watch(() => temp.project_id, async (projectId) => {
+  if (!projectId) return
+  try {
+    environments.value = await contextStore.fetchEnvironments(projectId)
+  } catch {
+    // ignore debug environment preload error
+  }
+})
+
 watch(() => filters.projectId, (val) => {
-  saveActiveProjectId(val)
+  contextStore.setActiveProjectId(val)
   selectedFolder.value = ''
   page.value = 1
   refreshAll()

@@ -3,7 +3,7 @@ import pytest
 
 
 def test_copy_to_review_is_atomic_and_preserves_source(client, monkeypatch):
-    from app import api
+    from app.domain import cases as cases_domain
     project = client.post('/projects', json={'name': f'CopyPlan_{time.time_ns()}', 'base_url': 'http://plan.test'})
     assert project.status_code == 201, project.text
     project_id = project.json()['id']
@@ -28,7 +28,7 @@ def test_copy_to_review_is_atomic_and_preserves_source(client, monkeypatch):
         with monkeypatch.context() as scoped:
             def fail_snapshot(_case):
                 raise RuntimeError('模拟快照写入失败')
-            scoped.setattr(api, '_case_snapshot', fail_snapshot)
+            scoped.setattr(cases_domain, '_case_snapshot', fail_snapshot)
             with pytest.raises(RuntimeError, match='模拟快照写入失败'):
                 client.post(f'/test-plans/{source_id}/cases/copy-to-review', json={'item_ids': [source_items[0]['id']]})
         assert len(client.get('/test-plans', params={'project_id': project_id}).json()) == len(before)

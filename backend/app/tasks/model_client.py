@@ -6,6 +6,7 @@ import time
 
 import httpx
 
+from app.core.observability import infer_provider_from_endpoint, record_ai_tokens
 from app.tasks.case_generation_runtime import record_model_call
 from app.tasks.case_generation_v2_support.async_runtime import shared_http_client
 
@@ -66,6 +67,15 @@ async def call_json_chat_completion(
         response.raise_for_status()
         response_payload = response.json()
         choice = response_payload["choices"][0]
+        usage = response_payload.get("usage") or {}
+        total_tokens = int(usage.get("total_tokens") or 0)
+        if total_tokens <= 0:
+            total_tokens = int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+        record_ai_tokens(
+            provider=infer_provider_from_endpoint(endpoint),
+            model=model,
+            tokens=total_tokens,
+        )
         record_model_call(
             {
                 **trace_base,
@@ -73,7 +83,7 @@ async def call_json_chat_completion(
                 "duration_ms": int((time.perf_counter() - started) * 1000),
                 "finish_reason": choice.get("finish_reason"),
                 "provider_request_id": response.headers.get("x-request-id") or response.headers.get("request-id"),
-                "usage": response_payload.get("usage") or {},
+                "usage": usage,
                 "response_chars": len(str(choice.get("message", {}).get("content") or "")),
             }
         )
