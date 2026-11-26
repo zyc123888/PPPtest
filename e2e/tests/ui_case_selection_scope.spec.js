@@ -73,6 +73,10 @@ test('UI 用例批量选择显示筛选范围并阻止跨项目操作', async ({
     caseIds.push(caseB.id)
 
     await page.goto('/case/ui')
+    const projectFilter = page.locator('.filter-bar .el-select').first()
+    await projectFilter.hover()
+    const clearProjectFilter = projectFilter.locator('.el-select__clear')
+    if (await clearProjectFilter.isVisible()) await clearProjectFilter.click()
     const search = page.getByPlaceholder('搜索名称、分组、地址或标签')
     await search.fill(casePrefix)
     const rowA = page.locator('.case-table .el-table__body tr').filter({ hasText: caseA.name })

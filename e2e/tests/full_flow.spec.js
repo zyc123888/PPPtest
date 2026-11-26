@@ -60,6 +60,11 @@ test('生产级完整流程：项目-用例-计划-执行-报告', async ({ page
   await planDialog.getByRole('button', { name: '确认' }).click()
   await expect(page.getByText('创建成功').first()).toBeVisible()
 
+  // Keep the created plan visible when the user's saved project filter points elsewhere.
+  const projectFilter = page.locator('.filter-bar .el-select').first()
+  await projectFilter.click()
+  await page.locator('.el-select-dropdown:visible').getByRole('option', { name: projectName, exact: true }).click()
+
   // 配置计划用例
   const planRow = page.getByRole('row', { name: new RegExp(planName) })
   await planRow.getByRole('button', { name: '用例配置' }).click()

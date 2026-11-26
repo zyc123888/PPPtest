@@ -99,6 +99,10 @@ test('打开无执行记录的 UI 用例时不显示上一条用例的执行详�
     })
 
     await page.goto('/case/ui')
+    const projectFilter = page.locator('.filter-bar .el-select').first()
+    await projectFilter.hover()
+    const clearProjectFilter = projectFilter.locator('.el-select__clear')
+    if (await clearProjectFilter.isVisible()) await clearProjectFilter.click()
     const search = page.getByPlaceholder('搜索名称、分组、地址或标签')
     await search.fill(caseAName)
     const caseARow = page.locator('.case-table').getByRole('row').filter({ hasText: caseAName })
