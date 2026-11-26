@@ -121,7 +121,7 @@
         <div v-if="canEdit" class="ds-actions">
           <template v-if="!editing">
             <el-button size="small" type="primary" plain :icon="Edit" @click="startEdit">编辑缺陷</el-button>
-            <el-popconfirm title="确认删除该缺陷？" @confirm="removeDefect">
+            <el-popconfirm v-if="canDelete" title="确认删除该缺陷？" @confirm="removeDefect">
               <template #reference>
                 <el-button size="small" type="danger" plain>删除缺陷</el-button>
               </template>
@@ -286,6 +286,7 @@ const reproducibilityOptions = REPRODUCIBILITY_OPTIONS
 const reproducibilityLabels = REPRODUCIBILITY_LABELS
 const allStatuses = Object.keys(DEFECT_STATUS_LABELS)
 const canEdit = computed(() => ['owner', 'manager', 'member'].includes(props.myRole))
+const canDelete = computed(() => ['owner', 'manager'].includes(props.myRole))
 const defectTransitions = {
   NEW: ['CONFIRMED', 'WONTFIX'],
   CONFIRMED: ['IN_PROGRESS', 'WONTFIX'],
@@ -371,7 +372,11 @@ async function fetchList() {
 function reload() { page.value = 1; fetchList() }
 
 async function loadMembers() {
-  try { members.value = await api.get(`/projects/${props.project.id}/members`) } catch { /* noop */ }
+  try {
+    members.value = await api.get(`/projects/${props.project.id}/members`)
+  } catch {
+    ElMessage.warning('项目成员列表加载失败，处理人名称可能暂时显示为 ID')
+  }
 }
 
 function openCreate() {

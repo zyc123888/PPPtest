@@ -8244,7 +8244,8 @@ def test_notification_setting_crud_and_test_endpoint(client, monkeypatch) -> Non
         status_code = 200
         text = "ok"
 
-    def fake_post(url, json=None, timeout=None):
+    def fake_post(url, json=None, timeout=None, *, follow_redirects):
+        assert follow_redirects is False
         captured["url"] = url
         captured["json"] = json
         return _FakeResponse()
@@ -8291,7 +8292,8 @@ def test_notification_channel_payload_formats(monkeypatch) -> None:
         status_code = 200
         text = "ok"
 
-    def fake_post(url, json=None, timeout=None):
+    def fake_post(url, json=None, timeout=None, *, follow_redirects):
+        assert follow_redirects is False
         calls.append((url, json))
         return _FakeResponse()
 

@@ -2,9 +2,7 @@
   <div class="sidebar-root" :class="{ 'is-collapsed': collapsed }">
     <div class="sidebar-brand">
       <div class="omnitest-logo">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M5 12.5L9.8 17L19 7.5" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
+        <BrandLogo :size="26" />
       </div>
       <div v-if="!collapsed" class="brand-meta">
         <span class="brand-text" data-testid="app-title">OmniTest</span>
@@ -54,6 +52,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import BrandLogo from '@/components/BrandLogo.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -146,11 +145,12 @@ const openCommandPalette = () => {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: linear-gradient(180deg, #3b9eff 0%, #0071e3 100%);
-  box-shadow: 0 2px 8px rgba(0, 113, 227, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(99, 102, 241, 0.14);
   flex-shrink: 0;
 }
 

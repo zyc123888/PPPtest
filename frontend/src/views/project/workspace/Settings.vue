@@ -258,10 +258,16 @@ async function fetchMembers() {
 }
 
 async function loadUsers() {
-  try { allUsers.value = await api.get('/users') } catch { allUsers.value = [] }
+  allUsers.value = []
+  try {
+    allUsers.value = await api.get(`/projects/${props.project.id}/member-candidates`)
+  } catch (error) {
+    ElMessage.error(error.message || '候选成员加载失败')
+  }
 }
 
 function openAdd() {
+  loadUsers()
   Object.assign(addForm, { user_id: null, role: 'member' })
   addVisible.value = true
 }
@@ -360,7 +366,7 @@ async function saveVariables() {
   } catch (error) { ElMessage.error(error.message) } finally { varSaving.value = false }
 }
 
-onMounted(() => { fetchMembers(); loadUsers(); fetchNotifySetting(); fetchVariables() })
+onMounted(() => { fetchMembers(); fetchNotifySetting(); fetchVariables() })
 </script>
 
 <style scoped>

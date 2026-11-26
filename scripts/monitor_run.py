@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """实时监控指定任务执行状态"""
 import sys
+import os
 import json
 import time
 import urllib.request
 from datetime import datetime
 
 API_URL = "http://127.0.0.1:8000/api/v1/executions/runs/57"
-TOKEN = "r0zKpo0Vz8O9ygJEFZ8GtuEOm4JwqjQ6t_bKq9pLFvU"
+TOKEN = os.environ.get("OMNITEST_MONITOR_TOKEN")
+if not TOKEN:
+    sys.exit("请设置 OMNITEST_MONITOR_TOKEN")
 INTERVAL = 5
 
 STATUS_EMOJI = {

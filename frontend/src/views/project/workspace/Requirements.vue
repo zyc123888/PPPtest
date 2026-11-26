@@ -138,7 +138,7 @@
     <el-drawer v-model="drawerVisible" :title="current?.title || '需求详情'" size="560px">
       <div v-if="current" class="drawer-body">
         <div class="drawer-section">
-          <div v-if="canEdit" class="ds-row" style="justify-content: flex-end">
+          <div v-if="canDelete" class="ds-row" style="justify-content: flex-end">
             <el-popconfirm title="确认删除该需求？关联用例关系将一并解除" @confirm="removeRequirement">
               <template #reference>
                 <el-button size="small" type="danger" plain>删除需求</el-button>
@@ -290,6 +290,7 @@ async function removeRequirement() {
 }
 
 const canEdit = computed(() => ['owner', 'manager', 'member'].includes(props.myRole))
+const canDelete = computed(() => ['owner', 'manager'].includes(props.myRole))
 
 const members = ref([])
 const memberMap = computed(() => {

@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import ipaddress
+import socket
 from urllib.parse import urljoin, urlparse
 
 from app.core.config import settings
@@ -85,8 +86,17 @@ class UnsafeTargetURLError(ValueError):
     """目标 URL 触发 SSRF 安全拦截时抛出的异常。"""
 
 
+def _check_outbound_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, host_label: str) -> None:
+    if getattr(ip, "ipv4_mapped", None) is not None:
+        ip = ip.ipv4_mapped
+    if ip.is_link_local or ip.is_unspecified or ip.is_multicast:
+        raise UnsafeTargetURLError(f"出于安全策略，禁止访问受限网段地址：{host_label}")
+    if str(ip) in {"169.254.169.254", "fd00:ec2::254"}:
+        raise UnsafeTargetURLError(f"出于安全策略，禁止访问云元数据地址：{host_label}")
+
+
 def validate_outbound_url(url: str) -> str:
-    """校验外发请求 URL，拦截云元数据网段、非法协议及受保护内部基础设施主机。"""
+    """校验外发请求 URL，拦截云元数据网段、非法协议、受保护内部主机及 DNS 指向受限网段的地址。"""
     parsed = urlparse((url or "").strip())
     scheme = (parsed.scheme or "").lower()
     if scheme not in {"http", "https"}:
@@ -104,13 +114,23 @@ def validate_outbound_url(url: str) -> str:
     if host in blocked_hosts or host.endswith(".internal"):
         raise UnsafeTargetURLError(f"出于安全策略，禁止访问受保护内部地址：{host}")
     try:
-        ip = ipaddress.ip_address(host)
-        if ip.is_link_local or ip.is_unspecified or ip.is_multicast:
-            raise UnsafeTargetURLError(f"出于安全策略，禁止访问受限网段地址：{host}")
-        if str(ip) in {"169.254.169.254", "fd00:ec2::254"}:
-            raise UnsafeTargetURLError(f"出于安全策略，禁止访问云元数据地址：{host}")
+        literal_ip = ipaddress.ip_address(host)
     except ValueError:
-        pass
+        # Resolve hostnames to block DNS records pointing to link-local / cloud metadata IPs.
+        if host not in {"localhost", "testserver"}:
+            try:
+                addr_infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            except OSError:
+                addr_infos = []
+            for info in addr_infos:
+                raw_ip = info[4][0]
+                try:
+                    resolved_ip = ipaddress.ip_address(raw_ip)
+                except ValueError:
+                    continue
+                _check_outbound_ip(resolved_ip, host)
+    else:
+        _check_outbound_ip(literal_ip, host)
     return url
 
 

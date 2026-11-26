@@ -1,4 +1,4 @@
-# OmniTest · AI 测试用例生成与执行平台
+# <img src="frontend/public/logo.png" width="32" height="32" align="absmiddle" alt="OmniTest Logo" /> OmniTest · AI 测试用例生成与执行平台
 
 一个面向测试团队的 **AI 驱动测试用例生成与执行平台**：用大模型把需求/文档自动拆解成结构化用例，并管理 API/UI 用例、测试计划、执行与报告。后端 FastAPI，前端 Vue 3，异步任务 Celery + Redis，端到端用 Playwright 自测。
 
@@ -120,8 +120,9 @@ docker-compose ps
 ### 5. 运行测试
 
 ```bash
-# 后端 pytest（容器内）
-docker-compose exec -T backend pytest
+# 后端 pytest（容器内临时 SQLite）
+docker-compose exec -T backend env -u DATABASE_URL -u BACKEND_INTERNAL_URL \
+  SEED_DEMO_DATA_ON_BOOTSTRAP=true CASE_GEN_WATCHDOG_ENABLED=false pytest
 
 # 前端 Playwright 端到端（e2e profile）
 docker-compose --profile test run --rm e2e

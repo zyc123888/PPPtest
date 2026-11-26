@@ -777,7 +777,7 @@ const pagedReports = computed(() => {
   return filteredReports.value.slice(start, start + pageSize)
 })
 const successCount = computed(() => filteredReports.value.filter((item) => item.status === 'SUCCESS').length)
-const failedCount = computed(() => filteredReports.value.filter((item) => item.status !== 'SUCCESS').length)
+const failedCount = computed(() => filteredReports.value.filter((item) => ['FAILED', 'ERROR', 'TIMEOUT'].includes(item.status)).length)
 const failedCaseCount = computed(() => filteredReports.value.reduce((sum, item) => sum + (item.fail_count || 0), 0))
 const hasConfigFailures = computed(() => report.test_runs.some((item) => item.error_type === 'CONFIG'))
 const reportListFailureSummary = computed(() => {
@@ -954,9 +954,12 @@ const openDetail = async (row) => {
     shareUrl.value = data.plan_run?.share_token ? buildShareUrl(`/shared-report/${data.plan_run.share_token}`) : ''
     diffSummary.value = null
     detailVisible.value = true
-    const prevEntry = (report.recent_history || []).find((h) => h.id !== data.plan_run?.id)
-    if (prevEntry?.id) {
-      api.get(`/reports/${prevEntry.id}`).then((prevData) => {
+    const prevEntry = (report.recent_history || []).find((h) => (
+      h.plan_run_id < data.plan_run?.id && ['SUCCESS', 'FAILED', 'ERROR', 'TIMEOUT'].includes(h.status)
+    ))
+    if (prevEntry) {
+      api.get(`/reports/${prevEntry.plan_run_id}`).then((prevData) => {
+        if (report.plan_run?.id !== data.plan_run?.id) return
         const prevMap = new Map((prevData.test_runs || []).map((r) => [`${r.case_type}:${r.case_id}`, r]))
         const newFailures = []
         const fixed = []
@@ -969,7 +972,7 @@ const openDetail = async (row) => {
           else if (curOk && prevOk === false) fixed.push(cur.case_name || `#${cur.case_id}`)
           else if (!curOk && prevOk === false) persistentFailures.push(cur.case_name || `#${cur.case_id}`)
         })
-        diffSummary.value = { prevRunId: prevEntry.id, newFailures, fixed, persistentFailures }
+        diffSummary.value = { prevRunId: prevEntry.plan_run_id, newFailures, fixed, persistentFailures }
       }).catch(() => { /* ignore diff error */ })
     }
   } catch (error) {

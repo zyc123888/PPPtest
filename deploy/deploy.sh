@@ -46,7 +46,12 @@ log_deploy() {
 # 发布前把 MariaDB 全量 dump 落盘并校验大小，保留最近 BACKUP_KEEP 份。
 backup_database() {
   # 首次部署（尚无运行中的 mysql 容器）没有存量数据可备份，直接跳过。
-  if [[ -z "$(compose ps -q mysql 2>/dev/null)" ]]; then
+  local mysql_container
+  if ! mysql_container="$(compose ps -q mysql)"; then
+    echo "Could not query the existing MariaDB container." >&2
+    return 1
+  fi
+  if [[ -z "${mysql_container}" ]]; then
     echo "No running mysql container; skipping pre-deploy database backup."
     log_deploy "backup skipped (no running mysql)"
     return 0
@@ -91,18 +96,16 @@ if [[ -f "${STATE_FILE}" ]]; then
   PREVIOUS_TAG="$(tr -d '[:space:]' < "${STATE_FILE}")"
 fi
 
+export IMAGE_TAG="${NEW_TAG}"
 if ! backup_database; then
   echo "Pre-deploy database backup failed; aborting deployment." >&2
   exit 6
 fi
 
-export IMAGE_TAG="${NEW_TAG}"
 echo "Deploying OmniTest image tag ${NEW_TAG}"
 log_deploy "deploy start tag=${NEW_TAG} previous=${PREVIOUS_TAG:-none}"
 compose pull
-compose up -d --remove-orphans
-
-if healthcheck; then
+if compose up -d --remove-orphans && healthcheck; then
   printf '%s\n' "${NEW_TAG}" > "${STATE_FILE}"
   log_deploy "deploy success tag=${NEW_TAG}"
   compose ps
@@ -118,9 +121,7 @@ if [[ -n "${PREVIOUS_TAG}" && "${PREVIOUS_TAG}" != "${NEW_TAG}" ]]; then
   echo "Rolling back to ${PREVIOUS_TAG}." >&2
   log_deploy "rollback start tag=${PREVIOUS_TAG} (from ${NEW_TAG})"
   export IMAGE_TAG="${PREVIOUS_TAG}"
-  compose pull
-  compose up -d --remove-orphans
-  if healthcheck; then
+  if compose pull && compose up -d --remove-orphans && healthcheck; then
     echo "Rollback succeeded: ${PREVIOUS_TAG}" >&2
     log_deploy "rollback success tag=${PREVIOUS_TAG}"
   else

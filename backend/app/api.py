@@ -73,6 +73,7 @@ from app.execution_runtime import (
 from app.assertion_engine import ResponseFacts, evaluate_assertions, run_extractors
 from app.model_registry import case_generation_model_options
 from app.permissions import PROJECT_ROLE_RANK, project_role_allows
+from app.rich_text_security import plain_text_to_safe_html
 from app.tasks.case_generation import (
     _normalize_model_base_url,
     normalize_model_api_key,
@@ -88,6 +89,7 @@ from app.tasks.case_generation_v2 import (
 from app.tasks.case_generation_runtime import attempt_output_dir, create_attempt, set_attempt_task_id
 from app.tasks.case_generation_v2_support.metrics import build_generation_metrics, compare_generation_metrics
 from app.tasks.executions import (
+    normalize_datasets,
     run_api_case,
     run_performance_case,
     run_test_plan,
@@ -219,12 +221,16 @@ def _require_project_access(db: Session, user: User, project: Project | None) ->
     return project
 
 
+def _resolve_project_role(db: Session, user: User, project: Project) -> str:
+    if user.role == "admin" or (project.created_by is not None and project.created_by == user.id):
+        return "owner"
+    member = db.scalar(select(ProjectMember).where(ProjectMember.project_id == project.id, ProjectMember.user_id == user.id))
+    return member.role if member else "viewer"
+
+
 def _require_project_member(db: Session, user: User, project: Project | None, minimum_role: str = "member") -> Project:
     project = _require_project_access(db, user, project)
-    if user.role == "admin" or (project.created_by is not None and project.created_by == user.id):
-        return project
-    member = db.scalar(select(ProjectMember).where(ProjectMember.project_id == project.id, ProjectMember.user_id == user.id))
-    if not project_role_allows(member.role if member else "viewer", minimum_role):
+    if not project_role_allows(_resolve_project_role(db, user, project), minimum_role):
         raise HTTPException(status_code=403, detail="项目内权限不足")
     return project
 
@@ -235,8 +241,13 @@ def _guard_project_member_change(db: Session, user: User, project: Project, memb
     if user.role != "admin" and ((member and member.role == "owner") or next_role == "owner"):
         _require_project_member(db, user, project, "owner")
     if member and member.role == "owner" and next_role != "owner":
-        count = db.scalar(select(func.count(ProjectMember.id)).where(ProjectMember.project_id == project.id, ProjectMember.role == "owner"))
-        if count <= 1:
+        owner_ids = list(db.scalars(
+            select(ProjectMember.id)
+            .where(ProjectMember.project_id == project.id, ProjectMember.role == "owner")
+            .order_by(ProjectMember.id)
+            .with_for_update()
+        ))
+        if member.id in owner_ids and len(owner_ids) <= 1:
             raise HTTPException(status_code=400, detail="项目至少需要保留一个 Owner")
 
 
@@ -489,13 +500,15 @@ def _build_report_insights(
 ) -> schemas.ReportInsights:
     report_count = len(runs)
     success_count = sum(1 for run in runs if run.status == "SUCCESS")
-    failed_count = report_count - success_count
+    completed_runs = [run for run in runs if run.status in {"SUCCESS", "FAILED", "ERROR", "TIMEOUT"}]
+    completed_count = len(completed_runs)
+    failed_count = completed_count - success_count
     failed_case_count = sum(run.fail_count or 0 for run in runs)
     config_fail_count = sum(failure_reason_map.get(run.id, {}).get("CONFIG", 0) for run in runs)
-    success_rate = round((success_count / report_count) * 100, 1) if report_count else 0.0
+    success_rate = round((success_count / completed_count) * 100, 1) if completed_count else 0.0
     average_pass_rate = round(
-        sum(_pass_rate(run.pass_count or 0, run.total_count or 0) for run in runs) / report_count, 1
-    ) if report_count else 0.0
+        sum(_pass_rate(run.pass_count or 0, run.total_count or 0) for run in completed_runs) / completed_count, 1
+    ) if completed_count else 0.0
     duration_values = [run.duration_ms for run in runs if run.duration_ms is not None]
     average_duration_ms = int(sum(duration_values) / len(duration_values)) if duration_values else None
 
@@ -518,8 +531,8 @@ def _build_report_insights(
         )
         for run in runs[:10]
     ]
-    recent_window = runs[:10]
-    older_window = runs[10:20]
+    recent_window = completed_runs[:10]
+    older_window = completed_runs[10:20]
     recent_success_rate = round(
         (sum(1 for run in recent_window if run.status == "SUCCESS") / len(recent_window)) * 100, 1
     ) if recent_window else success_rate
@@ -630,9 +643,12 @@ def _validation_issues_for_api_case(case: APICase, variables: dict | None) -> li
                 if isinstance(extractor, dict) and str(extractor.get("name") or "").strip():
                     known[str(extractor["name"]).strip()] = "__extracted__"
         return issues
-    issues.extend(_collect_missing_template_issues(case.path, variables, scope=case_scope, field="path"))
-    issues.extend(_collect_missing_template_issues(case.headers_json, variables, scope=case_scope, field="headers_json"))
-    issues.extend(_collect_missing_template_issues(case.body_json, variables, scope=case_scope, field="body_json"))
+    datasets = normalize_datasets(case.datasets_json)
+    for index, row in enumerate(datasets or [{}], start=1):
+        scope = f"{case_scope}#row{index}" if datasets else case_scope
+        known = {**(variables or {}), **{key: value for key, value in row.items() if key != "__name__"}}
+        for field in ("path", "headers_json", "body_json"):
+            issues.extend(_collect_missing_template_issues(getattr(case, field), known, scope=scope, field=field))
     return issues
 
 
@@ -1271,13 +1287,13 @@ def _ensure_workspace_owner_guard(
     remains_owner = (next_role or member.role) == "owner" and not deleting
     if not current_is_owner or remains_owner:
         return
-    owner_count = db.scalar(
-        select(func.count(WorkspaceMember.id)).where(
+    owner_ids = list(db.scalars(
+        select(WorkspaceMember.id).where(
             WorkspaceMember.workspace_id == member.workspace_id,
             WorkspaceMember.role == "owner",
-        )
-    )
-    if owner_count == 1:
+        ).order_by(WorkspaceMember.id).with_for_update()
+    ))
+    if member.id in owner_ids and len(owner_ids) <= 1:
         raise HTTPException(status_code=400, detail="工作空间至少需要保留一个 Owner")
 
 
@@ -1490,21 +1506,24 @@ def list_workspace_members(workspace_id: int, db: Session = Depends(get_db)) -> 
             select(WorkspaceMember).where(WorkspaceMember.workspace_id == workspace_id).order_by(WorkspaceMember.id.asc())
         ).all()
     )
-    result = []
-    for member in members:
-        user = db.get(User, member.user_id)
-        result.append(
-            schemas.WorkspaceMemberRead(
-                id=member.id,
-                workspace_id=member.workspace_id,
-                user_id=member.user_id,
-                username=user.username if user else None,
-                display_name=user.display_name if user else None,
-                role=member.role,
-                created_at=member.created_at,
-            )
+    user_ids = {member.user_id for member in members if member.user_id is not None}
+    users_by_id = (
+        {user.id: user for user in db.scalars(select(User).where(User.id.in_(user_ids))).all()}
+        if user_ids
+        else {}
+    )
+    return [
+        schemas.WorkspaceMemberRead(
+            id=member.id,
+            workspace_id=member.workspace_id,
+            user_id=member.user_id,
+            username=users_by_id[member.user_id].username if member.user_id in users_by_id else None,
+            display_name=users_by_id[member.user_id].display_name if member.user_id in users_by_id else None,
+            role=member.role,
+            created_at=member.created_at,
         )
-    return result
+        for member in members
+    ]
 
 
 @protected_router.post(
@@ -1524,6 +1543,11 @@ def add_workspace_member(
     user = db.get(User, payload.user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在")
+    existing = db.scalar(select(WorkspaceMember).where(
+        WorkspaceMember.workspace_id == workspace_id, WorkspaceMember.user_id == user.id
+    ))
+    if existing is not None:
+        _ensure_workspace_owner_guard(db, existing, next_role=payload.role)
     member = services.ensure_workspace_member(db, workspace_id, payload.user_id, payload.role)
     return schemas.WorkspaceMemberRead(
         id=member.id,
@@ -1613,6 +1637,23 @@ def list_project_members(
     return [_project_member_to_read(db, member) for member in members]
 
 
+@protected_router.get("/projects/{project_id}/member-candidates", response_model=list[schemas.ProjectMemberCandidate])
+def list_project_member_candidates(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[User]:
+    project = _require_project_member(db, current_user, db.get(Project, project_id), "manager")
+    stmt = select(User).order_by(User.username)
+    if current_user.role != "admin":
+        if project.workspace_id is None:
+            return []
+        stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.id).where(
+            WorkspaceMember.workspace_id == project.workspace_id
+        )
+    return list(db.scalars(stmt))
+
+
 @protected_router.post(
     "/projects/{project_id}/members",
     response_model=schemas.ProjectMemberRead,
@@ -1697,11 +1738,11 @@ def list_projects(
     if workspace_id:
         _require_workspace_access(db, current_user, workspace_id)
         stmt = stmt.where(Project.workspace_id == workspace_id)
-    elif current_user.role != "admin":
-        workspace_ids = _workspace_ids_for_user(db, current_user)
-        if not workspace_ids:
+    if current_user.role != "admin":
+        accessible_ids = _accessible_project_ids(db, current_user)
+        if not accessible_ids:
             return []
-        stmt = stmt.where(Project.workspace_id.in_(workspace_ids))
+        stmt = stmt.where(Project.id.in_(accessible_ids))
     return list(db.scalars(stmt).all())
 
 
@@ -1749,7 +1790,7 @@ def update_project(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Project:
-    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    project = _require_project_member(db, current_user, db.get(Project, project_id), "manager")
     data = payload.model_dump(exclude_unset=True)
     if "workspace_id" in data and data["workspace_id"] is not None:
         workspace = db.get(Workspace, data["workspace_id"])
@@ -1850,7 +1891,7 @@ def update_project_variables(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """更新项目级全局变量池。"""
-    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    project = _require_project_member(db, current_user, db.get(Project, project_id), "manager")
     project.variables_json = payload.variables_json or {}
     project.updated_by = current_user.id
     db.commit()
@@ -5433,7 +5474,7 @@ def list_environments(
     project_id: int | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> list[Environment]:
+) -> list[schemas.EnvironmentRead]:
     stmt = select(Environment).order_by(Environment.id.asc())
     if project_id:
         _require_project_access(db, current_user, db.get(Project, project_id))
@@ -5443,7 +5484,20 @@ def list_environments(
         if not project_ids:
             return []
         stmt = stmt.where(Environment.project_id.in_(project_ids))
-    return list(db.scalars(stmt).all())
+    result = []
+    roles = {}
+    for env in db.scalars(stmt):
+        if env.project_id not in roles:
+            roles[env.project_id] = _resolve_project_role(db, current_user, db.get(Project, env.project_id))
+        if project_role_allows(roles[env.project_id], "manager"):
+            result.append(schemas.EnvironmentRead.model_validate(env))
+        else:
+            result.append(schemas.EnvironmentRead(
+                id=env.id, project_id=env.project_id, name=env.name, base_url=env.base_url,
+                created_by=env.created_by, updated_by=env.updated_by,
+                created_at=env.created_at, updated_at=env.updated_at,
+            ))
+    return result
 
 
 @protected_router.post(
@@ -5457,7 +5511,7 @@ def create_environment(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Environment:
-    _require_project_access(db, current_user, db.get(Project, payload.project_id))
+    _require_project_member(db, current_user, db.get(Project, payload.project_id), "manager")
 
     env = Environment(**payload.model_dump(), created_by=current_user.id, updated_by=current_user.id)
     db.add(env)
@@ -5480,7 +5534,7 @@ def update_environment(
     env = db.get(Environment, environment_id)
     if env is None:
         raise HTTPException(status_code=404, detail="环境不存在")
-    _require_project_access(db, current_user, db.get(Project, env.project_id))
+    _require_project_member(db, current_user, db.get(Project, env.project_id), "manager")
 
     env.name = payload.name
     env.base_url = payload.base_url
@@ -5498,6 +5552,9 @@ def delete_environment(environment_id: int, db: Session = Depends(get_db)) -> No
     env = db.get(Environment, environment_id)
     if env is None:
         raise HTTPException(status_code=404, detail="环境不存在")
+    scheduled_plan = db.scalar(select(TestPlan.id).where(TestPlan.schedule_environment_id == environment_id).limit(1))
+    if scheduled_plan is not None:
+        raise HTTPException(status_code=409, detail="请先修改引用该环境的定时计划")
 
     db.execute(update(TestRun).where(TestRun.environment_id == environment_id).values(environment_id=None))
     db.execute(
@@ -5516,7 +5573,7 @@ def get_environment_variables(
     env = db.get(Environment, environment_id)
     if env is None:
         raise HTTPException(status_code=404, detail="环境不存在")
-    _require_project_access(db, current_user, db.get(Project, env.project_id))
+    _require_project_member(db, current_user, db.get(Project, env.project_id), "manager")
     return _serialize_environment_variables(env)
 
 
@@ -5699,7 +5756,7 @@ def update_environment_variables(
     env = db.get(Environment, environment_id)
     if env is None:
         raise HTTPException(status_code=404, detail="环境不存在")
-    _require_project_access(db, current_user, db.get(Project, env.project_id))
+    _require_project_member(db, current_user, db.get(Project, env.project_id), "manager")
     env.variables_json = payload.variables_json
     env.headers_json = payload.headers_json
     env.auth_config_json = payload.auth_config_json
@@ -6154,7 +6211,7 @@ def update_test_plan_schedule(
     plan = db.get(TestPlan, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="测试计划不存在")
-    _require_project_access(db, current_user, db.get(Project, plan.project_id))
+    _require_project_member(db, current_user, db.get(Project, plan.project_id))
 
     if payload.schedule_enabled:
         if payload.schedule_environment_id is not None:
@@ -6189,7 +6246,7 @@ def get_project_notification_setting(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> schemas.NotificationSettingRead:
-    _require_project_access(db, current_user, db.get(Project, project_id))
+    project = _require_project_access(db, current_user, db.get(Project, project_id))
     setting = db.scalar(
         select(ProjectNotificationSetting).where(ProjectNotificationSetting.project_id == project_id)
     )
@@ -6199,7 +6256,7 @@ def get_project_notification_setting(
         project_id=setting.project_id,
         enabled=setting.enabled,
         channel_type=setting.channel_type,
-        webhook_url=setting.webhook_url,
+        webhook_url=setting.webhook_url if project_role_allows(_resolve_project_role(db, current_user, project), "manager") else None,
         secret_configured=bool(setting.secret),
         notify_on=setting.notify_on,
         updated_at=setting.updated_at,
@@ -6237,7 +6294,7 @@ def update_project_notification_setting(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ProjectNotificationSetting:
-    _require_project_access(db, current_user, db.get(Project, project_id))
+    _require_project_member(db, current_user, db.get(Project, project_id), "manager")
     setting = _upsert_notification_setting(db, project_id, payload)
     return schemas.NotificationSettingRead(
         project_id=setting.project_id,
@@ -6260,15 +6317,19 @@ def test_project_notification_setting(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    project = _require_project_access(db, current_user, db.get(Project, project_id))
+    project = _require_project_member(db, current_user, db.get(Project, project_id), "manager")
     if not payload.webhook_url:
         raise HTTPException(status_code=400, detail="请先填写 Webhook 地址")
+    saved = db.scalar(select(ProjectNotificationSetting).where(ProjectNotificationSetting.project_id == project_id))
+    secret = payload.secret
+    if secret is None and saved and saved.webhook_url == payload.webhook_url and saved.channel_type == payload.channel_type:
+        secret = saved.secret
     probe = ProjectNotificationSetting(
         project_id=project_id,
         enabled=True,
         channel_type=payload.channel_type,
         webhook_url=payload.webhook_url,
-        secret=payload.secret,
+        secret=secret,
         notify_on=payload.notify_on,
     )
     text = f"【测试平台】这是一条测试消息\n项目：{project.name}\n若收到本消息，说明通知配置正确。"
@@ -6908,7 +6969,7 @@ def rerun_execution(
     run = db.get(TestRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="执行记录不存在")
-    project = _require_project_access(db, current_user, db.get(Project, run.project_id))
+    project = _require_project_member(db, current_user, db.get(Project, run.project_id))
     environment = db.get(Environment, run.environment_id) if run.environment_id else None
     if environment is not None and environment.project_id != run.project_id:
         raise HTTPException(status_code=400, detail="环境不存在或不属于该项目")
@@ -7373,7 +7434,7 @@ def create_defect(
     ws_defect = Defect(
         project_id=payload.project_id,
         title=payload.title[:200],
-        description=payload.summary,
+        description=plain_text_to_safe_html(payload.summary),
         severity=payload.severity if payload.severity in {"BLOCKER", "CRITICAL", "MAJOR", "MINOR", "TRIVIAL"} else "MAJOR",
         priority="P1",
         status=status_map.get(payload.status, "NEW"),
@@ -7424,7 +7485,7 @@ def update_defect(
     )
     if ws_defect is not None:
         ws_defect.title = defect.title[:200]
-        ws_defect.description = defect.summary
+        ws_defect.description = plain_text_to_safe_html(defect.summary)
         if defect.severity in {"BLOCKER", "CRITICAL", "MAJOR", "MINOR", "TRIVIAL"}:
             ws_defect.severity = defect.severity
         ws_defect.status = status_map.get(defect.status, ws_defect.status)
@@ -7576,8 +7637,8 @@ def download_report_file(
         junit_path = os.path.join(plan_dir, "junit.xml")
 
         summary_payload = {
-            "plan_run": _serialize_plan_run(plan_run).model_dump(),
-            "test_runs": [schemas.TestRunRead.model_validate(run).model_dump() for run in runs],
+            "plan_run": _serialize_plan_run(plan_run).model_dump(mode="json"),
+            "test_runs": [schemas.TestRunRead.model_validate(run).model_dump(mode="json") for run in runs],
         }
         with open(summary_path, "w", encoding="utf-8") as handle:
             json.dump(summary_payload, handle, ensure_ascii=False, indent=2)
@@ -7659,7 +7720,7 @@ def enable_report_share(
     plan_run = db.get(TestPlanRun, plan_run_id)
     if plan_run is None:
         raise HTTPException(status_code=404, detail="报告不存在")
-    _require_project_access(db, current_user, db.get(Project, plan_run.project_id))
+    _require_project_member(db, current_user, db.get(Project, plan_run.project_id), "manager")
     if not plan_run.share_token:
         plan_run.share_token = secrets.token_urlsafe(24)
         db.commit()
@@ -7686,7 +7747,7 @@ def disable_report_share(
     plan_run = db.get(TestPlanRun, plan_run_id)
     if plan_run is None:
         raise HTTPException(status_code=404, detail="报告不存在")
-    _require_project_access(db, current_user, db.get(Project, plan_run.project_id))
+    _require_project_member(db, current_user, db.get(Project, plan_run.project_id), "manager")
     plan_run.share_token = None
     db.commit()
     db.refresh(plan_run)

@@ -3,7 +3,12 @@
     <div class="login-shell">
       <section class="login-hero">
         <div class="brand-badge">QA Platform</div>
-        <h1 class="cyber-title">OmniTest</h1>
+        <div class="brand-heading">
+          <div class="brand-logo-wrap">
+            <BrandLogo :size="46" />
+          </div>
+          <h1 class="cyber-title">OmniTest</h1>
+        </div>
         <p>统一管理测试资产、计划、执行与报告，支撑团队的交付效率。</p>
         <ul class="hero-points">
           <li>用例与计划一体化管理</li>
@@ -46,6 +51,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import BrandLogo from '@/components/BrandLogo.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -159,13 +165,34 @@ onMounted(() => {
   width: fit-content;
 }
 
+.brand-heading {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.brand-logo-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 60px;
+  height: 60px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(99, 102, 241, 0.16);
+  box-shadow: 0 8px 24px rgba(37, 99, 235, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  flex-shrink: 0;
+}
+
 .cyber-title {
   font-size: 48px;
   font-weight: 800;
-  background: linear-gradient(135deg, #4f46e5 0%, #a855f7 100%);
+  background: linear-gradient(135deg, #2563eb 0%, #6366f1 55%, #14b8a6 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  margin-bottom: 16px;
+  margin: 0;
+  line-height: 1.1;
   letter-spacing: -1px;
 }
 

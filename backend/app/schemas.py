@@ -1498,6 +1498,12 @@ class UserCreate(BaseModel):
     status: str = Field(default="ACTIVE", min_length=2, max_length=20)
 
 
+class ProjectMemberCandidate(ORMBaseModel):
+    id: int
+    username: str
+    display_name: str | None = None
+
+
 class UserRead(ORMBaseModel):
     id: int
     username: str

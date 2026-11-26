@@ -685,6 +685,7 @@ const subscribeRunStream = (runId) => {
   const es = new EventSource(`/api/v1/executions/runs/${runId}/stream`, { withCredentials: true })
   runEventSource = es
   es.onmessage = async (event) => {
+    if (runEventSource !== es) return
     try {
       const payload = JSON.parse(event.data)
       if (currentRun.value && currentRun.value.id === payload.id) {
@@ -693,7 +694,9 @@ const subscribeRunStream = (runId) => {
       if (['SUCCESS', 'FAILED', 'ERROR', 'TIMEOUT', 'CANCELLED'].includes(payload.status)) {
         closeRunStream()
         if (inspectorVisible.value && currentRun.value?.id === payload.id) {
-          currentRun.value = await api.get(`/executions/runs/${payload.id}`)
+          const data = await api.get(`/executions/runs/${payload.id}`)
+          if (!inspectorVisible.value || currentRun.value?.id !== payload.id) return
+          currentRun.value = data
           if (inspectorTab.value === 'logs') await fetchLogs(payload.id, true)
           if (inspectorTab.value === 'artifacts') await fetchArtifacts(payload.id, true)
         }
@@ -704,43 +707,62 @@ const subscribeRunStream = (runId) => {
     }
   }
   es.onerror = () => {
-    closeRunStream()
+    if (runEventSource === es) closeRunStream()
   }
 }
+
+let inspectorRequest = 0
+let logRequest = 0
+let artifactRequest = 0
 
 const fetchLogs = async (runId, force = false) => {
   if (!runId) return
   if (!force && loadedLogRunId.value === runId) return
+  const request = ++logRequest
+  const isCurrent = () => request === logRequest && currentRun.value?.id === runId
   logLoading.value = true
   try {
-    logData.value = await api.get(`/executions/runs/${runId}/logs`)
+    const data = await api.get(`/executions/runs/${runId}/logs`)
+    if (!isCurrent()) return
+    logData.value = data
     loadedLogRunId.value = runId
   } catch (error) {
-    ElMessage.error(error.message)
+    if (isCurrent()) ElMessage.error(error.message)
   } finally {
-    logLoading.value = false
+    if (isCurrent()) logLoading.value = false
   }
 }
 
 const fetchArtifacts = async (runId, force = false) => {
   if (!runId) return
   if (!force && loadedArtifactRunId.value === runId) return
+  const request = ++artifactRequest
+  const isCurrent = () => request === artifactRequest && currentRun.value?.id === runId
   artifactLoading.value = true
   try {
     const data = await api.get(`/executions/runs/${runId}/artifacts`)
+    if (!isCurrent()) return
     artifactRunId.value = runId
     artifactData.value = data.artifacts || []
     loadedArtifactRunId.value = runId
   } catch (error) {
-    ElMessage.error(error.message)
+    if (isCurrent()) ElMessage.error(error.message)
   } finally {
-    artifactLoading.value = false
+    if (isCurrent()) artifactLoading.value = false
   }
 }
 
 const openInspector = async (row, tab = 'steps') => {
+  const request = ++inspectorRequest
   try {
     const data = await api.get(`/executions/runs/${row.id}`)
+    if (request !== inspectorRequest) return
+    if (currentRun.value?.id !== data.id) {
+      logRequest += 1
+      artifactRequest += 1
+      logLoading.value = false
+      artifactLoading.value = false
+    }
     currentRun.value = data
     inspectorTab.value = tab
     logStream.value = 'stdout'
@@ -761,7 +783,7 @@ const openInspector = async (row, tab = 'steps') => {
     if (tab === 'logs') await fetchLogs(data.id)
     if (tab === 'artifacts') await fetchArtifacts(data.id)
   } catch (error) {
-    ElMessage.error(error.message)
+    if (request === inspectorRequest) ElMessage.error(error.message)
   }
 }
 

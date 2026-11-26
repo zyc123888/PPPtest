@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import redis
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -874,18 +874,14 @@ def create_plan_run_with_cases(
 
 
 def mark_run_started(db: Session, run: TestRun) -> bool:
-    try:
-        db.refresh(run)
-    except Exception:
-        pass
-    if run.status == "CANCELLED":
-        return False
-    run.status = "RUNNING"
-    run.summary = "任务执行中"
-    run.started_at = utc_now_naive()
+    result = db.execute(
+        update(TestRun)
+        .where(TestRun.id == run.id, TestRun.status == "PENDING")
+        .values(status="RUNNING", summary="任务执行中", started_at=utc_now_naive())
+    )
     db.commit()
     db.refresh(run)
-    return True
+    return result.rowcount == 1
 
 
 def finalize_run(

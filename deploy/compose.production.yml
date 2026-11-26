@@ -103,7 +103,7 @@ services:
   worker:
     <<: *service-defaults
     image: "${IMAGE_PREFIX}-worker:${IMAGE_TAG:-latest}"
-    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=solo -Q execution,celery -n execution@%h'
+    command: sh -c 'umask 0002 && exec celery -A app.core.celery_app.celery_app worker -l info --pool=prefork --concurrency=1 --max-tasks-per-child=50 -Q execution,celery -n execution@%h'
     environment:
       <<: *app-environment
       MIDSCENE_NODE_BIN: /usr/local/bin/node

@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.execution_runtime import UnsafeTargetURLError, validate_outbound_url
 from app.models import Environment, Project, ProjectNotificationSetting, TestPlan, TestPlanRun
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,11 @@ def send_webhook_message(setting: ProjectNotificationSetting, text: str) -> bool
     url = (setting.webhook_url or "").strip()
     if not url:
         return False
+    try:
+        validate_outbound_url(url)
+    except UnsafeTargetURLError as exc:
+        logger.warning("通知 Webhook 地址被安全策略拦截：%s", exc)
+        return False
     channel = (setting.channel_type or "CUSTOM").upper()
     if channel == "FEISHU":
         payload = {"msg_type": "text", "content": {"text": text}}
@@ -81,8 +87,8 @@ def send_webhook_message(setting: ProjectNotificationSetting, text: str) -> bool
     else:  # CUSTOM
         payload = {"source": "test-platform", "event": "plan_run_finished", "text": text}
     try:
-        response = httpx.post(url, json=payload, timeout=NOTIFY_TIMEOUT_SECONDS)
-        if response.status_code >= 400:
+        response = httpx.post(url, json=payload, timeout=NOTIFY_TIMEOUT_SECONDS, follow_redirects=False)
+        if not 200 <= response.status_code < 300:
             logger.warning("通知发送失败：HTTP %s %s", response.status_code, response.text[:200])
             return False
         return True

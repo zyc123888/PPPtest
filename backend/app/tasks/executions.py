@@ -23,7 +23,7 @@ import httpx
 from fastapi.testclient import TestClient
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -235,7 +235,11 @@ def _execute_case_with_retries(db: Session, run: TestRun, execute_once) -> dict:
         run.retry_count = base_retry_count + attempt_index
         db.commit()
         db.refresh(run)
-        if not _retryable_status(last_result["status"]) or attempt_index >= max_retries:
+        if (
+            not _retryable_status(last_result["status"])
+            or last_result.get("error_type") == "CONFIG"
+            or attempt_index >= max_retries
+        ):
             if attempt_index > 0:
                 last_result["summary"] = _append_retry_trace(last_result["summary"], attempts)
             return last_result
@@ -554,7 +558,7 @@ def _api_case_result(
 
 def _execute_api_case_httpx(
     db: Session, run: TestRun, case: APICase, project: Project, deadline: float | None = None,
-    extra_variables: dict | None = None,
+    extra_variables: dict | None = None, artifact_prefix: str = "",
 ) -> dict:
     environment = _resolve_environment(db, project, run.environment_id)
     variables = build_variable_context(project, environment, extra_variables)
@@ -595,6 +599,7 @@ def _execute_api_case_httpx(
         extracted=extracted,
         extractor_results=extractor_results,
         stdout_text=f"HTTP {prepared.method} {prepared.url}\nstatus={response.status_code} duration={duration_ms}ms",
+        artifact_prefix=artifact_prefix,
     )
 
 
@@ -823,24 +828,6 @@ def _execute_api_scenario(
         step_no = index + 1
         step_name = str(step.get("name") or f"步骤 {step_no}")
         prefix = f"step_{step_no:02d}_"
-        try:
-            db.refresh(run)
-        except Exception:
-            pass
-        if run.status == "CANCELLED":
-            step_results.append({"name": step_name, "status": "SKIPPED", "detail": "任务已取消"})
-            return {
-                "status": "CANCELLED",
-                "summary": "场景执行已取消",
-                "error_type": "CANCELLED",
-                "exit_code": 130,
-                "stdout_text": "\n".join(stdout_lines),
-                "stderr_text": "场景执行已取消",
-                "artifacts_json": artifacts,
-                "request_payload": {"scenario_steps": len(steps)},
-                "response_payload": {"extracted_variables": extracted_all},
-                "step_results_json": step_results,
-            }
         if failed_at is not None:
             step_results.append({"name": step_name, "status": "SKIPPED", "detail": "前置步骤失败，已跳过"})
             continue
@@ -966,7 +953,7 @@ def _execute_api_scenario(
     }
 
 
-def _normalize_datasets(datasets_json) -> list[dict]:
+def normalize_datasets(datasets_json) -> list[dict]:
     """规范化数据驱动数据集：仅保留 dict 行（每行为一组变量覆盖）。"""
     if not isinstance(datasets_json, list):
         return []
@@ -999,7 +986,10 @@ def _execute_api_case_data_driven(
         row_name = str(row.get("__name__") or f"数据组 {iter_no}")
         extra = {key: value for key, value in row.items() if key != "__name__"}
         try:
-            result = _execute_api_case_httpx(db, run, case, project, deadline=deadline, extra_variables=extra)
+            result = _execute_api_case_httpx(
+                db, run, case, project, deadline=deadline, extra_variables=extra,
+                artifact_prefix=f"iter_{iter_no:02d}_",
+            )
         except MissingTemplateVariableError as exc:
             iteration_results.append({"name": row_name, "status": "FAILED", "detail": str(exc)})
             stdout_lines.append(f"[iter {iter_no}] {row_name}: 变量缺失 {exc}")
@@ -1037,7 +1027,7 @@ def _execute_api_case(
 ) -> dict:
     if case.steps_json:
         return _execute_api_scenario(db, run, case, project, deadline=deadline)
-    datasets = _normalize_datasets(getattr(case, "datasets_json", None))
+    datasets = normalize_datasets(getattr(case, "datasets_json", None))
     if datasets:
         return _execute_api_case_data_driven(db, run, case, project, datasets, deadline=deadline)
     engine = (settings.execution_engine or "httpx").lower()
@@ -1254,12 +1244,13 @@ def _execute_performance_case(
     )
     if threshold_errors:
         summary = f"{summary}；阈值未通过"
+    passed = not threshold_errors and (case.max_error_rate is not None or failure_count == 0)
     return {
-        "status": "SUCCESS" if not threshold_errors and failure_count == 0 else "FAILED",
+        "status": "SUCCESS" if passed else "FAILED",
         "summary": summary,
-        "error_type": None if not threshold_errors and failure_count == 0 else "ASSERTION",
-        "exit_code": 0 if not threshold_errors and failure_count == 0 else 1,
-        "stdout_text": json.dumps(response_payload, ensure_ascii=False, indent=2),
+        "error_type": None if passed else "ASSERTION",
+        "exit_code": 0 if passed else 1,
+        "stdout_text": summary,
         "stderr_text": "\n".join(threshold_errors),
         "artifacts_json": artifacts,
         "request_payload": request_payload,
@@ -2210,7 +2201,7 @@ def run_api_case(run_id: int) -> dict:
             return {"status": "FAILED", "summary": "关联记录不存在"}
 
         if not mark_run_started(db, run):
-            return {"status": "CANCELLED", "summary": "执行已取消"}
+            return {"status": run.status, "summary": run.summary}
         result = _execute_case_with_retries(
             db, run, lambda deadline: _execute_api_case(db, run, case, project, deadline=deadline)
         )
@@ -2268,7 +2259,7 @@ def run_ui_case(run_id: int) -> dict:
             return {"status": "FAILED", "summary": "UI 用例不存在"}
 
         if not mark_run_started(db, run):
-            return {"status": "CANCELLED", "summary": "执行已取消"}
+            return {"status": run.status, "summary": run.summary}
         project = db.get(Project, run.project_id)
         if project is None:
             finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
@@ -2330,7 +2321,7 @@ def run_performance_case(run_id: int) -> dict:
             return {"status": "FAILED", "summary": "性能用例不存在"}
 
         if not mark_run_started(db, run):
-            return {"status": "CANCELLED", "summary": "执行已取消"}
+            return {"status": run.status, "summary": run.summary}
         project = db.get(Project, run.project_id)
         if project is None:
             finalize_run(db, run, status="FAILED", summary="关联项目不存在", error_type="SYSTEM")
@@ -2356,6 +2347,7 @@ def run_performance_case(run_id: int) -> dict:
         )
         return {"status": result["status"], "summary": result["summary"]}
     except Exception as exc:
+        db.rollback()
         run = db.get(TestRun, run_id)
         if run is not None:
             artifacts, step_results = _normalize_exception_artifacts(run.id, exc)
@@ -2440,11 +2432,18 @@ def run_test_plan(plan_run_id: int, concurrency: int = 1) -> dict:
             return {"status": "FAILED", "summary": f"测试计划执行 {plan_run_id} 不存在"}
 
         effective_concurrency = max(1, min(int(concurrency or 1), 5))
-        plan_run.status = "RUNNING"
-        plan_run.summary = f"测试计划执行中（并发度 {effective_concurrency}）" if effective_concurrency > 1 else "测试计划执行中"
-        plan_run.started_at = utc_now_naive()
+        claim = db.execute(
+            update(TestPlanRun)
+            .where(TestPlanRun.id == plan_run_id, TestPlanRun.status == "PENDING")
+            .values(
+                status="RUNNING", started_at=utc_now_naive(),
+                summary=f"测试计划执行中（并发度 {effective_concurrency}）" if effective_concurrency > 1 else "测试计划执行中",
+            )
+        )
         db.commit()
         db.refresh(plan_run)
+        if claim.rowcount != 1:
+            return {"status": plan_run.status, "summary": plan_run.summary}
 
         all_runs = db.query(TestRun).filter(TestRun.plan_run_id == plan_run.id).order_by(TestRun.id.asc()).all()
         runs = list(all_runs)
@@ -2655,7 +2654,25 @@ def scan_scheduled_plans() -> dict:
             plan.last_triggered_at = now
             plan.next_run_at = next_run_at
             db.commit()
-            run_test_plan.delay(plan_run.id)
+            try:
+                run_test_plan.delay(plan_run.id)
+            except Exception:
+                # Only fail executions that the worker has not already claimed.
+                finished_at = utc_now_naive()
+                result = db.execute(
+                    update(TestPlanRun)
+                    .where(TestPlanRun.id == plan_run.id, TestPlanRun.status == "PENDING")
+                    .values(status="FAILED", summary="定时测试计划派发失败", error_type="SYSTEM", finished_at=finished_at)
+                )
+                if result.rowcount:
+                    db.execute(
+                        update(TestRun)
+                        .where(TestRun.plan_run_id == plan_run.id, TestRun.status == "PENDING")
+                        .values(status="FAILED", summary="定时测试计划派发失败", error_type="SYSTEM", finished_at=finished_at)
+                    )
+                db.commit()
+                skipped.append(plan.id)
+                continue
             triggered.append(plan.id)
         return {"triggered": triggered, "skipped": skipped}
     finally:
@@ -2722,11 +2739,15 @@ def run_ui_batch(batch_run_id: int) -> dict:
         if batch_run is None:
             return {"status": "FAILED", "summary": f"批量执行 {batch_run_id} 不存在"}
 
-        batch_run.status = "RUNNING"
-        batch_run.summary = "批量执行中"
-        batch_run.started_at = utc_now_naive()
+        claim = db.execute(
+            update(UIBatchRun)
+            .where(UIBatchRun.id == batch_run_id, UIBatchRun.status == "PENDING")
+            .values(status="RUNNING", summary="批量执行中", started_at=utc_now_naive())
+        )
         db.commit()
         db.refresh(batch_run)
+        if claim.rowcount != 1:
+            return {"status": batch_run.status, "summary": batch_run.summary}
 
         runs = db.query(TestRun).filter(TestRun.batch_run_id == batch_run.id).order_by(TestRun.id.asc()).all()
         total = len(runs)

@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    BrandLogo: typeof import('./src/components/BrandLogo.vue')['default']
     CaseGenerationModeBadge: typeof import('./src/components/CaseGenerationModeBadge.vue')['default']
     CommandPalette: typeof import('./src/components/CommandPalette.vue')['default']
     ElAlert: typeof import('element-plus/es')['ElAlert']
